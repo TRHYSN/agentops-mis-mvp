@@ -3789,13 +3789,15 @@ export function AIEmployees() {
     }
   };
 
-  const revokeEnrollment = async (tokenId?: string, agentId?: string) => {
-    const actionRef = tokenId || agentId || "enrollment";
+  const revokeEnrollment = async (tokenRef?: string, tokenId?: string) => {
+    const actionRef = tokenRef || tokenId || "enrollment";
     setEnrollmentAction(`revoke-${actionRef}`);
     setEnrollmentResult(null);
     clearIssuedCredential();
     try {
-      const result = await revokeAgentGatewayEnrollment(tokenId ? { token_id: tokenId } : { agent_id: agentId });
+      const result = await revokeAgentGatewayEnrollment(
+        tokenRef ? { token_ref: tokenRef } : { token_id: tokenId },
+      );
       const sessionNote = result.sessions_revoked ? ` · sessions ${result.sessions_revoked}` : "";
       setEnrollmentResult(`revoked: ${result.tokens.join(", ") || result.revoked}${sessionNote}`);
       await refresh();
@@ -3806,13 +3808,15 @@ export function AIEmployees() {
     }
   };
 
-  const revokeSession = async (sessionId?: string, agentId?: string) => {
-    const actionRef = sessionId || agentId || "session";
+  const revokeSession = async (sessionRef?: string, sessionId?: string) => {
+    const actionRef = sessionRef || sessionId || "session";
     setEnrollmentAction(`revoke-session-${actionRef}`);
     setEnrollmentResult(null);
     clearIssuedCredential();
     try {
-      const result = await revokeAgentGatewaySession(sessionId ? { session_id: sessionId } : { agent_id: agentId });
+      const result = await revokeAgentGatewaySession(
+        sessionRef ? { session_ref: sessionRef } : { session_id: sessionId },
+      );
       setEnrollmentResult(`session revoked: ${result.sessions.join(", ") || result.revoked}`);
       await refresh();
     } catch (err) {
@@ -3822,15 +3826,15 @@ export function AIEmployees() {
     }
   };
 
-  const rotateEnrollment = async (tokenId?: string, agentId?: string) => {
-    const actionRef = tokenId || agentId || "enrollment";
+  const rotateEnrollment = async (tokenRef?: string, tokenId?: string) => {
+    const actionRef = tokenRef || tokenId || "enrollment";
     setEnrollmentAction(`rotate-${actionRef}`);
     setEnrollmentResult(null);
     clearIssuedCredential();
     try {
       const result = await rotateAgentGatewayEnrollment({
+        token_ref: tokenRef,
         token_id: tokenId,
-        agent_id: agentId,
         ttl_days: Number(enrollmentForm.ttl_days) || 30,
         heartbeat_timeout_sec: Number(enrollmentForm.heartbeat_timeout_sec) || 300,
       });
@@ -9535,7 +9539,7 @@ export function AIEmployees() {
               </div>
             )}
             {enrollments.slice(0, 6).map((item) => {
-              const tokenActionRef = item.token_id || item.agent_id;
+              const tokenActionRef = item.token_ref || item.token_id;
               const tokenDisplayRef = item.token_ref || item.token_id || "—";
               return (
               <div key={item.token_ref || item.token_id || `${item.agent_id}-${item.created_at}`} className="grid grid-cols-1 xl:grid-cols-[1.2fr_1.1fr_0.9fr_1.3fr_auto] gap-3 items-start xl:items-center rounded-lg px-3 py-2" style={{ background: "var(--mis-surface2)", border: "1px solid var(--mis-border)" }}>
@@ -9564,8 +9568,8 @@ export function AIEmployees() {
                 </div>
                 <div className="flex flex-wrap gap-1.5 justify-start xl:justify-end">
                   <button
-                    onClick={() => rotateEnrollment(item.token_id, item.agent_id)}
-                    disabled={item.status !== "active" || Boolean(enrollmentAction)}
+                    onClick={() => rotateEnrollment(item.token_ref, item.token_id)}
+                    disabled={item.status !== "active" || !tokenActionRef || Boolean(enrollmentAction)}
                     className="flex items-center gap-1 text-[11px] px-2.5 py-1.5 rounded disabled:opacity-40"
                     style={{ background: "rgba(34,211,238,0.1)", color: "var(--mis-cyan)", border: "1px solid rgba(34,211,238,0.22)" }}
                   >
@@ -9573,8 +9577,8 @@ export function AIEmployees() {
                     {enrollmentAction === `rotate-${tokenActionRef}` ? copy.rotatingToken : copy.rotateToken}
                   </button>
                   <button
-                    onClick={() => revokeEnrollment(item.token_id, item.agent_id)}
-                    disabled={item.status !== "active" || Boolean(enrollmentAction)}
+                    onClick={() => revokeEnrollment(item.token_ref, item.token_id)}
+                    disabled={item.status !== "active" || !tokenActionRef || Boolean(enrollmentAction)}
                     className="flex items-center gap-1 text-[11px] px-2.5 py-1.5 rounded disabled:opacity-40"
                     style={{ background: "rgba(248,113,113,0.1)", color: "#F87171", border: "1px solid rgba(248,113,113,0.22)" }}
                   >
@@ -9597,7 +9601,7 @@ export function AIEmployees() {
               </div>
             )}
             {sessions.slice(0, 6).map((item) => {
-              const sessionActionRef = item.session_id || item.agent_id;
+              const sessionActionRef = item.session_ref || item.session_id;
               const sessionDisplayRef = item.session_ref || item.session_id || "—";
               return (
               <div key={item.session_ref || item.session_id || `${item.agent_id}-${item.created_at}`} className="grid grid-cols-1 xl:grid-cols-[1.1fr_1fr_1.1fr_1.3fr_auto] gap-3 items-start xl:items-center rounded-lg px-3 py-2" style={{ background: "var(--mis-surface2)", border: "1px solid var(--mis-border)" }}>
@@ -9631,8 +9635,8 @@ export function AIEmployees() {
                 </div>
                 <div className="flex justify-start xl:justify-end">
                   <button
-                    onClick={() => revokeSession(item.session_id, item.agent_id)}
-                    disabled={item.session_state !== "active" || Boolean(enrollmentAction)}
+                    onClick={() => revokeSession(item.session_ref, item.session_id)}
+                    disabled={item.session_state !== "active" || !sessionActionRef || Boolean(enrollmentAction)}
                     className="flex items-center gap-1 text-[11px] px-2.5 py-1.5 rounded disabled:opacity-40"
                     style={{ background: "rgba(248,113,113,0.1)", color: "#F87171", border: "1px solid rgba(248,113,113,0.22)" }}
                   >

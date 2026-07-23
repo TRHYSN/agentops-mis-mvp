@@ -9356,7 +9356,11 @@ export async function issueApprovedAgentGatewayEnrollment(input: {
   );
 }
 
-export async function revokeAgentGatewayEnrollment(input: { token_id?: string; agent_id?: string }): Promise<AgentGatewayEnrollmentRevokeResult> {
+export async function revokeAgentGatewayEnrollment(input: {
+  token_ref?: string;
+  token_id?: string;
+  agent_id?: string;
+}): Promise<AgentGatewayEnrollmentRevokeResult> {
   return humanMutationJson<AgentGatewayEnrollmentRevokeResult>(
     "/agent-gateway/enrollment/revoke",
     input,
@@ -9364,7 +9368,11 @@ export async function revokeAgentGatewayEnrollment(input: { token_id?: string; a
   );
 }
 
-export async function revokeAgentGatewaySession(input: { session_id?: string; agent_id?: string }): Promise<AgentGatewaySessionRevokeResult> {
+export async function revokeAgentGatewaySession(input: {
+  session_ref?: string;
+  session_id?: string;
+  agent_id?: string;
+}): Promise<AgentGatewaySessionRevokeResult> {
   return humanMutationJson<AgentGatewaySessionRevokeResult>(
     "/agent-gateway/session/revoke",
     input,
@@ -9373,6 +9381,7 @@ export async function revokeAgentGatewaySession(input: { session_id?: string; ag
 }
 
 export async function rotateAgentGatewayEnrollment(input: {
+  token_ref?: string;
   token_id?: string;
   agent_id?: string;
   scopes?: string[];

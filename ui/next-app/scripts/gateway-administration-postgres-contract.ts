@@ -132,6 +132,23 @@ async function expectCode(
   ));
 }
 
+async function within<T>(work: Promise<T>, timeoutMs: number) {
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      work,
+      new Promise<never>((_, reject) => {
+        timeout = setTimeout(
+          () => reject(new Error(`contract_timeout_after_${timeoutMs}ms`)),
+          timeoutMs,
+        );
+      }),
+    ]);
+  } finally {
+    if (timeout) clearTimeout(timeout);
+  }
+}
+
 async function seedHuman(
   client: Client,
   userId: string,
@@ -180,7 +197,11 @@ async function seedHuman(
   );
 }
 
-async function seedEntitlement(client: Client) {
+async function seedEntitlement(
+  client: Client,
+  workspaceId = WORKSPACE,
+  updatedByUserId = "usr_admin_owner",
+) {
   const now = new Date();
   await client.query(
     `INSERT INTO workspace_entitlements(
@@ -189,9 +210,9 @@ async function seedEntitlement(client: Client) {
       max_monthly_cost_usd,effective_at,expires_at,created_at,updated_at,
       updated_by_user_id
     ) VALUES($1,'team_governance','active',$2::jsonb,1,1,1,100,100,
-      $3,$4,$3,$3,'usr_admin_owner')`,
+      $3,$4,$3,$3,$5)`,
     [
-      WORKSPACE,
+      workspaceId,
       JSON.stringify({
         enrollment_issue: true,
         session_issue: true,
@@ -199,6 +220,7 @@ async function seedEntitlement(client: Client) {
       }),
       new Date(now.getTime() - 60_000).toISOString(),
       new Date(now.getTime() + 24 * 60 * 60 * 1000).toISOString(),
+      updatedByUserId,
     ],
   );
 }
@@ -237,7 +259,7 @@ function createBody() {
 
 function assertSafe(value: unknown, issuedTokens: string[] = []) {
   const serialized = JSON.stringify(value);
-  for (const token of issuedTokens) {
+  for (const token of issuedTokens.filter(Boolean)) {
     assert.doesNotMatch(serialized, new RegExp(token, "g"));
   }
   assert.doesNotMatch(serialized, new RegExp(SECRET_CANARY, "g"));
@@ -341,6 +363,11 @@ async function run() {
       );
     }
     await seedEntitlement(admin);
+    await seedEntitlement(
+      admin,
+      FOREIGN_WORKSPACE,
+      "usr_admin_foreign",
+    );
     const owner = await login("admin-owner");
     const reviewer = await login("admin-reviewer");
     const foreign = await login("admin-foreign");
@@ -433,11 +460,34 @@ async function run() {
       [WORKSPACE],
     );
     assert.equal(firstTokenCount.rows[0].count, "1");
+    await expectCode(
+      "enrollment_idempotency_conflict",
+      () => createGatewayEnrollment(humanRequest(
+        "POST",
+        "/api/mis/agent-gateway/enrollment/create",
+        owner,
+        {
+          ...createBody(),
+          label: "same key with a different binding",
+        },
+        { idempotencyKey: "admin-create-concurrent-0001" },
+      )),
+    );
 
+    await expectCode(
+      "human_admin_role_forbidden",
+      () => listGatewayEnrollments(humanRequest(
+        "GET",
+        `/api/mis/agent-gateway/enrollments?workspace_id=${WORKSPACE}`,
+        reviewer,
+        undefined,
+        { csrf: false },
+      )),
+    );
     const enrollmentList = await listGatewayEnrollments(humanRequest(
       "GET",
       `/api/mis/agent-gateway/enrollments?workspace_id=${WORKSPACE}`,
-      reviewer,
+      owner,
       undefined,
       { csrf: false },
     ));
@@ -447,6 +497,7 @@ async function run() {
     >;
     assert.equal(enrollments.length, 1);
     assert.equal(enrollments[0].agent_id, "agt_admin_contract");
+    assert.match(String(enrollments[0].token_ref), /^token_ref_[a-f0-9]{16}$/);
     assert.equal(Object.hasOwn(enrollments[0], "token_id"), false);
     assert.equal(Object.hasOwn(enrollments[0], "token_hash"), false);
     assertSafe(enrollmentList.body, [firstToken]);
@@ -482,7 +533,10 @@ async function run() {
       "POST",
       "/api/mis/agent-gateway/enrollment/revoke",
       owner,
-      { workspace_id: WORKSPACE, token_id: firstTokenId },
+      {
+        workspace_id: WORKSPACE,
+        token_ref: String(enrollments[0].token_ref),
+      },
     ));
     assert.equal(revoked.body.revoked, 1);
     assert.equal(revoked.body.sessions_revoked, 1);
@@ -516,6 +570,8 @@ async function run() {
       { idempotencyKey: "admin-rotation-base-0001" },
     ));
     const rotationBaseToken = String(rotationBase.body.token);
+    const rotationBaseRef = String(rotationBase.body.token_ref);
+    assert.match(rotationBaseRef, /^token_ref_[a-f0-9]{16}$/);
     const rotationAttempts = await Promise.all(
       Array.from({ length: 8 }, () =>
         rotateGatewayEnrollment(humanRequest(
@@ -524,7 +580,7 @@ async function run() {
           owner,
           {
             workspace_id: WORKSPACE,
-            agent_id: "agt_admin_contract",
+            token_ref: rotationBaseRef,
             scopes: ["agents:heartbeat", "tasks:read"],
             label: "rotation replacement",
           },
@@ -552,6 +608,22 @@ async function run() {
     assert.equal(activeTokens.rowCount, 1);
     assert.equal(activeTokens.rows[0].token_hash, sha(rotatedToken));
     assert.notEqual(rotatedToken, rotationBaseToken);
+    await expectCode(
+      "enrollment_idempotency_conflict",
+      () => rotateGatewayEnrollment(humanRequest(
+        "POST",
+        "/api/mis/agent-gateway/enrollment/rotate",
+        owner,
+        {
+          workspace_id: WORKSPACE,
+          token_ref: rotationBaseRef,
+          scopes: ["agents:heartbeat", "tasks:read"],
+          heartbeat_timeout_sec: 301,
+          label: "rotation replacement",
+        },
+        { idempotencyKey: "admin-rotate-concurrent-0001" },
+      )),
+    );
 
     const directSession = await createGatewaySession(agentRequest(
       "POST",
@@ -566,12 +638,24 @@ async function run() {
       },
     ));
     const directSessionToken = String(directSession.body.session_token);
-    const directSessionId = String(directSession.body.session_id);
+    const activeSessionList = await listGatewaySessions(humanRequest(
+      "GET",
+      `/api/mis/agent-gateway/sessions?workspace_id=${WORKSPACE}&status=active`,
+      owner,
+      undefined,
+      { csrf: false },
+    ));
+    const activeSessionRows = activeSessionList.body.sessions as Array<
+      Record<string, unknown>
+    >;
+    assert.equal(activeSessionRows.length, 1);
+    const directSessionRef = String(activeSessionRows[0].session_ref);
+    assert.match(directSessionRef, /^session_ref_[a-f0-9]{16}$/);
     const sessionRevoked = await revokeGatewaySession(humanRequest(
       "POST",
       "/api/mis/agent-gateway/session/revoke",
       owner,
-      { workspace_id: WORKSPACE, session_id: directSessionId },
+      { workspace_id: WORKSPACE, session_ref: directSessionRef },
     ));
     assert.equal(sessionRevoked.body.revoked, 1);
     assert.equal(Object.hasOwn(sessionRevoked.body, "session_id"), false);
@@ -583,6 +667,50 @@ async function run() {
         directSessionToken,
       )),
     );
+
+    const rotatedTokenRef = String(rotated[0].body.token_ref);
+    const lockOrderRace = await within(
+      Promise.allSettled([
+        rotateGatewayEnrollment(humanRequest(
+          "POST",
+          "/api/mis/agent-gateway/enrollment/rotate",
+          owner,
+          {
+            workspace_id: WORKSPACE,
+            token_ref: rotatedTokenRef,
+            label: "lock order replacement",
+          },
+          { idempotencyKey: "admin-lock-order-rotate-0001" },
+        )),
+        createGatewaySession(agentRequest(
+          "POST",
+          "/api/mis/agent-gateway/session/create",
+          rotatedToken,
+          {
+            workspace_id: WORKSPACE,
+            agent_id: "agt_admin_contract",
+            scopes: ["tasks:read"],
+            ttl_sec: 900,
+            request_id: "admin-lock-order-session-0001",
+          },
+        )),
+      ]),
+      10_000,
+    );
+    const lockOrderRotation = lockOrderRace[0];
+    assert.equal(lockOrderRotation.status, "fulfilled");
+    assert.equal(lockOrderRotation.value.status, 201);
+    const lockOrderRotatedToken = String(lockOrderRotation.value.body.token);
+    const lockOrderSession = lockOrderRace[1];
+    const lockOrderSessionToken = lockOrderSession.status === "fulfilled"
+      ? String(lockOrderSession.value.body.session_token)
+      : "";
+    if (lockOrderSession.status === "rejected") {
+      assert(
+        lockOrderSession.reason instanceof ControlPlaneHttpError
+        && lockOrderSession.reason.code === "unauthorized",
+      );
+    }
 
     const activeRevokeBeforeRace = await revokeGatewayEnrollment(humanRequest(
       "POST",
@@ -625,6 +753,79 @@ async function run() {
     const multiAdminWinnerToken = String(multiAdminWinners[0].body.token);
 
     await admin.query(
+      `UPDATE workspace_entitlements
+      SET max_agents=2,max_active_enrollments=2,updated_at=clock_timestamp()
+      WHERE workspace_id=$1`,
+      [WORKSPACE],
+    );
+    const crossWorkspaceAttempts = await within(
+      Promise.allSettled([
+        createGatewayEnrollment(humanRequest(
+          "POST",
+          "/api/mis/agent-gateway/enrollment/create",
+          owner,
+          {
+            ...createBody(),
+            agent_id: "agt_admin_cross_workspace_race",
+            label: "cross workspace race",
+          },
+          { idempotencyKey: "admin-cross-workspace-race-0001" },
+        )),
+        createGatewayEnrollment(humanRequest(
+          "POST",
+          "/api/mis/agent-gateway/enrollment/create",
+          foreign,
+          {
+            ...createBody(),
+            workspace_id: FOREIGN_WORKSPACE,
+            agent_id: "agt_admin_cross_workspace_race",
+            label: "cross workspace race",
+          },
+          {
+            idempotencyKey: "admin-cross-workspace-race-0001",
+            workspaceId: FOREIGN_WORKSPACE,
+          },
+        )),
+      ]),
+      10_000,
+    );
+    const crossWorkspaceWinners = crossWorkspaceAttempts.filter(
+      (result): result is PromiseFulfilledResult<
+        Awaited<ReturnType<typeof createGatewayEnrollment>>
+      > => result.status === "fulfilled",
+    );
+    const crossWorkspaceLosers = crossWorkspaceAttempts.filter(
+      (result): result is PromiseRejectedResult => result.status === "rejected",
+    );
+    assert.equal(crossWorkspaceWinners.length, 1);
+    assert.equal(crossWorkspaceLosers.length, 1);
+    assert(
+      crossWorkspaceLosers[0].reason instanceof ControlPlaneHttpError
+      && crossWorkspaceLosers[0].reason.code === "agent_workspace_binding_conflict",
+    );
+    const crossWorkspaceWinner = crossWorkspaceWinners[0].value;
+    const crossWorkspaceToken = String(crossWorkspaceWinner.body.token);
+    const crossWorkspaceId = String(crossWorkspaceWinner.body.workspace_id);
+    const crossWorkspaceOwner = crossWorkspaceId === WORKSPACE ? owner : foreign;
+    const crossWorkspaceRevoke = await revokeGatewayEnrollment(humanRequest(
+      "POST",
+      "/api/mis/agent-gateway/enrollment/revoke",
+      crossWorkspaceOwner,
+      {
+        workspace_id: crossWorkspaceId,
+        token_ref: String(crossWorkspaceWinner.body.token_ref),
+      },
+      { workspaceId: crossWorkspaceId },
+    ));
+    assert.equal(crossWorkspaceRevoke.body.revoked, 1);
+    await admin.query(
+      `UPDATE workspace_entitlements
+      SET max_agents=1,max_active_enrollments=1,updated_at=clock_timestamp()
+      WHERE workspace_id=$1`,
+      [WORKSPACE],
+    );
+
+    await admin.query(
       `UPDATE workspace_entitlements SET status='suspended',updated_at=clock_timestamp()
       WHERE workspace_id=$1`,
       [WORKSPACE],
@@ -648,6 +849,20 @@ async function run() {
     );
     assert.equal(entitlementDenied.body.credential_generated, false);
     assert.equal(Object.hasOwn(entitlementDenied.body, "token"), false);
+    await expectCode(
+      "enrollment_idempotency_conflict",
+      () => createGatewayEnrollment(humanRequest(
+        "POST",
+        "/api/mis/agent-gateway/enrollment/create",
+        owner,
+        {
+          ...createBody(),
+          agent_id: "agt_admin_entitlement_denied",
+          label: "changed after the denied request",
+        },
+        { idempotencyKey: "admin-entitlement-denied-0001" },
+      )),
+    );
     const revokeWhileSuspended = await revokeGatewayEnrollment(humanRequest(
       "POST",
       "/api/mis/agent-gateway/enrollment/revoke",
@@ -678,8 +893,8 @@ async function run() {
       metadata_json: string;
     }>(
       `SELECT entity_id,metadata_json FROM audit_logs
-      WHERE workspace_id=$1`,
-      [WORKSPACE],
+      WHERE workspace_id=ANY($1::text[])`,
+      [[WORKSPACE, FOREIGN_WORKSPACE]],
     );
     assertSafe(auditRows.rows, [
       firstToken,
@@ -687,7 +902,10 @@ async function run() {
       rotationBaseToken,
       rotatedToken,
       directSessionToken,
+      lockOrderRotatedToken,
+      lockOrderSessionToken,
       multiAdminWinnerToken,
+      crossWorkspaceToken,
     ]);
     assert(auditRows.rows.every((row) => !row.entity_id.startsWith("agt_")));
     const runtimeRows = await admin.query<{
@@ -696,8 +914,8 @@ async function run() {
       raw_payload_hash: string | null;
     }>(
       `SELECT input_summary,output_summary,raw_payload_hash
-      FROM runtime_events WHERE workspace_id=$1`,
-      [WORKSPACE],
+      FROM runtime_events WHERE workspace_id=ANY($1::text[])`,
+      [[WORKSPACE, FOREIGN_WORKSPACE]],
     );
     assertSafe(runtimeRows.rows, [
       firstToken,
@@ -705,7 +923,10 @@ async function run() {
       rotationBaseToken,
       rotatedToken,
       directSessionToken,
+      lockOrderRotatedToken,
+      lockOrderSessionToken,
       multiAdminWinnerToken,
+      crossWorkspaceToken,
     ]);
     assert.equal(fetchCalls, 0);
     await assertStaticOwnership();
@@ -727,6 +948,10 @@ async function run() {
       one_time_rotation_responses: rotated.length,
       rotation_at_enrollment_quota_is_net_zero: true,
       multi_admin_quota_race_single_winner: true,
+      cross_workspace_agent_binding_race_single_winner: true,
+      token_before_workspace_lock_order: true,
+      full_request_idempotency_binding: true,
+      opaque_ref_row_actions: true,
       child_session_revoke_cascade: true,
       direct_session_revoke: true,
       entitlement_fail_closed_and_audited: true,

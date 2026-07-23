@@ -33,19 +33,26 @@ const CREATE_FIELDS = new Set([
   "ttl_days",
   "workspace_id",
 ]);
-const REVOKE_FIELDS = new Set(["agent_id", "token_id", "workspace_id"]);
+const REVOKE_FIELDS = new Set([
+  "agent_id",
+  "token_id",
+  "token_ref",
+  "workspace_id",
+]);
 const ROTATE_FIELDS = new Set([
   "agent_id",
   "heartbeat_timeout_sec",
   "label",
   "scopes",
   "token_id",
+  "token_ref",
   "ttl_days",
   "workspace_id",
 ]);
 const SESSION_REVOKE_FIELDS = new Set([
   "agent_id",
   "session_id",
+  "session_ref",
   "workspace_id",
 ]);
 
@@ -100,6 +107,13 @@ type IssueInput = {
   ttlDays: number;
   heartbeatTimeoutSec: number;
   label: string;
+};
+
+type TokenRequestIdentity = {
+  idempotencyKeyHash: string;
+  requestBindingHash: string;
+  requestHash: string;
+  tokenId: string;
 };
 
 function rejectUnknownFields(
@@ -387,7 +401,7 @@ async function ensureEnrollmentAgent(
   input: IssueInput,
 ) {
   await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1,0))", [
-    `gateway-admin-agent:${identity.workspaceId}:${input.agentId}`,
+    `gateway-admin-agent:${input.agentId}`,
   ]);
   const foreignBinding = await client.query<{ workspace_id: string }>(
     `SELECT workspace_id FROM agent_gateway_tokens
@@ -472,24 +486,141 @@ function tokenSnapshot(row: TokenRow) {
   };
 }
 
+function issueRequestBinding(
+  input: IssueInput,
+  operation: "create" | "rotate",
+  replacingEnrollmentId?: string,
+) {
+  return {
+    operation,
+    agent_id: input.agentId,
+    name: input.name,
+    role: input.role,
+    runtime_type: input.runtimeType,
+    scopes: input.scopes,
+    ttl_days: input.ttlDays,
+    heartbeat_timeout_sec: input.heartbeatTimeoutSec,
+    label: input.label,
+    replacing_token_ref: replacingEnrollmentId
+      ? safeRef("token", replacingEnrollmentId)
+      : null,
+  };
+}
+
 function tokenRequestIdentity(
   identity: HumanSessionIdentity,
   requestKey: string,
   operation: "create" | "rotate",
-) {
-  const requestHash = stableHash({
+  requestBinding: unknown,
+): TokenRequestIdentity {
+  const idempotencyKeyHash = stableHash({
     workspace_id: identity.workspaceId,
     user_id: identity.userId,
     request_key: requestKey,
     operation,
   });
+  const requestBindingHash = stableHash(requestBinding);
+  const requestHash = stableHash({
+    idempotency_key_hash: idempotencyKeyHash,
+    request_binding_hash: requestBindingHash,
+  });
   return {
+    idempotencyKeyHash,
+    requestBindingHash,
     requestHash,
     tokenId: `agt_${createHash("sha256")
-      .update(`gateway-admin-token:${requestHash}`, "utf8")
+      .update(`gateway-admin-token:${idempotencyKeyHash}`, "utf8")
       .digest("hex")
       .slice(0, 32)}`,
   };
+}
+
+function auditMetadata(value: string) {
+  try {
+    const parsed: unknown = JSON.parse(value);
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+      ? parsed as Record<string, unknown>
+      : {};
+  } catch {
+    return {};
+  }
+}
+
+async function assertRequestBinding(
+  client: PoolClient,
+  identity: HumanSessionIdentity,
+  requestIdentity: TokenRequestIdentity,
+) {
+  const result = await client.query<{ metadata_json: string }>(
+    `SELECT metadata_json
+    FROM audit_logs
+    WHERE workspace_id=$1
+      AND actor_type='user'
+      AND actor_id=$2
+      AND metadata_json::jsonb ->> 'idempotency_key_hash'=$3
+    ORDER BY created_at DESC,audit_id DESC
+    LIMIT 1`,
+    [
+      identity.workspaceId,
+      identity.userId,
+      requestIdentity.idempotencyKeyHash,
+    ],
+  );
+  const row = result.rows[0];
+  if (!row) return false;
+  const metadata = auditMetadata(row.metadata_json);
+  if (
+    metadata.request_binding_hash !== requestIdentity.requestBindingHash
+  ) {
+    throw new ControlPlaneHttpError(
+      409,
+      "enrollment_idempotency_conflict",
+      "Idempotency-Key is already bound to another enrollment request.",
+    );
+  }
+  return true;
+}
+
+async function resolveActiveTokenRef(
+  client: PoolClient,
+  workspaceId: string,
+  tokenRef: string,
+) {
+  const rows = (await client.query<{ token_id: string }>(
+    `SELECT token_id FROM agent_gateway_tokens
+    WHERE workspace_id=$1 AND status='active'
+    ORDER BY token_id`,
+    [workspaceId],
+  )).rows.filter((row) => safeRef("token", row.token_id) === tokenRef);
+  if (rows.length > 1) {
+    throw new ControlPlaneHttpError(
+      409,
+      "enrollment_ref_ambiguous",
+      "Enrollment reference is ambiguous.",
+    );
+  }
+  return rows[0]?.token_id || null;
+}
+
+async function resolveActiveSessionRef(
+  client: PoolClient,
+  workspaceId: string,
+  sessionRef: string,
+) {
+  const rows = (await client.query<{ session_id: string }>(
+    `SELECT session_id FROM agent_gateway_sessions
+    WHERE workspace_id=$1 AND status='active'
+    ORDER BY session_id`,
+    [workspaceId],
+  )).rows.filter((row) => safeRef("session", row.session_id) === sessionRef);
+  if (rows.length > 1) {
+    throw new ControlPlaneHttpError(
+      409,
+      "session_ref_ambiguous",
+      "Session reference is ambiguous.",
+    );
+  }
+  return rows[0]?.session_id || null;
 }
 
 async function issueToken(
@@ -501,13 +632,25 @@ async function issueToken(
   options: Readonly<{
     replacingEnrollmentId?: string;
     entitlementDecision?: WorkspaceEntitlementDecision;
+    requestBinding?: unknown;
   }> = {},
 ) {
-  const { requestHash, tokenId } = tokenRequestIdentity(
+  const requestIdentity = tokenRequestIdentity(
     identity,
     requestKey,
     operation,
+    options.requestBinding ?? issueRequestBinding(
+      input,
+      operation,
+      options.replacingEnrollmentId,
+    ),
   );
+  const {
+    idempotencyKeyHash,
+    requestBindingHash,
+    requestHash,
+    tokenId,
+  } = requestIdentity;
   await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1,0))", [
     `gateway-admin-token:${tokenId}`,
   ]);
@@ -518,6 +661,11 @@ async function issueToken(
     FROM agent_gateway_tokens WHERE token_id=$1 FOR UPDATE`,
     [tokenId],
   )).rows[0];
+  const knownRequestBinding = await assertRequestBinding(
+    client,
+    identity,
+    requestIdentity,
+  );
   if (existing) {
     const sameBinding = existing.workspace_id === identity.workspaceId
       && existing.agent_id === input.agentId
@@ -525,7 +673,7 @@ async function issueToken(
       && existing.heartbeat_timeout_sec === input.heartbeatTimeoutSec
       && JSON.stringify(parseStoredScopes(existing.scopes_json))
         === JSON.stringify(input.scopes);
-    if (!sameBinding) {
+    if (!knownRequestBinding || !sameBinding) {
       throw new ControlPlaneHttpError(
         409,
         "enrollment_idempotency_conflict",
@@ -588,6 +736,8 @@ async function issueToken(
         credential_generated: false,
         token_omitted: true,
         raw_config_omitted: true,
+        idempotency_key_hash: idempotencyKeyHash,
+        request_binding_hash: requestBindingHash,
       },
       requestHash,
     });
@@ -661,7 +811,9 @@ async function issueToken(
     metadata: {
       session_ref: identity.sessionRef,
       membership_role: identity.membershipRole,
-      request_ref: safeRef("request", requestHash),
+      request_ref: safeRef("request", idempotencyKeyHash),
+      idempotency_key_hash: idempotencyKeyHash,
+      request_binding_hash: requestBindingHash,
       one_time_credential_response: true,
       token_hash_omitted: true,
       token_omitted: true,
@@ -756,6 +908,7 @@ export async function listGatewayEnrollments(
       request.headers,
       workspaceId,
     );
+    requireAdministrator(identity);
     const agentId = identifier(
       url.searchParams.get("agent_id"),
       "agent_id",
@@ -812,6 +965,7 @@ export async function listGatewaySessions(
       request.headers,
       workspaceId,
     );
+    requireAdministrator(identity);
     const agentId = identifier(
       url.searchParams.get("agent_id"),
       "agent_id",
@@ -903,12 +1057,13 @@ export async function revokeGatewayEnrollment(
   });
   rejectUnknownFields(body, REVOKE_FIELDS, "gateway_enrollment_revoke");
   const tokenId = identifier(body.token_id, "token_id", true);
+  const tokenRef = identifier(body.token_ref, "token_ref", true);
   const agentId = identifier(body.agent_id, "agent_id", true);
-  if ((!tokenId && !agentId) || (tokenId && agentId)) {
+  if ([tokenId, tokenRef, agentId].filter(Boolean).length !== 1) {
     throw new ControlPlaneHttpError(
       400,
       "enrollment_revoke_selector_required",
-      "Provide exactly one token_id or agent_id.",
+      "Provide exactly one token_ref, token_id, or agent_id.",
     );
   }
   return withPostgresTransaction(async (client) => {
@@ -918,8 +1073,16 @@ export async function revokeGatewayEnrollment(
       bodyWorkspace(body),
     );
     requireAdministrator(identity);
+    const resolvedTokenId = tokenId || (
+      tokenRef
+        ? await resolveActiveTokenRef(client, identity.workspaceId, tokenRef)
+        : null
+    );
+    const exactTokenId = tokenRef && !resolvedTokenId
+      ? "__agentops_no_matching_token__"
+      : resolvedTokenId;
     await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1,0))", [
-      `gateway-admin-revoke:${identity.workspaceId}:${tokenId || agentId}`,
+      `gateway-admin-revoke:${identity.workspaceId}:${tokenRef || tokenId || agentId}`,
     ]);
     const tokens = (await client.query<TokenRow>(
       `SELECT token_id,workspace_id,agent_id,scopes_json,status,label,
@@ -930,7 +1093,7 @@ export async function revokeGatewayEnrollment(
         AND ($2::text IS NULL OR token_id=$2)
         AND ($3::text IS NULL OR agent_id=$3)
       ORDER BY created_at,token_id FOR UPDATE`,
-      [identity.workspaceId, tokenId, agentId],
+      [identity.workspaceId, exactTokenId, agentId],
     )).rows;
     const sessions = await activeChildSessions(
       client,
@@ -1022,12 +1185,13 @@ export async function revokeGatewaySession(
   });
   rejectUnknownFields(body, SESSION_REVOKE_FIELDS, "gateway_session_revoke");
   const sessionId = identifier(body.session_id, "session_id", true);
+  const sessionRef = identifier(body.session_ref, "session_ref", true);
   const agentId = identifier(body.agent_id, "agent_id", true);
-  if ((!sessionId && !agentId) || (sessionId && agentId)) {
+  if ([sessionId, sessionRef, agentId].filter(Boolean).length !== 1) {
     throw new ControlPlaneHttpError(
       400,
       "session_revoke_selector_required",
-      "Provide exactly one session_id or agent_id.",
+      "Provide exactly one session_ref, session_id, or agent_id.",
     );
   }
   return withPostgresTransaction(async (client) => {
@@ -1037,8 +1201,16 @@ export async function revokeGatewaySession(
       bodyWorkspace(body),
     );
     requireAdministrator(identity);
+    const resolvedSessionId = sessionId || (
+      sessionRef
+        ? await resolveActiveSessionRef(client, identity.workspaceId, sessionRef)
+        : null
+    );
+    const exactSessionId = sessionRef && !resolvedSessionId
+      ? "__agentops_no_matching_session__"
+      : resolvedSessionId;
     await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1,0))", [
-      `gateway-admin-session-revoke:${identity.workspaceId}:${sessionId || agentId}`,
+      `gateway-admin-session-revoke:${identity.workspaceId}:${sessionRef || sessionId || agentId}`,
     ]);
     const rows = (await client.query<SessionRow>(
       `SELECT session_id,parent_token_id,workspace_id,agent_id,scopes_json,
@@ -1048,7 +1220,7 @@ export async function revokeGatewaySession(
         AND ($2::text IS NULL OR session_id=$2)
         AND ($3::text IS NULL OR agent_id=$3)
       ORDER BY created_at,session_id FOR UPDATE`,
-      [identity.workspaceId, sessionId, agentId],
+      [identity.workspaceId, exactSessionId, agentId],
     )).rows;
     const now = new Date().toISOString();
     if (rows.length) {
@@ -1100,14 +1272,33 @@ export async function rotateGatewayEnrollment(
   });
   rejectUnknownFields(body, ROTATE_FIELDS, "gateway_enrollment_rotate");
   const tokenId = identifier(body.token_id, "token_id", true);
+  const tokenRef = identifier(body.token_ref, "token_ref", true);
   const agentId = identifier(body.agent_id, "agent_id", true);
-  if ((!tokenId && !agentId) || (tokenId && agentId)) {
+  if ([tokenId, tokenRef, agentId].filter(Boolean).length !== 1) {
     throw new ControlPlaneHttpError(
       400,
       "enrollment_rotate_selector_required",
-      "Provide exactly one token_id or agent_id.",
+      "Provide exactly one token_ref, token_id, or agent_id.",
     );
   }
+  const scopeOverride = body.scopes === undefined
+    ? null
+    : requestedScopes(body.scopes);
+  const ttlDaysOverride = body.ttl_days === undefined
+    ? null
+    : boundedInteger(body.ttl_days, "ttl_days", 30, 1, 365);
+  const heartbeatOverride = body.heartbeat_timeout_sec === undefined
+    ? null
+    : boundedInteger(
+      body.heartbeat_timeout_sec,
+      "heartbeat_timeout_sec",
+      300,
+      30,
+      86_400,
+    );
+  const labelOverride = body.label === undefined
+    ? null
+    : sanitizedText(body.label, "label", 120, "");
   const requestKey = idempotencyKey(request.headers);
   return withPostgresTransaction(async (client) => {
     const identity = await authenticateHumanReviewer(
@@ -1116,14 +1307,39 @@ export async function rotateGatewayEnrollment(
       bodyWorkspace(body),
     );
     requireAdministrator(identity);
-    const rotateRequestKey = `rotate:${tokenId || agentId}:${requestKey}`;
-    await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1,0))", [
-      `gateway-admin-rotate:${identity.workspaceId}:${tokenId || agentId}:${requestKey}`,
-    ]);
+    const resolvedTokenId = tokenId || (
+      tokenRef
+        ? await resolveActiveTokenRef(client, identity.workspaceId, tokenRef)
+        : null
+    );
+    const exactTokenId = tokenRef && !resolvedTokenId
+      ? "__agentops_no_matching_token__"
+      : resolvedTokenId;
+    const requestBinding = {
+      operation: "rotate",
+      selector: tokenRef
+        ? { token_ref: tokenRef }
+        : tokenId
+          ? { token_ref: safeRef("token", tokenId) }
+          : { agent_id: agentId },
+      scopes: scopeOverride,
+      ttl_days: ttlDaysOverride,
+      heartbeat_timeout_sec: heartbeatOverride,
+      label: labelOverride,
+    };
     const replacementIdentity = tokenRequestIdentity(
       identity,
-      rotateRequestKey,
+      requestKey,
       "rotate",
+      requestBinding,
+    );
+    await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1,0))", [
+      `gateway-admin-rotate:${replacementIdentity.tokenId}`,
+    ]);
+    const knownRequestBinding = await assertRequestBinding(
+      client,
+      identity,
+      replacementIdentity,
     );
     const replay = (await client.query<TokenRow>(
       `SELECT token_id,workspace_id,agent_id,scopes_json,status,label,
@@ -1135,6 +1351,13 @@ export async function rotateGatewayEnrollment(
       [replacementIdentity.tokenId, identity.workspaceId],
     )).rows[0];
     if (replay) {
+      if (!knownRequestBinding) {
+        throw new ControlPlaneHttpError(
+          409,
+          "enrollment_idempotency_conflict",
+          "Idempotency-Key replay binding is unavailable.",
+        );
+      }
       return {
         status: 200,
         body: {
@@ -1150,9 +1373,8 @@ export async function rotateGatewayEnrollment(
           status: replay.status,
           expires_at: replay.expires_at,
           heartbeat_timeout_sec: replay.heartbeat_timeout_sec,
-          rotated_from_token_ref: tokenId
-            ? safeRef("token", tokenId)
-            : null,
+          rotated_from_token_ref: tokenRef
+            || (tokenId ? safeRef("token", tokenId) : null),
           rotated_from_token_id_omitted: true,
           token_omitted: true,
           note: "The rotated credential was already issued and cannot be shown again.",
@@ -1168,8 +1390,9 @@ export async function rotateGatewayEnrollment(
         AND ($2::text IS NULL OR token_id=$2)
         AND ($3::text IS NULL OR agent_id=$3)
       ORDER BY created_at DESC,token_id DESC
-      LIMIT 1`,
-      [identity.workspaceId, tokenId, agentId],
+      LIMIT 1
+      FOR UPDATE`,
+      [identity.workspaceId, exactTokenId, agentId],
     )).rows[0];
     if (!old) {
       throw new ControlPlaneHttpError(
@@ -1201,33 +1424,23 @@ export async function rotateGatewayEnrollment(
       name: agent.name,
       role: agent.role,
       runtimeType: agent.runtime_type,
-      scopes: body.scopes === undefined
+      scopes: scopeOverride === null
         ? parseStoredScopes(old.scopes_json)
-        : requestedScopes(body.scopes),
-      ttlDays: boundedInteger(body.ttl_days, "ttl_days", 30, 1, 365),
-      heartbeatTimeoutSec: boundedInteger(
-        body.heartbeat_timeout_sec,
-        "heartbeat_timeout_sec",
-        old.heartbeat_timeout_sec,
-        30,
-        86_400,
-      ),
-      label: sanitizedText(
-        body.label,
-        "label",
-        120,
-        `${old.agent_id} rotated token`,
-      ),
+        : scopeOverride,
+      ttlDays: ttlDaysOverride ?? 30,
+      heartbeatTimeoutSec: heartbeatOverride ?? old.heartbeat_timeout_sec,
+      label: labelOverride || `${old.agent_id} rotated token`,
     };
     const issued = await issueToken(
       client,
       identity,
       input,
-      rotateRequestKey,
+      requestKey,
       "rotate",
       {
         replacingEnrollmentId: old.token_id,
         entitlementDecision,
+        requestBinding,
       },
     );
     if (issued.entitlementDenied) {
