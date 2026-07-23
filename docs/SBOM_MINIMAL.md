@@ -71,7 +71,7 @@ dependencies in `pyproject.toml`.
 | react-popper | 2.3.0 |
 | react-resizable-panels | 2.1.7 |
 | react-responsive-masonry | 2.7.1 |
-| react-router | 7.13.0 |
+| react-router | 7.18.1 |
 | react-slick | 0.31.0 |
 | recharts | 2.15.2 |
 | sonner | 2.0.3 |
@@ -83,10 +83,10 @@ dependencies in `pyproject.toml`.
 
 | Package | Version |
 |---|---:|
-| @tailwindcss/vite | 4.1.12 |
+| @tailwindcss/vite | 4.3.3 |
 | @vitejs/plugin-react | 4.7.0 |
-| tailwindcss | 4.1.12 |
-| vite | 6.3.5 |
+| tailwindcss | 4.3.3 |
+| vite | 6.4.3 |
 
 ## Runtime Asset Boundary
 
