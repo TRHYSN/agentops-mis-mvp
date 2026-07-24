@@ -514,6 +514,10 @@ export async function startAgentGatewayRun(request: Request) {
         run.created_at,
       ],
     );
+    await client.query(
+      "UPDATE agents SET status='running',updated_at=$1 WHERE agent_id=$2",
+      [now, identity.agentId],
+    );
     await appendAudit(client, {
       workspaceId: identity.workspaceId,
       actorType: "system",
@@ -549,7 +553,6 @@ export async function startAgentGatewayRun(request: Request) {
         metadata: { workspace_id: identity.workspaceId, run_id: runId, raw_payload_omitted: true },
       });
     }
-    await client.query("UPDATE agents SET status='running',updated_at=$1 WHERE agent_id=$2", [now, identity.agentId]);
     await appendRuntimeEvent(client, {
       eventType: "run.start",
       status: "running",

@@ -694,6 +694,19 @@ async function run() {
     const lockOrderSessionToken = String(
       lockOrderSessionCreated.body.session_token,
     );
+    const lockOrderSessionList = await listGatewaySessions(humanRequest(
+      "GET",
+      `/api/mis/agent-gateway/sessions?workspace_id=${WORKSPACE}&status=active`,
+      owner,
+      undefined,
+      { csrf: false },
+    ));
+    const lockOrderSessionRef = String(
+      (
+        lockOrderSessionList.body.sessions as Array<Record<string, unknown>>
+      ).find((row) => row.agent_id === "agt_admin_contract")?.session_ref || "",
+    );
+    assert.match(lockOrderSessionRef, /^session_ref_[a-f0-9]{16}$/);
     const lockOrderRace = await within(
       Promise.allSettled([
         rotateGatewayEnrollment(humanRequest(
@@ -712,6 +725,15 @@ async function run() {
           "/api/mis/agent-gateway/status",
           lockOrderSessionToken,
         )),
+        revokeGatewaySession(humanRequest(
+          "POST",
+          "/api/mis/agent-gateway/session/revoke",
+          owner,
+          {
+            workspace_id: WORKSPACE,
+            session_ref: lockOrderSessionRef,
+          },
+        )),
       ]),
       10_000,
     );
@@ -729,6 +751,13 @@ async function run() {
         && lockOrderSession.reason.code === "unauthorized",
       );
     }
+    const lockOrderHumanRevoke = lockOrderRace[2];
+    assert.equal(lockOrderHumanRevoke.status, "fulfilled");
+    assert.equal(lockOrderHumanRevoke.value.status, 200);
+    assert(
+      lockOrderHumanRevoke.value.body.revoked === 0
+      || lockOrderHumanRevoke.value.body.revoked === 1,
+    );
 
     await admin.query(
       `UPDATE workspace_entitlements
@@ -1079,6 +1108,7 @@ async function run() {
       cross_workspace_agent_binding_race_single_winner: true,
       token_before_workspace_lock_order: true,
       parent_token_before_session_lock_order: true,
+      child_session_before_audit_lock_order: true,
       sibling_token_workspace_before_agent_lock_order: true,
       denial_replay_is_terminal: true,
       full_request_idempotency_binding: true,

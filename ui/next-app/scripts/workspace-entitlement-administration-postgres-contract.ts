@@ -841,7 +841,7 @@ async function assertStaticBoundary() {
   assert.match(source, /runPostgresSchemaCommand\("check"\)/);
   assert.match(source, /else await client\.query\("ROLLBACK"\)/);
   assert.match(source, /pg_advisory_xact_lock/);
-  assert.match(source, /FOR UPDATE OF m,credential/);
+  assert.match(source, /FOR UPDATE OF u,m,credential/);
   assert.match(source, /AGENTOPS_ENTITLEMENT_OPERATOR_PASSWORD/);
   assert.match(source, /appendAudit/);
   assert.match(source, /updated_by_user_id/);

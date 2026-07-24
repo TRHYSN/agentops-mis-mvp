@@ -23,6 +23,7 @@ import {
   heartbeatAgentGatewayRun,
   startAgentGatewayRun,
 } from "../src/server/controlPlane/agentGatewayRuns";
+import { recordGatewayHeartbeat } from "../src/server/controlPlane/gatewayLifecycle";
 import {
   claimAgentGatewayTask,
   getAgentGatewayTask,
@@ -35,6 +36,7 @@ import { runPostgresSchemaCommand } from "../src/server/controlPlane/schemaReadi
 const baseDsn = String(process.env.AGENTOPS_POSTGRES_DSN || "").trim();
 const schema = `agentops_gateway_core_${randomBytes(6).toString("hex")}`;
 const token = `contract_token_${randomBytes(18).toString("hex")}`;
+const siblingToken = `contract_sibling_token_${randomBytes(18).toString("hex")}`;
 const otherToken = `contract_other_token_${randomBytes(18).toString("hex")}`;
 const foreignToken = `contract_foreign_token_${randomBytes(18).toString("hex")}`;
 const session = `contract_session_${randomBytes(18).toString("hex")}`;
@@ -88,6 +90,39 @@ async function expectCode(
   await assert.rejects(work, (error: unknown) => (
     error instanceof ControlPlaneHttpError && error.code === code
   ));
+}
+
+async function within<T>(work: Promise<T>, timeoutMs: number) {
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      work,
+      new Promise<never>((_, reject) => {
+        timeout = setTimeout(
+          () => reject(new Error(`contract_timeout_after_${timeoutMs}ms`)),
+          timeoutMs,
+        );
+      }),
+    ]);
+  } finally {
+    if (timeout) clearTimeout(timeout);
+  }
+}
+
+async function waitForLockWaiters(client: Client, minimum: number) {
+  const deadline = Date.now() + 5_000;
+  while (Date.now() < deadline) {
+    const result = await client.query<{ count: number }>(
+      `SELECT COUNT(*)::int AS count
+      FROM pg_stat_activity
+      WHERE datname=current_database()
+        AND pid<>pg_backend_pid()
+        AND wait_event_type='Lock'`,
+    );
+    if ((result.rows[0]?.count || 0) >= minimum) return;
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  throw new Error(`expected_${minimum}_postgres_lock_waiters`);
 }
 
 type EntitlementDeniedResult = {
@@ -223,6 +258,7 @@ async function seed(client: Client) {
     "artifacts:write",
     "plan_evidence:write",
     "audit:write",
+    "agents:heartbeat",
   ]);
   await client.query(
     `INSERT INTO users(user_id,name,email,role,created_at)
@@ -245,6 +281,7 @@ async function seed(client: Client) {
   }
   for (const row of [
     ["tok_gateway_core", sha(token), workspaceId, "agt_gateway_core"],
+    ["tok_gateway_sibling", sha(siblingToken), workspaceId, "agt_gateway_core"],
     ["tok_gateway_other", sha(otherToken), workspaceId, "agt_gateway_other"],
     ["tok_gateway_foreign", sha(foreignToken), otherWorkspaceId, "agt_gateway_core"],
   ]) {
@@ -270,6 +307,7 @@ async function seed(client: Client) {
   await setRunEntitlement(client);
   for (const [taskId, title] of [
     ["tsk_gateway_race", "Concurrent claim"],
+    ["tsk_gateway_lock_order", "Run and heartbeat lock order"],
     ["tsk_gateway_core", "Production gateway core"],
   ]) {
     await client.query(
@@ -681,6 +719,60 @@ async function runContract() {
     } finally {
       await entitlementClient.end();
     }
+    const auditBlocker = new Client({ connectionString: scopedDsn() });
+    await auditBlocker.connect();
+    let blockerReleased = false;
+    try {
+      await setRunEntitlement(auditBlocker);
+      await auditBlocker.query("BEGIN");
+      await auditBlocker.query("SELECT pg_advisory_xact_lock(1095779668)");
+      const lockOrderRunStart = startAgentGatewayRun(
+        request(
+          "POST",
+          "/api/mis/agent-gateway/runs/start",
+          token,
+          {
+            workspace_id: workspaceId,
+            agent_id: "agt_gateway_core",
+            task_id: "tsk_gateway_lock_order",
+            run_id: "run_gateway_lock_order",
+            runtime_type: "mock",
+            input_summary: "Exercise business-row-before-audit lock order.",
+          },
+        ),
+      );
+      await waitForLockWaiters(auditBlocker, 1);
+      const lockOrderHeartbeat = recordGatewayHeartbeat(
+        request(
+          "POST",
+          "/api/mis/agent-gateway/heartbeat",
+          siblingToken,
+          {
+            workspace_id: workspaceId,
+            agent_id: "agt_gateway_core",
+            runtime_type: "hermes",
+            status: "paused",
+            request_id: "gateway-lock-order-heartbeat-0001",
+          },
+        ),
+      );
+      await waitForLockWaiters(auditBlocker, 2);
+      await auditBlocker.query("COMMIT");
+      blockerReleased = true;
+      const runHeartbeatLockOrder = await within(
+        Promise.allSettled([lockOrderRunStart, lockOrderHeartbeat]),
+        10_000,
+      );
+      assert.equal(runHeartbeatLockOrder[0].status, "fulfilled");
+      assert.equal(runHeartbeatLockOrder[0].value.status, 201);
+      assert.equal(runHeartbeatLockOrder[1].status, "fulfilled");
+      assert.equal(runHeartbeatLockOrder[1].value.status, 200);
+    } finally {
+      if (!blockerReleased) {
+        await auditBlocker.query("ROLLBACK").catch(() => undefined);
+      }
+      await auditBlocker.end().catch(() => undefined);
+    }
     await expectCode(
       "forbidden",
       () => heartbeatAgentGatewayRun(
@@ -973,6 +1065,7 @@ async function runContract() {
       plan_hash_and_verification_bound: true,
       run_plan_binding: true,
       run_start_entitlement_fail_closed: true,
+      run_start_before_global_audit_lock_order: true,
       entitlement_denial_audit_persisted: true,
       run_replay_bypasses_entitlement_usage: true,
       immutable_evidence_replay: true,

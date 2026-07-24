@@ -1512,6 +1512,7 @@ export async function rotateGatewayEnrollment(
       heartbeatTimeoutSec: heartbeatOverride ?? old.heartbeat_timeout_sec,
       label: labelOverride || `${old.agent_id} rotated token`,
     };
+    const sessions = await activeChildSessions(client, [old.token_id]);
     const issued = await issueToken(
       client,
       identity,
@@ -1548,7 +1549,6 @@ export async function rotateGatewayEnrollment(
         },
       };
     }
-    const sessions = await activeChildSessions(client, [old.token_id]);
     const now = new Date().toISOString();
     await client.query(
       `UPDATE agent_gateway_tokens SET status='revoked',revoked_at=$1

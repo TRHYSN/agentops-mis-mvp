@@ -858,7 +858,7 @@ async function requireTrustedOperator(
     WHERE u.user_id=$1 AND m.workspace_id=$2
     ORDER BY credential.created_at DESC
     LIMIT 1
-    FOR UPDATE OF m,credential`,
+    FOR UPDATE OF u,m,credential`,
     [operatorUserId, workspaceId],
   );
   const operator = result.rows[0];
