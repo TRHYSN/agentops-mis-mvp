@@ -1046,7 +1046,7 @@ async function administerInsideTransaction(
   });
   await client.query(
     "SELECT pg_advisory_xact_lock(hashtextextended($1,0))",
-    [`agentops-workspace-entitlement:${workspaceId}`],
+    [`agentops:workspace-entitlement:${workspaceId}`],
   );
   await requireTrustedOperator(client, workspaceId, operatorUserId);
   const existing = await readEntitlement(

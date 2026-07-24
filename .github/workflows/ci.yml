@@ -338,6 +338,7 @@ jobs:
           npm run test:agent-gateway-scoped-read-postgres-contract
           npm run test:agent-gateway-core-production-boundary
           npm run test:workspace-entitlements-postgres-contract
+          npm run test:workspace-entitlement-administration-postgres-contract
           npm run test:gateway-lifecycle-contract
           npm run test:gateway-administration-postgres-contract
           npm run test:agent-gateway-evidence-support-contract
