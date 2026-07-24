@@ -17,6 +17,7 @@
     "migrate:postgres": "tsx scripts/migrate-postgres.ts",
     "check:postgres-schema": "tsx scripts/migrate-postgres.ts --check",
     "typecheck": "tsc --noEmit",
+    "test:supply-chain-contract": "tsx scripts/supply-chain-contract.ts",
     "test:control-plane-mode-contract": "tsx scripts/control-plane-mode-contract.ts",
     "test:configuration-secrets-contract": "tsx scripts/configuration-secrets-contract.ts",
     "test:byoc-packaging-contract": "tsx scripts/byoc-packaging-contract.ts",
