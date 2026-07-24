@@ -698,18 +698,6 @@ export async function createGatewaySession(request: Request): Promise<LifecycleR
       );
     }
     enforceBindings(identity, request, body);
-    const agent = await lockedAgent(client, identity.agentId);
-    requireEnabledAgent(agent);
-    if (
-      body.runtime_type !== undefined
-      && String(body.runtime_type).trim() !== agent.runtime_type
-    ) {
-      throw new ControlPlaneHttpError(
-        409,
-        "session_runtime_mismatch",
-        "Gateway session runtime_type must match the registered agent.",
-      );
-    }
     const scopes = requestedSessionScopes(body, identity.scopes);
     const ttl = ttlSeconds(body);
     const suppliedRequestId = optionalIdentifier(body.request_id, "request_id");
@@ -742,6 +730,18 @@ export async function createGatewaySession(request: Request): Promise<LifecycleR
           409,
           "session_request_binding_conflict",
           "Session request_id is already bound to different session parameters.",
+        );
+      }
+      const replayAgent = await lockedAgent(client, identity.agentId);
+      requireEnabledAgent(replayAgent);
+      if (
+        body.runtime_type !== undefined
+        && String(body.runtime_type).trim() !== replayAgent.runtime_type
+      ) {
+        throw new ControlPlaneHttpError(
+          409,
+          "session_runtime_mismatch",
+          "Gateway session runtime_type must match the registered agent.",
         );
       }
       return {
@@ -819,6 +819,18 @@ export async function createGatewaySession(request: Request): Promise<LifecycleR
       };
     }
 
+    const agent = await lockedAgent(client, identity.agentId);
+    requireEnabledAgent(agent);
+    if (
+      body.runtime_type !== undefined
+      && String(body.runtime_type).trim() !== agent.runtime_type
+    ) {
+      throw new ControlPlaneHttpError(
+        409,
+        "session_runtime_mismatch",
+        "Gateway session runtime_type must match the registered agent.",
+      );
+    }
     const now = new Date();
     const createdAt = now.toISOString();
     const expiresAt = new Date(now.getTime() + ttl * 1000).toISOString();

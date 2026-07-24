@@ -551,8 +551,8 @@ async function assertRequestBinding(
   identity: HumanSessionIdentity,
   requestIdentity: TokenRequestIdentity,
 ) {
-  const result = await client.query<{ metadata_json: string }>(
-    `SELECT metadata_json
+  const result = await client.query<{ action: string; metadata_json: string }>(
+    `SELECT action,metadata_json
     FROM audit_logs
     WHERE workspace_id=$1
       AND actor_type='user'
@@ -578,7 +578,53 @@ async function assertRequestBinding(
       "Idempotency-Key is already bound to another enrollment request.",
     );
   }
-  return true;
+  return {
+    action: row.action,
+    metadata,
+  };
+}
+
+function auditedEntitlementDecision(metadata: Record<string, unknown>) {
+  const value = metadata.entitlement_decision;
+  if (
+    !value
+    || typeof value !== "object"
+    || Array.isArray(value)
+    || (value as Record<string, unknown>).allow !== false
+  ) {
+    throw new ControlPlaneHttpError(
+      409,
+      "enrollment_idempotency_conflict",
+      "The prior enrollment denial cannot be safely replayed.",
+    );
+  }
+  return value as WorkspaceEntitlementDecision;
+}
+
+function entitlementDenialResult(
+  identity: HumanSessionIdentity,
+  agentId: string,
+  entitlementDecision: WorkspaceEntitlementDecision,
+  replayed: boolean,
+) {
+  return {
+    entitlementDenied: true as const,
+    replayed,
+    row: null,
+    response: {
+      ok: false,
+      error: "workspace_entitlement_denied",
+      message: "Workspace entitlement does not permit a new Agent Gateway enrollment.",
+      created: false,
+      replayed,
+      agent_id: agentId,
+      workspace_id: identity.workspaceId,
+      entitlement_decision: entitlementDecision,
+      credential_generated: false,
+      token_omitted: true,
+      raw_config_omitted: true,
+    },
+  };
 }
 
 async function resolveActiveTokenRef(
@@ -700,6 +746,24 @@ async function issueToken(
       },
     };
   }
+  if (knownRequestBinding) {
+    if (
+      knownRequestBinding.action
+      === "agent_gateway.enrollment_entitlement_denied"
+    ) {
+      return entitlementDenialResult(
+        identity,
+        input.agentId,
+        auditedEntitlementDecision(knownRequestBinding.metadata),
+        true,
+      );
+    }
+    throw new ControlPlaneHttpError(
+      409,
+      "enrollment_idempotency_conflict",
+      "The prior enrollment request cannot be safely replayed.",
+    );
+  }
 
   const entitlementDecision = options.entitlementDecision
     || await evaluateWorkspaceEntitlement(client, {
@@ -741,24 +805,12 @@ async function issueToken(
       },
       requestHash,
     });
-    return {
-      entitlementDenied: true as const,
-      replayed: false as const,
-      row: null,
-      response: {
-        ok: false,
-        error: "workspace_entitlement_denied",
-        message: "Workspace entitlement does not permit a new Agent Gateway enrollment.",
-        created: false,
-        replayed: false,
-        agent_id: input.agentId,
-        workspace_id: identity.workspaceId,
-        entitlement_decision: entitlementDecision,
-        credential_generated: false,
-        token_omitted: true,
-        raw_config_omitted: true,
-      },
-    };
+    return entitlementDenialResult(
+      identity,
+      input.agentId,
+      entitlementDecision,
+      false,
+    );
   }
 
   await ensureEnrollmentAgent(client, identity, input);
@@ -1380,6 +1432,35 @@ export async function rotateGatewayEnrollment(
           note: "The rotated credential was already issued and cannot be shown again.",
         },
       };
+    }
+    if (knownRequestBinding) {
+      if (
+        knownRequestBinding.action
+        === "agent_gateway.enrollment_entitlement_denied"
+      ) {
+        const denial = entitlementDenialResult(
+          identity,
+          String(knownRequestBinding.metadata.agent_id || ""),
+          auditedEntitlementDecision(knownRequestBinding.metadata),
+          true,
+        );
+        return {
+          status: 403,
+          body: {
+            ...denial.response,
+            rotated: false,
+            revoked: 0,
+            rotated_from_token_ref: tokenRef
+              || (tokenId ? safeRef("token", tokenId) : null),
+            rotated_from_token_id_omitted: true,
+          },
+        };
+      }
+      throw new ControlPlaneHttpError(
+        409,
+        "enrollment_idempotency_conflict",
+        "The prior rotation request cannot be safely replayed.",
+      );
     }
     const old = (await client.query<TokenRow>(
       `SELECT token_id,workspace_id,agent_id,scopes_json,status,label,

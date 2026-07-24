@@ -484,6 +484,16 @@ async function run() {
         { csrf: false },
       )),
     );
+    await expectCode(
+      "human_admin_role_forbidden",
+      () => listGatewaySessions(humanRequest(
+        "GET",
+        `/api/mis/agent-gateway/sessions?workspace_id=${WORKSPACE}`,
+        reviewer,
+        undefined,
+        { csrf: false },
+      )),
+    );
     const enrollmentList = await listGatewayEnrollments(humanRequest(
       "GET",
       `/api/mis/agent-gateway/enrollments?workspace_id=${WORKSPACE}`,
@@ -669,6 +679,21 @@ async function run() {
     );
 
     const rotatedTokenRef = String(rotated[0].body.token_ref);
+    const lockOrderSessionCreated = await createGatewaySession(agentRequest(
+      "POST",
+      "/api/mis/agent-gateway/session/create",
+      rotatedToken,
+      {
+        workspace_id: WORKSPACE,
+        agent_id: "agt_admin_contract",
+        scopes: ["tasks:read"],
+        ttl_sec: 900,
+        request_id: "admin-lock-order-session-0001",
+      },
+    ));
+    const lockOrderSessionToken = String(
+      lockOrderSessionCreated.body.session_token,
+    );
     const lockOrderRace = await within(
       Promise.allSettled([
         rotateGatewayEnrollment(humanRequest(
@@ -682,17 +707,10 @@ async function run() {
           },
           { idempotencyKey: "admin-lock-order-rotate-0001" },
         )),
-        createGatewaySession(agentRequest(
-          "POST",
-          "/api/mis/agent-gateway/session/create",
-          rotatedToken,
-          {
-            workspace_id: WORKSPACE,
-            agent_id: "agt_admin_contract",
-            scopes: ["tasks:read"],
-            ttl_sec: 900,
-            request_id: "admin-lock-order-session-0001",
-          },
+        getGatewayStatus(agentRequest(
+          "GET",
+          "/api/mis/agent-gateway/status",
+          lockOrderSessionToken,
         )),
       ]),
       10_000,
@@ -702,9 +720,9 @@ async function run() {
     assert.equal(lockOrderRotation.value.status, 201);
     const lockOrderRotatedToken = String(lockOrderRotation.value.body.token);
     const lockOrderSession = lockOrderRace[1];
-    const lockOrderSessionToken = lockOrderSession.status === "fulfilled"
-      ? String(lockOrderSession.value.body.session_token)
-      : "";
+    if (lockOrderSession.status === "fulfilled") {
+      assert.equal(lockOrderSession.value.status, 200);
+    }
     if (lockOrderSession.status === "rejected") {
       assert(
         lockOrderSession.reason instanceof ControlPlaneHttpError
@@ -712,6 +730,65 @@ async function run() {
       );
     }
 
+    await admin.query(
+      `UPDATE workspace_entitlements
+      SET max_active_enrollments=2,updated_at=clock_timestamp()
+      WHERE workspace_id=$1`,
+      [WORKSPACE],
+    );
+    const siblingEnrollment = await createGatewayEnrollment(humanRequest(
+      "POST",
+      "/api/mis/agent-gateway/enrollment/create",
+      owner,
+      {
+        ...createBody(),
+        label: "sibling enrollment lock order",
+      },
+      { idempotencyKey: "admin-sibling-enrollment-0001" },
+    ));
+    const siblingToken = String(siblingEnrollment.body.token);
+    const siblingLockRace = await within(
+      Promise.allSettled([
+        rotateGatewayEnrollment(humanRequest(
+          "POST",
+          "/api/mis/agent-gateway/enrollment/rotate",
+          owner,
+          {
+            workspace_id: WORKSPACE,
+            token_ref: String(lockOrderRotation.value.body.token_ref),
+            label: "sibling lock order replacement",
+          },
+          { idempotencyKey: "admin-sibling-rotate-0001" },
+        )),
+        createGatewaySession(agentRequest(
+          "POST",
+          "/api/mis/agent-gateway/session/create",
+          siblingToken,
+          {
+            workspace_id: WORKSPACE,
+            agent_id: "agt_admin_contract",
+            scopes: ["tasks:read"],
+            ttl_sec: 900,
+            request_id: "admin-sibling-session-0001",
+          },
+        )),
+      ]),
+      10_000,
+    );
+    assert.equal(siblingLockRace[0].status, "fulfilled");
+    assert.equal(siblingLockRace[1].status, "fulfilled");
+    const siblingRotationToken = siblingLockRace[0].status === "fulfilled"
+      ? String(siblingLockRace[0].value.body.token)
+      : "";
+    const siblingSessionToken = siblingLockRace[1].status === "fulfilled"
+      ? String(siblingLockRace[1].value.body.session_token)
+      : "";
+    await admin.query(
+      `UPDATE workspace_entitlements
+      SET max_active_enrollments=1,updated_at=clock_timestamp()
+      WHERE workspace_id=$1`,
+      [WORKSPACE],
+    );
     const activeRevokeBeforeRace = await revokeGatewayEnrollment(humanRequest(
       "POST",
       "/api/mis/agent-gateway/enrollment/revoke",
@@ -721,7 +798,8 @@ async function run() {
         agent_id: "agt_admin_contract",
       },
     ));
-    assert.equal(activeRevokeBeforeRace.body.revoked, 1);
+    assert.equal(activeRevokeBeforeRace.body.revoked, 2);
+    assert.equal(activeRevokeBeforeRace.body.sessions_revoked, 1);
     const multiAdminAttempts = await Promise.all(
       concurrentOwners.map((concurrentOwner) =>
         createGatewayEnrollment(humanRequest(
@@ -849,6 +927,45 @@ async function run() {
     );
     assert.equal(entitlementDenied.body.credential_generated, false);
     assert.equal(Object.hasOwn(entitlementDenied.body, "token"), false);
+    const deniedReplay = await createGatewayEnrollment(humanRequest(
+      "POST",
+      "/api/mis/agent-gateway/enrollment/create",
+      owner,
+      {
+        ...createBody(),
+        agent_id: "agt_admin_entitlement_denied",
+      },
+      { idempotencyKey: "admin-entitlement-denied-0001" },
+    ));
+    assert.equal(deniedReplay.status, 403);
+    assert.equal(deniedReplay.body.replayed, true);
+    assert.equal(
+      (deniedReplay.body.entitlement_decision as Record<string, unknown>)
+        .reason_code,
+      "entitlement_suspended",
+    );
+    await admin.query(
+      `UPDATE workspace_entitlements SET status='active',updated_at=clock_timestamp()
+      WHERE workspace_id=$1`,
+      [WORKSPACE],
+    );
+    const deniedAfterRecovery = await createGatewayEnrollment(humanRequest(
+      "POST",
+      "/api/mis/agent-gateway/enrollment/create",
+      owner,
+      {
+        ...createBody(),
+        agent_id: "agt_admin_entitlement_denied",
+      },
+      { idempotencyKey: "admin-entitlement-denied-0001" },
+    ));
+    assert.equal(deniedAfterRecovery.status, 403);
+    assert.equal(deniedAfterRecovery.body.replayed, true);
+    assert.equal(
+      (deniedAfterRecovery.body.entitlement_decision as Record<string, unknown>)
+        .reason_code,
+      "entitlement_suspended",
+    );
     await expectCode(
       "enrollment_idempotency_conflict",
       () => createGatewayEnrollment(humanRequest(
@@ -862,6 +979,11 @@ async function run() {
         },
         { idempotencyKey: "admin-entitlement-denied-0001" },
       )),
+    );
+    await admin.query(
+      `UPDATE workspace_entitlements SET status='suspended',updated_at=clock_timestamp()
+      WHERE workspace_id=$1`,
+      [WORKSPACE],
     );
     const revokeWhileSuspended = await revokeGatewayEnrollment(humanRequest(
       "POST",
@@ -904,6 +1026,9 @@ async function run() {
       directSessionToken,
       lockOrderRotatedToken,
       lockOrderSessionToken,
+      siblingToken,
+      siblingRotationToken,
+      siblingSessionToken,
       multiAdminWinnerToken,
       crossWorkspaceToken,
     ]);
@@ -925,6 +1050,9 @@ async function run() {
       directSessionToken,
       lockOrderRotatedToken,
       lockOrderSessionToken,
+      siblingToken,
+      siblingRotationToken,
+      siblingSessionToken,
       multiAdminWinnerToken,
       crossWorkspaceToken,
     ]);
@@ -950,6 +1078,9 @@ async function run() {
       multi_admin_quota_race_single_winner: true,
       cross_workspace_agent_binding_race_single_winner: true,
       token_before_workspace_lock_order: true,
+      parent_token_before_session_lock_order: true,
+      sibling_token_workspace_before_agent_lock_order: true,
+      denial_replay_is_terminal: true,
       full_request_idempotency_binding: true,
       opaque_ref_row_actions: true,
       child_session_revoke_cascade: true,

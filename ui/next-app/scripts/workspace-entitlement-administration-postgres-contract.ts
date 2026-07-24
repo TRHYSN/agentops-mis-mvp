@@ -1,5 +1,9 @@
 import assert from "node:assert/strict";
-import { randomUUID } from "node:crypto";
+import {
+  randomBytes,
+  randomUUID,
+  scryptSync,
+} from "node:crypto";
 import { readFile } from "node:fs/promises";
 
 import { Client } from "pg";
@@ -17,12 +21,14 @@ import {
   runPostgresSchemaCommand,
   SCHEMA_CONTRACT,
 } from "../src/server/controlPlane/schemaReadiness";
+import { HUMAN_SCRYPT_PARAMS } from "../src/server/controlPlane/humanPasswordPolicy";
 
 const NOW = new Date("2026-07-24T12:00:00.000Z");
 const EFFECTIVE_AT = "2026-07-24T11:00:00.000Z";
 const EXPIRES_AT = "2027-07-24T12:00:00.000Z";
 const OPERATOR_ID = "husr_entitlement_operator";
 const OPERATOR_CANARY = "operator-private-canary";
+const OPERATOR_PASSWORD = `${randomBytes(24).toString("base64url")}Aa1!`;
 
 type ArgumentOverrides = Readonly<{
   workspaceId?: string;
@@ -121,6 +127,7 @@ function parse(overrides: ArgumentOverrides = {}) {
 async function execute(
   connectionString: string,
   request: WorkspaceEntitlementAdministrationRequest,
+  operatorPassword = OPERATOR_PASSWORD,
 ) {
   const client = new Client({
     connectionString,
@@ -131,7 +138,10 @@ async function execute(
     return await executeWorkspaceEntitlementAdministration(
       client,
       request,
-      { now: NOW },
+      {
+        now: NOW,
+        operatorPassword,
+      },
     );
   } finally {
     await client.end();
@@ -193,6 +203,34 @@ async function seedOperator(
       userId,
       membershipRole,
       membershipStatus,
+      NOW.toISOString(),
+    ],
+  );
+  const salt = randomBytes(16);
+  const passwordHash = scryptSync(
+    OPERATOR_PASSWORD,
+    salt,
+    HUMAN_SCRYPT_PARAMS.keylen,
+    {
+      N: HUMAN_SCRYPT_PARAMS.n,
+      r: HUMAN_SCRYPT_PARAMS.r,
+      p: HUMAN_SCRYPT_PARAMS.p,
+      maxmem: 128 * 1024 * 1024,
+    },
+  ).toString("hex");
+  await client.query(
+    `INSERT INTO human_login_credentials(
+      credential_id,user_id,username,password_hash,password_salt,
+      password_params_json,status,created_at,updated_at,last_login_at
+    ) VALUES($1,$2,$3,$4,$5,$6,'active',$7,$7,NULL)
+    ON CONFLICT(credential_id) DO NOTHING`,
+    [
+      `credential_${userId}`,
+      userId,
+      `entitlement-${userId}`,
+      passwordHash,
+      salt.toString("hex"),
+      JSON.stringify(HUMAN_SCRYPT_PARAMS),
       NOW.toISOString(),
     ],
   );
@@ -388,10 +426,37 @@ async function assertCreateUpdateAndReplay(
   assertSafeReceipt(updateReplay, connectionString);
   assert.equal(updateReplay.outcome, "unchanged");
   assert.equal(updateReplay.revision, updated.revision);
-  assert.equal(updateReplay.audit_appended, false);
-  assert.equal(await rowCount(fixture, "audit_logs", workspaceId), 2);
+    assert.equal(updateReplay.audit_appended, false);
+    assert.equal(await rowCount(fixture, "audit_logs", workspaceId), 2);
 
-  const planDrift = await execute(
+    const reverted = await execute(
+      connectionString,
+      parse({
+        workspaceId,
+        confirm: true,
+        expectedRevision: updated.revision || "",
+      }),
+    );
+    assert.equal(reverted.outcome, "updated");
+    assert.equal(await rowCount(fixture, "audit_logs", workspaceId), 3);
+    const cycledBack = await execute(
+      connectionString,
+      parse({
+        workspaceId,
+        edition: "enterprise_byoc",
+        maxAgents: "25",
+        maxActiveEnrollments: "40",
+        maxActiveSessionsPerAgent: "8",
+        maxMonthlyRuns: "2500",
+        maxMonthlyCostUsd: "9000.5",
+        confirm: true,
+        expectedRevision: reverted.revision || "",
+      }),
+    );
+    assert.equal(cycledBack.outcome, "updated");
+    assert.equal(await rowCount(fixture, "audit_logs", workspaceId), 4);
+
+    const planDrift = await execute(
     connectionString,
     parse({
       workspaceId,
@@ -403,11 +468,11 @@ async function assertCreateUpdateAndReplay(
       maxMonthlyCostUsd: "10000",
     }),
   );
-  assertSafeReceipt(planDrift, connectionString);
-  assert.equal(planDrift.outcome, "would_update");
-  assert.equal(planDrift.required_guard, "expected_revision");
-  assert.equal(planDrift.revision, updated.revision);
-  assert.equal(await rowCount(fixture, "audit_logs", workspaceId), 2);
+    assertSafeReceipt(planDrift, connectionString);
+    assert.equal(planDrift.outcome, "would_update");
+    assert.equal(planDrift.required_guard, "expected_revision");
+    assert.equal(planDrift.revision, cycledBack.revision);
+    assert.equal(await rowCount(fixture, "audit_logs", workspaceId), 4);
 
   await expectAdministrationError(
     () => execute(
@@ -443,7 +508,7 @@ async function assertCreateUpdateAndReplay(
     ),
     "entitlement_already_exists",
   );
-  assert.equal(await rowCount(fixture, "audit_logs", workspaceId), 2);
+    assert.equal(await rowCount(fixture, "audit_logs", workspaceId), 4);
   const finalRow = await fixture.query<{
     edition: string;
     max_agents: number;
@@ -570,6 +635,14 @@ async function assertOperatorAndAbsentGuards(
   await expectAdministrationError(
     () => execute(
       connectionString,
+      parse({ workspaceId: absentWorkspace }),
+      "wrong-operator-password-Aa1!",
+    ),
+    "trusted_operator_required",
+  );
+  await expectAdministrationError(
+    () => execute(
+      connectionString,
       parse({
         workspaceId: absentWorkspace,
         confirm: true,
@@ -634,6 +707,14 @@ function assertParserValidation() {
   expectParserError(
     replaceArgument(valid, "--max-monthly-cost-usd", "Infinity"),
     "max_monthly_cost_usd_invalid",
+  );
+  expectParserError(
+    replaceArgument(
+      valid,
+      "--max-monthly-cost-usd",
+      "999999999999.999999",
+    ),
+    "max_monthly_cost_usd_precision_unsafe",
   );
   expectParserError(
     replaceArgument(valid, "--expires-at", "2026-07-24T10:00:00.000Z"),
@@ -758,13 +839,15 @@ async function assertStaticBoundary() {
   );
   assert.match(source, /postgresDsn\(\)/);
   assert.match(source, /runPostgresSchemaCommand\("check"\)/);
-  assert.match(source, /SET TRANSACTION READ ONLY/);
+  assert.match(source, /else await client\.query\("ROLLBACK"\)/);
   assert.match(source, /pg_advisory_xact_lock/);
+  assert.match(source, /FOR UPDATE OF m,credential/);
+  assert.match(source, /AGENTOPS_ENTITLEMENT_OPERATOR_PASSWORD/);
   assert.match(source, /appendAudit/);
   assert.match(source, /updated_by_user_id/);
   assert.match(source, /expected_revision/);
   assert.match(source, /expect_absent/);
-  assert.doesNotMatch(source, /process\.env|DATABASE_URL/);
+  assert.doesNotMatch(source, /DATABASE_URL/);
   assert.doesNotMatch(source, /UPDATE\s+audit_logs|DELETE\s+FROM\s+audit_logs/i);
   assert.doesNotMatch(
     source,
@@ -870,12 +953,14 @@ async function run() {
   }
 }
 
-run().catch(() => {
+run().catch((error: unknown) => {
   console.log(JSON.stringify({
     contract:
       "agentops_workspace_entitlement_administration_postgres_contract_v1",
     ok: false,
-    error_code: "contract_failed",
+    error_code: error instanceof WorkspaceEntitlementAdministrationError
+      ? error.code
+      : "contract_failed",
     credentials_omitted: true,
     dsn_omitted: true,
     raw_config_omitted: true,

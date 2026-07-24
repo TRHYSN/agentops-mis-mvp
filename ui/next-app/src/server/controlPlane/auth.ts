@@ -90,14 +90,37 @@ export async function authenticateAgentGateway(
     [hash],
   );
   let credential = tokenResult.rows[0];
+  let lockedParent: ParentTokenRow | undefined;
   if (!credential) {
-    const sessionResult = await client.query<CredentialRow>(
+    const sessionCandidate = (await client.query<CredentialRow>(
+      `SELECT 'session'::text AS credential_type,session_id AS credential_id,
+        parent_token_id,workspace_id,agent_id,scopes_json,status,expires_at
+      FROM agent_gateway_sessions WHERE session_hash=$1`,
+      [hash],
+    )).rows[0];
+    if (sessionCandidate?.parent_token_id) {
+      lockedParent = (await client.query<ParentTokenRow>(
+        `SELECT token_id,workspace_id,agent_id,scopes_json,status,expires_at
+        FROM agent_gateway_tokens WHERE token_id=$1 FOR UPDATE`,
+        [sessionCandidate.parent_token_id],
+      )).rows[0];
+    }
+    credential = (await client.query<CredentialRow>(
       `SELECT 'session'::text AS credential_type,session_id AS credential_id,
         parent_token_id,workspace_id,agent_id,scopes_json,status,expires_at
       FROM agent_gateway_sessions WHERE session_hash=$1 FOR UPDATE`,
       [hash],
-    );
-    credential = sessionResult.rows[0];
+    )).rows[0];
+    if (
+      credential
+      && credential.parent_token_id !== sessionCandidate?.parent_token_id
+    ) {
+      throw new ControlPlaneHttpError(
+        401,
+        "unauthorized",
+        "Agent session parent binding changed during authentication.",
+      );
+    }
   }
   if (!credential || credential.status !== "active") {
     throw new ControlPlaneHttpError(401, "unauthorized", "Agent credential is not active.");
@@ -141,12 +164,7 @@ export async function authenticateAgentGateway(
         true,
       );
     }
-    const parentResult = await client.query<ParentTokenRow>(
-      `SELECT token_id,workspace_id,agent_id,scopes_json,status,expires_at
-      FROM agent_gateway_tokens WHERE token_id=$1 FOR UPDATE`,
-      [credential.parent_token_id],
-    );
-    const parent = parentResult.rows[0];
+    const parent = lockedParent;
     if (
       !parent
       || parent.status !== "active"

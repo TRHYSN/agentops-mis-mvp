@@ -1,4 +1,8 @@
-import { createHash } from "node:crypto";
+import {
+  createHash,
+  scrypt as scryptCallback,
+  timingSafeEqual,
+} from "node:crypto";
 import { resolve } from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
@@ -17,6 +21,11 @@ import {
   runPostgresSchemaCommand,
   SchemaReadinessError,
 } from "../src/server/controlPlane/schemaReadiness";
+import {
+  HUMAN_PASSWORD_MAX_LENGTH,
+  HUMAN_PASSWORD_MIN_LENGTH,
+  HUMAN_SCRYPT_PARAMS,
+} from "../src/server/controlPlane/humanPasswordPolicy";
 
 export const WORKSPACE_ENTITLEMENT_ADMINISTRATION_CONTRACT =
   "agentops_workspace_entitlement_administration_v1";
@@ -71,12 +80,17 @@ const REQUIRED_VALUE_ARGUMENTS = Object.freeze([
   "--effective-at",
   "--expires-at",
 ]);
-const TRUSTED_OPERATOR_ROLES = new Set(["operator", "owner"]);
+const TRUSTED_OPERATOR_ROLES = new Set([
+  "operator",
+  "owner",
+  "workspace-admin",
+]);
 const IDENTIFIER_PATTERN = /^[A-Za-z0-9._:-]{1,128}$/;
 const REVISION_PATTERN = /^[a-f0-9]{64}$/;
 const UTC_TIMESTAMP_PATTERN =
   /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?Z$/;
 const MAX_POSTGRES_INTEGER = 2_147_483_647;
+const MAX_EXACT_COST_WHOLE_USD = 1_000_000_000;
 
 type Edition = (typeof EDITIONS)[number];
 type EntitlementStatus = (typeof STATUSES)[number];
@@ -159,6 +173,16 @@ type EntitlementRow = {
   updated_by_user_id: string | null;
 };
 
+type TrustedOperatorRow = {
+  user_role: string;
+  membership_role: string;
+  membership_status: string;
+  credential_status: string;
+  password_hash: string;
+  password_salt: string;
+  password_params_json: unknown;
+};
+
 type CanonicalConfiguration = Readonly<{
   workspace_id: string;
   edition: string;
@@ -190,6 +214,26 @@ function administrationError(code: string, message: string, exitCode = 2) {
 
 function sha256(value: string) {
   return createHash("sha256").update(value, "utf8").digest("hex");
+}
+
+function deriveOperatorPassword(password: string, salt: Buffer) {
+  return new Promise<Buffer>((resolvePromise, rejectPromise) => {
+    scryptCallback(
+      password,
+      salt,
+      HUMAN_SCRYPT_PARAMS.keylen,
+      {
+        N: HUMAN_SCRYPT_PARAMS.n,
+        r: HUMAN_SCRYPT_PARAMS.r,
+        p: HUMAN_SCRYPT_PARAMS.p,
+        maxmem: 128 * 1024 * 1024,
+      },
+      (error, derived) => {
+        if (error) rejectPromise(error);
+        else resolvePromise(derived);
+      },
+    );
+  });
 }
 
 function identifier(value: unknown, field: string) {
@@ -233,6 +277,12 @@ function canonicalCost(value: string) {
     );
   }
   const whole = match[1];
+  if (BigInt(whole) > BigInt(MAX_EXACT_COST_WHOLE_USD)) {
+    throw administrationError(
+      "max_monthly_cost_usd_precision_unsafe",
+      "max_monthly_cost_usd exceeds the exact commercial evaluator range.",
+    );
+  }
   const fraction = String(match[2] || "").padEnd(6, "0");
   return `${whole}.${fraction}`;
 }
@@ -782,21 +832,68 @@ async function requireTrustedOperator(
   client: PoolClient,
   workspaceId: string,
   operatorUserId: string,
+  operatorPassword: string,
 ) {
-  const result = await client.query<{
-    user_role: string;
-    membership_role: string;
-    membership_status: string;
-  }>(
+  if (
+    operatorPassword.length < HUMAN_PASSWORD_MIN_LENGTH
+    || operatorPassword.length > HUMAN_PASSWORD_MAX_LENGTH
+  ) {
+    throw administrationError(
+      "trusted_operator_required",
+      "Entitlement administration requires verified Human operator credentials.",
+      1,
+    );
+  }
+  const result = await client.query<TrustedOperatorRow>(
     `SELECT u.role AS user_role,
       m.role AS membership_role,
-      m.status AS membership_status
+      m.status AS membership_status,
+      credential.status AS credential_status,
+      credential.password_hash,
+      credential.password_salt,
+      credential.password_params_json
     FROM users u
     JOIN workspace_memberships m ON m.user_id=u.user_id
-    WHERE u.user_id=$1 AND m.workspace_id=$2`,
+    JOIN human_login_credentials credential ON credential.user_id=u.user_id
+    WHERE u.user_id=$1 AND m.workspace_id=$2
+    ORDER BY credential.created_at DESC
+    LIMIT 1
+    FOR UPDATE OF m,credential`,
     [operatorUserId, workspaceId],
   );
   const operator = result.rows[0];
+  let params: Record<string, unknown> = {};
+  try {
+    const parsed = typeof operator?.password_params_json === "string"
+      ? JSON.parse(operator.password_params_json)
+      : operator?.password_params_json;
+    params = parsed && typeof parsed === "object" && !Array.isArray(parsed)
+      ? parsed as Record<string, unknown>
+      : {};
+  } catch {
+    params = {};
+  }
+  let passwordMatches = false;
+  if (
+    operator
+    && operator.credential_status === "active"
+    && params.name === HUMAN_SCRYPT_PARAMS.name
+    && params.n === HUMAN_SCRYPT_PARAMS.n
+    && params.r === HUMAN_SCRYPT_PARAMS.r
+    && params.p === HUMAN_SCRYPT_PARAMS.p
+    && params.keylen === HUMAN_SCRYPT_PARAMS.keylen
+    && /^[a-f0-9]{32}$/i.test(operator.password_salt)
+    && /^[a-f0-9]{64}$/i.test(operator.password_hash)
+  ) {
+    const derived = await deriveOperatorPassword(
+      operatorPassword,
+      Buffer.from(operator.password_salt, "hex"),
+    );
+    passwordMatches = timingSafeEqual(
+      derived,
+      Buffer.from(operator.password_hash, "hex"),
+    );
+  }
   if (
     !operator
     || operator.membership_status !== "active"
@@ -804,10 +901,11 @@ async function requireTrustedOperator(
     || !TRUSTED_OPERATOR_ROLES.has(
       operator.membership_role.trim().toLowerCase(),
     )
+    || !passwordMatches
   ) {
     throw administrationError(
       "trusted_operator_required",
-      "Entitlement administration requires an existing trusted active workspace operator.",
+      "Entitlement administration requires verified Human operator credentials.",
       1,
     );
   }
@@ -960,6 +1058,7 @@ async function appendConfigurationAudit(
   desiredConfigHash: string,
   previous: CanonicalConfiguration | null,
   previousConfigHash: string | null,
+  previousRevision: string | null,
 ) {
   const operatorRef = safeRef("operator", request.operatorUserId);
   const requestHash = stableHash({
@@ -968,6 +1067,7 @@ async function appendConfigurationAudit(
     operator_ref: operatorRef,
     operation,
     desired_config_hash: desiredConfigHash,
+    previous_revision: previousRevision,
   });
   return appendAudit(client, {
     workspaceId: request.workspaceId,
@@ -986,6 +1086,7 @@ async function appendConfigurationAudit(
       operator_ref: operatorRef,
       desired_config_hash: desiredConfigHash,
       previous_config_hash: previousConfigHash,
+      previous_revision: previousRevision,
       optimistic_guard: request.guard.kind,
       credentials_omitted: true,
       dsn_omitted: true,
@@ -998,6 +1099,7 @@ async function administerInsideTransaction(
   client: PoolClient,
   request: WorkspaceEntitlementAdministrationRequest,
   now: Date,
+  operatorPassword: string,
 ) {
   const workspaceId = identifier(request.workspaceId, "workspace_id");
   const operatorUserId = identifier(
@@ -1048,7 +1150,12 @@ async function administerInsideTransaction(
     "SELECT pg_advisory_xact_lock(hashtextextended($1,0))",
     [`agentops:workspace-entitlement:${workspaceId}`],
   );
-  await requireTrustedOperator(client, workspaceId, operatorUserId);
+  await requireTrustedOperator(
+    client,
+    workspaceId,
+    operatorUserId,
+    operatorPassword,
+  );
   const existing = await readEntitlement(
     client,
     workspaceId,
@@ -1108,6 +1215,7 @@ async function administerInsideTransaction(
       desiredConfigHash,
       null,
       null,
+      null,
     );
     return receipt(normalizedRequest, {
       outcome: "created",
@@ -1165,6 +1273,7 @@ async function administerInsideTransaction(
     desiredConfigHash,
     previous,
     previousConfigHash,
+    currentRevision,
   );
   return receipt(normalizedRequest, {
     outcome: "updated",
@@ -1179,10 +1288,12 @@ async function administerInsideTransaction(
 export async function executeWorkspaceEntitlementAdministration(
   client: Client,
   request: WorkspaceEntitlementAdministrationRequest,
-  options: Readonly<{ now?: Date }> = {},
+  options: Readonly<{
+    now?: Date;
+    operatorPassword: string;
+  }>,
 ) {
-  const now = options.now || new Date();
-  if (!Number.isFinite(now.getTime())) {
+  if (options.now && !Number.isFinite(options.now.getTime())) {
     throw administrationError(
       "administration_time_invalid",
       "The administration evaluation time is invalid.",
@@ -1192,15 +1303,25 @@ export async function executeWorkspaceEntitlementAdministration(
   try {
     await client.query("BEGIN");
     transactionStarted = true;
-    if (!request.confirm) {
-      await client.query("SET TRANSACTION READ ONLY");
-    }
     await client.query("SET LOCAL lock_timeout = '5s'");
     await client.query("SET LOCAL statement_timeout = '30s'");
+    const clock = options.now
+      ? options.now
+      : (await client.query<{ now: Date | string }>(
+        "SELECT clock_timestamp() AS now",
+      )).rows[0]?.now;
+    const now = clock instanceof Date ? clock : new Date(String(clock || ""));
+    if (!Number.isFinite(now.getTime())) {
+      throw administrationError(
+        "administration_time_invalid",
+        "The database administration clock is invalid.",
+      );
+    }
     const result = await administerInsideTransaction(
       client as unknown as PoolClient,
       request,
       now,
+      options.operatorPassword,
     );
     if (request.confirm) await client.query("COMMIT");
     else await client.query("ROLLBACK");
@@ -1217,6 +1338,16 @@ export async function executeWorkspaceEntitlementAdministration(
 export async function runWorkspaceEntitlementCli(argv: string[]) {
   const request = parseWorkspaceEntitlementArguments(argv);
   const connectionString = postgresDsn();
+  const operatorPassword = String(
+    process.env.AGENTOPS_ENTITLEMENT_OPERATOR_PASSWORD || "",
+  );
+  if (!operatorPassword) {
+    throw administrationError(
+      "operator_password_required",
+      "Set AGENTOPS_ENTITLEMENT_OPERATOR_PASSWORD for the intended Human operator.",
+      1,
+    );
+  }
   let client: Client | undefined;
   try {
     const readiness = await runPostgresSchemaCommand("check");
@@ -1229,6 +1360,7 @@ export async function runWorkspaceEntitlementCli(argv: string[]) {
     const result = await executeWorkspaceEntitlementAdministration(
       client,
       request,
+      { operatorPassword },
     );
     return Object.freeze({
       ...result,
