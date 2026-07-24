@@ -76,7 +76,9 @@ http://127.0.0.1:8787/dashboard
 
 ## Local Product UI
 
-Vite UI 位于 `ui/start-building-app/`，与本地 Python/SQLite Agent Gateway 共用同一权威账本。
+Vite UI 位于 `ui/start-building-app/`，但它不是数据权威。Free Local 构建连接
+Python/SQLite 兼容后端；Commercial / BYOC 构建只连接同源 Next.js
+`/api/mis`，由 TypeScript/PostgreSQL 控制面持有权威账本。
 
 一条命令启动本地后端、`19001` UI 和安全 mock worker：
 
@@ -586,7 +588,11 @@ python3 scripts/worker_daemon_resilience_smoke.py
 - 不保存完整 prompt、raw response、credentials、transcripts。
 - Hermes/OpenClaw 真实执行必须显式传 `--confirm-run`。
 - 页面 daemon 控制是本地录屏/自用 supervisor；现在有 state/JSONL/error counters 和 bounded continue-on-error，但仍不是 launchd/systemd 或远程 fleet manager。
-- worker 已可通过 Python source package 安装为 `agentops-worker`，也保留 repo-local wrapper；远程 enrollment 已有 MVP UI/API/CLI、scope preset、token rotation、short-lived session 和最小 workspace isolation，但还不是完整 RBAC、hosted 多租户产品或签名安装器。
+- Free Local worker 仍可通过 Python source package 安装为 `agentops-worker`；
+  Commercial / BYOC 使用 `ui/next-app/` 的 TypeScript worker。远程
+  enrollment 已有 scoped token、rotation、short-lived session、Human
+  administration 和 workspace entitlement，但最终 approval-gated
+  enrollment、完整 BYOC 升级/回滚证据和发布 promotion 仍未关闭。
 
 Dify 可以作为本地或客户服务器上的 agent 工具层，而不是 MIS 的替代品。MIS 负责记录任务、运行、工具、审批、评估和审计；Dify 负责知识库/工作流/问答应用。查看 Dify 当前信任域和配置：
 
@@ -791,6 +797,16 @@ agentops-mis-mvp/
 - 禁止隐藏 telemetry；如果未来接入第三方观测系统，必须显式记录并可关闭。
 - 不提交 `agentops_mis.db`、credentials、真实 prompts、私聊正文或完整 transcripts。
 
-## 下一步
+## 当前迁移方向
 
-本地 Codex 应把这个参考实现迁移成 Next.js + TypeScript + Tailwind + SQLite + Prisma/Drizzle：保留数据库模型、API 语义和 mock runtime 行为，再逐步接入 Claude Code / Codex / OpenHands / CrewAI / LangGraph adapter。
+商业版不再以 SQLite 为目标。当前迁移按
+`docs/COMMERCIAL_MIGRATION_CLEAN_ROOM_BREAKDOWN.md` 推进：
+
+1. Commercial / BYOC 的 API、Human Session、RBAC、审批、配额、审计和证据
+   由 Next.js + TypeScript + PostgreSQL 16 直接持有。
+2. Hermes / OpenClaw 商业 worker 使用 Node.js/TypeScript，不启动 Python
+   worker 或 Python API。
+3. Python + SQLite 只保留给 Free Local、离线测试编排、迁移验证和显式兼容
+   回滚，不得成为 production/shared 权威。
+4. 迁移只有在客户环境安装、升级、备份恢复、回滚、当前提交 CI，以及同一
+   冻结提交的真实 Hermes/OpenClaw 闭环全部通过后才算完成。

@@ -180,7 +180,7 @@ As of 2026-07-24:
   checks.
 - Lane 4 owns PreparedAction creation, approval binding, execution leases,
   terminal receipts, and reconciliation gates.
-- Frozen commit `72a1b9f` passed the complete real Hermes and real OpenClaw
+- Frozen commit `d3b9e73` passed the complete real Hermes and real OpenClaw
   Human review flow against the same source fingerprint. Both receipts reported
   the TypeScript Worker started, no Python Worker or Python API started,
   `provider_call_performed=true`, and `dry_run=false`.
@@ -191,20 +191,28 @@ As of 2026-07-24:
 - Lane 6 remains partial. Direct Human enrollment create/list/revoke/rotate,
   session list/revoke, one-time hash-only credentials, and PostgreSQL workspace
   entitlement/quota evaluation are owned. New enrollment, child-session, and
-  run-start writes fail closed with committed denial audit evidence. Approval-
-  gated enrollment request/decision/issue and remaining commercial policy
-  surfaces are still open.
-- Lane 7 remains open for customer packaging, BYOC, upgrade, backup/restore,
-  rollback, supply-chain receipts, and final promotion.
+  run-start writes fail closed with committed denial audit evidence. A trusted
+  local TypeScript/PostgreSQL operator CLI now plans and applies entitlement
+  configuration with Human credential verification, revision guards, and
+  append-only audit. Approval-gated enrollment request/decision/issue and final
+  cost-reservation policy are still open.
+- Lane 7 has an initial BYOC package: a non-root Node.js image definition,
+  PostgreSQL 16 Compose topology, one-shot migration dependency, direct
+  TypeScript/PostgreSQL readiness, and custom-format backup/isolated restore
+  drill scripts. Atomic backup publication, behavior-tested restore cleanup,
+  complete schema-invariant verification, actual clean-customer image
+  installation, retained-data upgrade/rollback, supply-chain receipts, and
+  final promotion remain open.
 
-Commits after `72a1b9f` are not covered by that frozen-source runtime receipt.
+Commits after `d3b9e73` are not covered by that frozen-source runtime receipt.
 Release, handoff, and merge authority remain false until the remaining read,
 enrollment, entitlement, deployment, and promotion gates pass and the final
 source commit is rerun through both real runtimes.
 
-The next slices are the remaining Lane 6 approval-gated enrollment and policy
-owners, followed by Lane 7 customer-environment deployment, upgrade, rollback,
-and final same-SHA dual-runtime promotion.
+The next slices are the remaining Lane 6 approval-gated enrollment and hard
+cost-reservation policy owners, followed by Lane 7 clean-customer image
+installation, retained-data upgrade/rollback, and final same-SHA dual-runtime
+promotion.
 
 ## Definition Of Done
 

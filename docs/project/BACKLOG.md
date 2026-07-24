@@ -1,5 +1,11 @@
 # AgentOps MIS Prioritized Backlog
 
+> Commercial migration note (2026-07-24): the v1.5 backlog below remains the
+> Free Local baseline. Commercial / BYOC migration priority is the lane order
+> and Definition of Done in
+> `docs/COMMERCIAL_MIGRATION_CLEAN_ROOM_BREAKDOWN.md`; it does not target
+> Python/SQLite as the production stack.
+
 > Status date: 2026-06-22
 > Development line: `codex/agent-gateway-kb-demo`
 > Current release status: `READY_TO_MERGE`

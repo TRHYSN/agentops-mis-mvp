@@ -1,5 +1,12 @@
 # AgentOps MIS Current Project State
 
+> Commercial migration note (2026-07-24): this file preserves the v1.5 Free
+> Local release baseline below. Current Commercial / BYOC architecture and
+> remaining gates are authoritative in
+> `docs/COMMERCIAL_MIGRATION_CLEAN_ROOM_BREAKDOWN.md`. Free Local uses
+> Python/SQLite; production and shared commercial paths use
+> Next.js/TypeScript/PostgreSQL and fail closed instead of proxying Python.
+
 > Status date: 2026-06-22
 > Repository: `geogejoy107-jpg/agentops-mis-mvp`
 > Development line: `codex/agent-gateway-kb-demo`
@@ -34,7 +41,9 @@ Project Spec / Approved Decision
 ```
 
 - GitHub is authoritative for code, branch, commit, PR, and test facts.
-- AgentOps MIS SQLite/API is authoritative for execution and audit facts.
+- Free Local SQLite/API is authoritative only for its local product track.
+- Commercial / BYOC PostgreSQL and direct TypeScript owners are authoritative
+  for production execution, review, entitlement, evidence, and audit facts.
 - Notion MIS Project Ledger and the versioned project files are authoritative for approved project state and decisions.
 - Chat history is source material, not canonical state.
 
