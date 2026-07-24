@@ -415,6 +415,10 @@ async function run() {
     assert.match(successfulCleanup.stdout, /"cleanup_confirmed":true/);
     assert.match(
       successfulCleanup.stdout,
+      /"schema_fingerprint_verified":true/,
+    );
+    assert.match(
+      successfulCleanup.stdout,
       /"restore_database_kept":false/,
     );
     assert.equal(await pathExists(join(databaseState, cleanupDatabase)), false);
@@ -448,6 +452,7 @@ async function run() {
       checksum_tamper_rejected_before_restore: true,
       restore_failure_cleanup: true,
       schema_failure_cleanup: true,
+      schema_fingerprint_verified: true,
       drop_failure_fail_closed: true,
       success_cleanup_confirmed: true,
       keep_requires_success_and_explicit_true: true,

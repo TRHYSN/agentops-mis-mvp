@@ -290,6 +290,14 @@ async function runContract() {
     };
     assert.equal(startReceipt.contract, "nextjs_start_boundary_v2");
     assert.equal(startReceipt.schema_ready, true);
+    assert.equal(
+      (
+        startReceipt as typeof startReceipt & {
+          schema_fingerprint_verified?: boolean;
+        }
+      ).schema_fingerprint_verified,
+      true,
+    );
     assert.equal(startReceipt.production_python_fallback, false);
 
     const beforeCheck = await ledgerSnapshot(fresh.connectionString);
@@ -367,6 +375,40 @@ async function runContract() {
     );
     await runPostgresSchemaCommand("check", { connectionString: concurrent.connectionString });
 
+    const catalogDrift = await createSchema(admin, "catalog_drift");
+    await runPostgresSchemaCommand(
+      "migrate",
+      { connectionString: catalogDrift.connectionString },
+    );
+    const catalogDriftClient = new Client({
+      connectionString: catalogDrift.connectionString,
+    });
+    await catalogDriftClient.connect();
+    try {
+      await catalogDriftClient.query(
+        "DROP TRIGGER runtime_events_append_only_v8 ON runtime_events",
+      );
+    } finally {
+      await catalogDriftClient.end();
+    }
+    await expectSchemaError(
+      () => runPostgresSchemaCommand(
+        "check",
+        { connectionString: catalogDrift.connectionString },
+      ),
+      "schema_fingerprint_mismatch",
+    );
+    await expectSchemaError(
+      () => runPostgresSchemaCommand(
+        "migrate",
+        { connectionString: catalogDrift.connectionString },
+      ),
+      "schema_fingerprint_mismatch",
+    );
+    const catalogDriftStart = startCheck(catalogDrift.connectionString);
+    assert.notEqual(catalogDriftStart.status, 0);
+    assertBoundedProcessOutput(catalogDriftStart);
+
     const missing = await createSchema(admin, "missing");
     const behindStart = startCheck(missing.connectionString);
     assert.notEqual(behindStart.status, 0);
@@ -402,6 +444,7 @@ async function runContract() {
       tampered_ledger_fail_closed: true,
       missing_migration_fail_closed: true,
       missing_relation_fail_closed: true,
+      catalog_fingerprint_drift_fail_closed: true,
       concurrent_serialization: true,
       governed_knowledge_workspace_visibility: true,
       governed_knowledge_full_text_index: true,

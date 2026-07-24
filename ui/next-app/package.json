@@ -21,6 +21,7 @@
     "test:configuration-secrets-contract": "tsx scripts/configuration-secrets-contract.ts",
     "test:byoc-packaging-contract": "tsx scripts/byoc-packaging-contract.ts",
     "test:byoc-backup-restore-behavior-contract": "tsx scripts/byoc-backup-restore-behavior-contract.ts",
+    "test:commercial-health-postgres-contract": "tsx scripts/commercial-health-postgres-contract.ts",
     "test:customer-delivery-approval-request-contract": "tsx scripts/customer-delivery-approval-request-contract.ts",
     "test:agent-gateway-core-postgres-contract": "tsx scripts/agent-gateway-core-postgres-contract.ts",
     "test:agent-gateway-scoped-read-postgres-contract": "tsx scripts/agent-gateway-scoped-read-postgres-contract.ts",

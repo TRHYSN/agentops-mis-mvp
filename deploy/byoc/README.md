@@ -47,7 +47,8 @@ docker compose --env-file deploy/byoc/.env \
 
 The one-shot `migrate` service applies the checksum-pinned PostgreSQL manifest
 before the control plane starts. The application then checks the same manifest
-again and fails closed if the schema is missing or has drifted.
+and its expected PostgreSQL catalog fingerprint, and fails closed if the schema
+is missing or has drifted.
 
 ```bash
 curl --fail http://127.0.0.1:3001/api/mis/health
@@ -73,7 +74,7 @@ The script never reuses an existing path, so concurrent writers and symlinked
 outputs fail closed without replacing another backup.
 
 Restore into a new isolated database and verify it against the migration
-manifest embedded in the current image:
+manifest and catalog fingerprint embedded in the current image:
 
 ```bash
 deploy/byoc/restore-drill.sh backups/agentops-before-upgrade.bundle

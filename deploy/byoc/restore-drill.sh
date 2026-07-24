@@ -176,4 +176,4 @@ else
 fi
 
 trap - 0 1 2 15
-printf '{"ok":true,"contract":"agentops_byoc_restore_drill_v2","checksum_verified":true,"migration_manifest_verified":true,"production_overwritten":false,"restore_database_kept":%s,"cleanup_confirmed":%s,"restore_disposition_confirmed":true,"credentials_omitted":true}\n' "$kept" "$cleanup_confirmed"
+printf '{"ok":true,"contract":"agentops_byoc_restore_drill_v2","checksum_verified":true,"migration_manifest_verified":true,"schema_fingerprint_verified":true,"production_overwritten":false,"restore_database_kept":%s,"cleanup_confirmed":%s,"restore_disposition_confirmed":true,"credentials_omitted":true}\n' "$kept" "$cleanup_confirmed"

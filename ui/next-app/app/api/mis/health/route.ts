@@ -8,6 +8,10 @@ import {
   POSTGRES_MIGRATION_MANIFEST,
   SCHEMA_CONTRACT,
 } from "@/server/controlPlane/schemaManifest";
+import {
+  assertExpectedSchemaFingerprint,
+  SchemaReadinessError,
+} from "@/server/controlPlane/schemaReadiness";
 import { withPostgresTransaction } from "@/server/controlPlane/db";
 
 export const dynamic = "force-dynamic";
@@ -27,12 +31,12 @@ export async function GET() {
         { status: 503 },
       );
     }
-    const schemaReady = await withPostgresTransaction(async (client) => {
+    const schemaFingerprint = await withPostgresTransaction(async (client) => {
       await client.query("SET LOCAL statement_timeout = '5s'");
       const relation = await client.query<{ relation: string | null }>(
         "SELECT to_regclass('agentops_schema_migrations')::text AS relation",
       );
-      if (!relation.rows[0]?.relation) return false;
+      if (!relation.rows[0]?.relation) return null;
       const rows = await client.query<{
         component: string;
         version: string;
@@ -45,20 +49,24 @@ export async function GET() {
         [POSTGRES_MIGRATION_MANIFEST.map((migration) => migration.component)],
       );
       const recorded = new Map(rows.rows.map((row) => [row.component, row]));
-      return POSTGRES_MIGRATION_MANIFEST.every((migration) => {
+      const ledgerReady = POSTGRES_MIGRATION_MANIFEST.every((migration) => {
         const row = recorded.get(migration.component);
         return row?.version === migration.version
           && row.schema_contract === migration.schemaContract
           && row.checksum === migration.checksum;
       });
+      if (!ledgerReady) return null;
+      return assertExpectedSchemaFingerprint(client);
     });
-    if (!schemaReady) throw new Error("schema_not_ready");
+    if (!schemaFingerprint) throw new Error("schema_not_ready");
     return NextResponse.json({
       ok: true,
       status: "ready",
       control_plane: "typescript_postgres",
       schema_contract: SCHEMA_CONTRACT,
       schema_ready: true,
+      schema_fingerprint_contract: schemaFingerprint.contract,
+      schema_fingerprint_verified: true,
       python_proxy_performed: false,
       sqlite_used: false,
       credentials_omitted: true,
@@ -68,7 +76,8 @@ export async function GET() {
       {
         ok: false,
         status: "not_ready",
-        error: error instanceof Error && error.message === "schema_not_ready"
+        error: error instanceof SchemaReadinessError
+          || (error instanceof Error && error.message === "schema_not_ready")
           ? "schema_not_ready"
           : "commercial_readiness_failed",
         python_proxy_performed: false,

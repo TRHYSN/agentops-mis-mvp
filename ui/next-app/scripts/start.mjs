@@ -130,6 +130,9 @@ if (process.argv.includes("--check")) {
     schema_required: configuration.production,
     schema_ready: configuration.production ? schema?.ok === true : null,
     schema_contract: configuration.production ? schema?.schema_contract : null,
+    schema_fingerprint_verified: configuration.production
+      ? schema?.schema_fingerprint_verified === true
+      : null,
     production_python_fallback: false,
     credentials_omitted: true,
   }));

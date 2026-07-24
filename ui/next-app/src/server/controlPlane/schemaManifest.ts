@@ -8,6 +8,12 @@ export type MigrationDefinition = Readonly<{
 
 export const SCHEMA_CONTRACT = "agentops_commercial_postgres_v9";
 
+export const EXPECTED_POSTGRES_SCHEMA_FINGERPRINT = Object.freeze({
+  contract: "agentops_postgres_schema_fingerprint_v1",
+  sha256: "eb482da9beb9a5c4cd1afdadaf114d3828991285107f71d0ad620a02d377f36e",
+  objectCount: 745,
+});
+
 export const POSTGRES_MIGRATION_MANIFEST = Object.freeze([
   {
     component: "commercial_control_plane_baseline",

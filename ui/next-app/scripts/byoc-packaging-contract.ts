@@ -152,6 +152,8 @@ async function run() {
   activeCheck = "health_owner";
   assert.match(healthRoute, /withPostgresTransaction/);
   assert.match(healthRoute, /POSTGRES_MIGRATION_MANIFEST/);
+  assert.match(healthRoute, /assertExpectedSchemaFingerprint/);
+  assert.match(healthRoute, /schema_fingerprint_verified: true/);
   assert.match(healthRoute, /control_plane: "typescript_postgres"/);
   assert.match(healthRoute, /python_proxy_performed: false/);
   assert.match(healthRoute, /sqlite_used: false/);
@@ -187,6 +189,7 @@ async function run() {
   assert.match(restoreScript, /npm run check:postgres-schema/);
   assert.match(restoreScript, /production_overwritten":false/);
   assert.match(restoreScript, /migration_manifest_verified":true/);
+  assert.match(restoreScript, /schema_fingerprint_verified":true/);
   assert.match(restoreScript, /restore_disposition_confirmed":true/);
   assert.doesNotMatch(restoreScript, /schema_verified":true/);
   assert.doesNotMatch(restoreScript, /--clean|--create|python|sqlite/i);
@@ -209,6 +212,7 @@ async function run() {
     docker_secrets_only: true,
     migrator_hmac_omitted: true,
     readiness_owner: "typescript_postgres",
+    catalog_fingerprint_readiness: true,
     atomic_backup_bundle_commit: true,
     isolated_restore_schema_drill: true,
     executable_backup_restore_behavior_contract: true,

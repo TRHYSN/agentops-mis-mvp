@@ -4,6 +4,9 @@ import { randomUUID } from "node:crypto";
 import { Client } from "pg";
 
 import {
+  EXPECTED_POSTGRES_SCHEMA_FINGERPRINT,
+} from "../src/server/controlPlane/schemaManifest";
+import {
   computeSchemaFingerprint,
   SCHEMA_FINGERPRINT_CONTRACT,
 } from "../src/server/controlPlane/schemaFingerprint";
@@ -44,6 +47,14 @@ async function run() {
       const repeated = await computeSchemaFingerprint(client);
       assert.equal(baseline.contract, SCHEMA_FINGERPRINT_CONTRACT);
       assert.match(baseline.sha256, /^[a-f0-9]{64}$/);
+      assert.equal(
+        baseline.sha256,
+        EXPECTED_POSTGRES_SCHEMA_FINGERPRINT.sha256,
+      );
+      assert.equal(
+        baseline.object_count,
+        EXPECTED_POSTGRES_SCHEMA_FINGERPRINT.objectCount,
+      );
       assert.deepEqual(repeated, baseline);
       assert((baseline.object_counts.trigger || 0) > 0);
       assert((baseline.object_counts.function || 0) > 0);
@@ -104,6 +115,7 @@ async function run() {
         schema_name_independent: true,
         row_data_independent: true,
         append_only_trigger_drift_detected: true,
+        expected_authority_verified: true,
         catalog_only: baseline.catalog_only,
         row_data_omitted: baseline.row_data_omitted,
         credentials_omitted: baseline.credentials_omitted,
@@ -129,11 +141,11 @@ async function run() {
   }
 }
 
-run().catch((error: unknown) => {
+run().catch(() => {
   console.log(JSON.stringify({
     ok: false,
     contract: "agentops_schema_fingerprint_postgres_contract_v1",
-    error: error instanceof Error ? error.message : "contract_failed",
+    error_code: "schema_fingerprint_contract_failed",
     credentials_omitted: true,
     row_data_omitted: true,
     python_used: false,

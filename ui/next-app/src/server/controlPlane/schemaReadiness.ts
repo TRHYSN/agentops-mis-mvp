@@ -2,10 +2,15 @@ import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 
-import { Client, type ClientConfig } from "pg";
+import { Client, type ClientBase, type ClientConfig } from "pg";
 
 import { postgresDsn, postgresSslEnabled } from "./config";
 import {
+  computeSchemaFingerprint,
+  type SchemaFingerprintReceipt,
+} from "./schemaFingerprint";
+import {
+  EXPECTED_POSTGRES_SCHEMA_FINGERPRINT,
   POSTGRES_MIGRATION_MANIFEST,
   SCHEMA_CONTRACT,
   type MigrationDefinition,
@@ -30,6 +35,9 @@ export type SchemaReceipt = Readonly<{
   current_count: number;
   lock_acquired: true;
   read_only: boolean;
+  schema_fingerprint_contract: string;
+  schema_fingerprint_verified: true;
+  schema_object_count: number;
   credentials_omitted: true;
   sql_omitted: true;
   row_data_omitted: true;
@@ -254,6 +262,25 @@ async function assertSchemaRelations(client: Client) {
   }
 }
 
+export async function assertExpectedSchemaFingerprint(
+  client: ClientBase,
+): Promise<SchemaFingerprintReceipt> {
+  let actual: SchemaFingerprintReceipt;
+  try {
+    actual = await computeSchemaFingerprint(client);
+  } catch {
+    throw new SchemaReadinessError("schema_fingerprint_check_failed");
+  }
+  if (
+    actual.contract !== EXPECTED_POSTGRES_SCHEMA_FINGERPRINT.contract
+    || actual.sha256 !== EXPECTED_POSTGRES_SCHEMA_FINGERPRINT.sha256
+    || actual.object_count !== EXPECTED_POSTGRES_SCHEMA_FINGERPRINT.objectCount
+  ) {
+    throw new SchemaReadinessError("schema_fingerprint_mismatch");
+  }
+  return actual;
+}
+
 async function migrate(client: Client, manifest: readonly LoadedMigration[]) {
   let appliedCount = 0;
   let currentCount = 0;
@@ -315,6 +342,7 @@ export async function runPostgresSchemaCommand(
         ? await check(client)
         : await migrate(client, manifest);
       await assertSchemaRelations(client);
+      const fingerprint = await assertExpectedSchemaFingerprint(client);
       await client.query(operation === "check" ? "ROLLBACK" : "COMMIT");
       return {
         contract: "agentops_postgres_schema_readiness_v1",
@@ -326,6 +354,9 @@ export async function runPostgresSchemaCommand(
         current_count: counts.currentCount,
         lock_acquired: true,
         read_only: operation === "check",
+        schema_fingerprint_contract: fingerprint.contract,
+        schema_fingerprint_verified: true,
+        schema_object_count: fingerprint.object_count,
         credentials_omitted: true,
         sql_omitted: true,
         row_data_omitted: true,
