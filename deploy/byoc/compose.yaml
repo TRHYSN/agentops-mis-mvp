@@ -1,0 +1,73 @@
+name: agentops-mis-byoc
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${AGENTOPS_POSTGRES_DATABASE:-agentops}
+      POSTGRES_USER: ${AGENTOPS_POSTGRES_USER:-agentops}
+      POSTGRES_PASSWORD: ${AGENTOPS_POSTGRES_PASSWORD:?set AGENTOPS_POSTGRES_PASSWORD}
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - pg_isready -U "$${POSTGRES_USER}" -d "$${POSTGRES_DB}"
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    volumes:
+      - agentops_postgres_data:/var/lib/postgresql/data
+    networks:
+      - control_plane
+
+  migrate:
+    build:
+      context: ../..
+      dockerfile: deploy/byoc/Dockerfile
+    image: ${AGENTOPS_IMAGE:-agentops-mis-byoc:local}
+    restart: "no"
+    command: ["npm", "run", "migrate:postgres"]
+    environment: &control_plane_environment
+      AGENTOPS_DEPLOYMENT_MODE: production
+      AGENTOPS_CONTROL_PLANE_MODE: postgres
+      AGENTOPS_POSTGRES_DSN: postgresql://${AGENTOPS_POSTGRES_USER:-agentops}:${AGENTOPS_POSTGRES_PASSWORD:?set AGENTOPS_POSTGRES_PASSWORD}@postgres:5432/${AGENTOPS_POSTGRES_DATABASE:-agentops}
+      AGENTOPS_POSTGRES_SSL: "false"
+      AGENTOPS_HUMAN_SESSION_HMAC_KEY: ${AGENTOPS_HUMAN_SESSION_HMAC_KEY:?set AGENTOPS_HUMAN_SESSION_HMAC_KEY}
+      AGENTOPS_ALLOWED_ORIGINS: ${AGENTOPS_ALLOWED_ORIGINS:?set AGENTOPS_ALLOWED_ORIGINS}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - control_plane
+
+  control-plane:
+    image: ${AGENTOPS_IMAGE:-agentops-mis-byoc:local}
+    restart: unless-stopped
+    environment:
+      <<: *control_plane_environment
+      AGENTOPS_NEXT_HOST: 0.0.0.0
+      AGENTOPS_NEXT_PORT: "3001"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - fetch('http://127.0.0.1:3001/api/mis/health').then(async r=>{if(!r.ok)throw new Error(await r.text())})
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+    ports:
+      - ${AGENTOPS_BIND_ADDRESS:-127.0.0.1}:${AGENTOPS_PORT:-3001}:3001
+    networks:
+      - control_plane
+
+volumes:
+  agentops_postgres_data:
+
+networks:
+  control_plane:
+    driver: bridge

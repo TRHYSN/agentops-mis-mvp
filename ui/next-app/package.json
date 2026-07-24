@@ -18,6 +18,7 @@
     "check:postgres-schema": "tsx scripts/migrate-postgres.ts --check",
     "typecheck": "tsc --noEmit",
     "test:control-plane-mode-contract": "tsx scripts/control-plane-mode-contract.ts",
+    "test:byoc-packaging-contract": "tsx scripts/byoc-packaging-contract.ts",
     "test:customer-delivery-approval-request-contract": "tsx scripts/customer-delivery-approval-request-contract.ts",
     "test:agent-gateway-core-postgres-contract": "tsx scripts/agent-gateway-core-postgres-contract.ts",
     "test:agent-gateway-scoped-read-postgres-contract": "tsx scripts/agent-gateway-scoped-read-postgres-contract.ts",
