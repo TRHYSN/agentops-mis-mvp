@@ -18,7 +18,9 @@
     "check:postgres-schema": "tsx scripts/migrate-postgres.ts --check",
     "typecheck": "tsc --noEmit",
     "test:control-plane-mode-contract": "tsx scripts/control-plane-mode-contract.ts",
+    "test:configuration-secrets-contract": "tsx scripts/configuration-secrets-contract.ts",
     "test:byoc-packaging-contract": "tsx scripts/byoc-packaging-contract.ts",
+    "test:byoc-backup-restore-behavior-contract": "tsx scripts/byoc-backup-restore-behavior-contract.ts",
     "test:customer-delivery-approval-request-contract": "tsx scripts/customer-delivery-approval-request-contract.ts",
     "test:agent-gateway-core-postgres-contract": "tsx scripts/agent-gateway-core-postgres-contract.ts",
     "test:agent-gateway-scoped-read-postgres-contract": "tsx scripts/agent-gateway-scoped-read-postgres-contract.ts",
@@ -36,7 +38,8 @@
     "test:human-task-run-read-postgres-contract": "tsx scripts/human-task-run-read-postgres-contract.ts",
     "test:prepared-action-owner-contract": "tsx scripts/prepared-action-owner-contract.ts",
     "test:commercial-worker-contract": "tsx scripts/commercial-worker-contract.ts",
-    "test:postgres-schema-contract": "tsx scripts/postgres-schema-contract.ts"
+    "test:postgres-schema-contract": "tsx scripts/postgres-schema-contract.ts",
+    "test:schema-fingerprint-postgres-contract": "tsx scripts/schema-fingerprint-postgres-contract.ts"
   },
   "dependencies": {
     "next": "16.2.11",

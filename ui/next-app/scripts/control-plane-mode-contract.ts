@@ -4,6 +4,7 @@ import {
   controlPlaneMode,
   isProductionDeployment,
   legacyPythonProxyAllowed,
+  postgresApplicationName,
   postgresDsn,
 } from "../src/server/controlPlane/config";
 
@@ -12,6 +13,14 @@ const ENV_KEYS = [
   "AGENTOPS_TS_CONTROL_PLANE_MODE",
   "AGENTOPS_DEPLOYMENT_MODE",
   "AGENTOPS_POSTGRES_DSN",
+  "AGENTOPS_POSTGRES_DSN_FILE",
+  "AGENTOPS_POSTGRES_HOST",
+  "AGENTOPS_POSTGRES_PORT",
+  "AGENTOPS_POSTGRES_DATABASE",
+  "AGENTOPS_POSTGRES_USER",
+  "AGENTOPS_POSTGRES_PASSWORD",
+  "AGENTOPS_POSTGRES_PASSWORD_FILE",
+  "AGENTOPS_POSTGRES_APPLICATION_NAME",
   "NODE_ENV",
 ] as const;
 
@@ -54,9 +63,18 @@ try {
 
   clearContractEnvironment();
   mutableEnvironment.AGENTOPS_DEPLOYMENT_MODE = "production";
-  assert.throws(() => postgresDsn(), /AGENTOPS_POSTGRES_DSN is required/);
+  assert.throws(() => postgresDsn(), /Postgres host\/database\/user/);
   mutableEnvironment.AGENTOPS_POSTGRES_DSN = "postgresql://control-plane.invalid/agentops";
   assert.equal(postgresDsn(), "postgresql://control-plane.invalid/agentops");
+  assert.equal(
+    postgresApplicationName(),
+    "agentops-mis-typescript-control-plane",
+  );
+  mutableEnvironment.AGENTOPS_POSTGRES_APPLICATION_NAME =
+    "agentops-contract-01";
+  assert.equal(postgresApplicationName(), "agentops-contract-01");
+  mutableEnvironment.AGENTOPS_POSTGRES_APPLICATION_NAME = "unsafe name";
+  assert.throws(() => postgresApplicationName(), /safe 1-63 character/);
 
   clearContractEnvironment();
   mutableEnvironment.AGENTOPS_DEPLOYMENT_MODE = "unexpected";

@@ -140,9 +140,19 @@ docker compose --env-file "$env_file" -f "$compose_file" exec -T postgres \
 
 if ! docker compose --env-file "$env_file" -f "$compose_file" run --rm \
   migrate sh -ceu '
-    base=${AGENTOPS_POSTGRES_DSN%/*}
-    AGENTOPS_POSTGRES_DSN="${base}/$1"
-    export AGENTOPS_POSTGRES_DSN
+    if [ -n "${AGENTOPS_POSTGRES_HOST:-}" ] &&
+      [ -n "${AGENTOPS_POSTGRES_PASSWORD_FILE:-}" ]
+    then
+      AGENTOPS_POSTGRES_DATABASE=$1
+      export AGENTOPS_POSTGRES_DATABASE
+      unset AGENTOPS_POSTGRES_DSN AGENTOPS_POSTGRES_DSN_FILE
+    elif [ -n "${AGENTOPS_POSTGRES_DSN:-}" ]; then
+      base=${AGENTOPS_POSTGRES_DSN%/*}
+      AGENTOPS_POSTGRES_DSN="${base}/$1"
+      export AGENTOPS_POSTGRES_DSN
+    else
+      exit 65
+    fi
     npm run check:postgres-schema
   ' sh "$restore_database" >/dev/null 2>&1
 then

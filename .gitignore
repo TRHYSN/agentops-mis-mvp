@@ -23,3 +23,7 @@ ui/**/output/
 ui/**/.playwright-cli/
 ui/**/.next/
 ui/**/tsconfig.tsbuildinfo
+
+# BYOC operator-local configuration and Docker secret sources.
+deploy/byoc/.env
+deploy/byoc/secrets/

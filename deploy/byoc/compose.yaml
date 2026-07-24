@@ -2,12 +2,14 @@ name: agentops-mis-byoc
 
 services:
   postgres:
-    image: postgres:16-alpine
+    image: postgres:16-alpine@sha256:57c72fd2a128e416c7fcc499958864df5301e940bca0a56f58fddf30ffc07777
     restart: unless-stopped
     environment:
       POSTGRES_DB: ${AGENTOPS_POSTGRES_DATABASE:-agentops}
       POSTGRES_USER: ${AGENTOPS_POSTGRES_USER:-agentops}
-      POSTGRES_PASSWORD: ${AGENTOPS_POSTGRES_PASSWORD:?set AGENTOPS_POSTGRES_PASSWORD}
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
+    secrets:
+      - postgres_password
     healthcheck:
       test:
         - CMD-SHELL
@@ -27,13 +29,17 @@ services:
     image: ${AGENTOPS_IMAGE:-agentops-mis-byoc:local}
     restart: "no"
     command: ["npm", "run", "migrate:postgres"]
-    environment: &control_plane_environment
+    environment: &control_plane_database_environment
       AGENTOPS_DEPLOYMENT_MODE: production
       AGENTOPS_CONTROL_PLANE_MODE: postgres
-      AGENTOPS_POSTGRES_DSN: postgresql://${AGENTOPS_POSTGRES_USER:-agentops}:${AGENTOPS_POSTGRES_PASSWORD:?set AGENTOPS_POSTGRES_PASSWORD}@postgres:5432/${AGENTOPS_POSTGRES_DATABASE:-agentops}
+      AGENTOPS_POSTGRES_HOST: postgres
+      AGENTOPS_POSTGRES_PORT: "5432"
+      AGENTOPS_POSTGRES_DATABASE: ${AGENTOPS_POSTGRES_DATABASE:-agentops}
+      AGENTOPS_POSTGRES_USER: ${AGENTOPS_POSTGRES_USER:-agentops}
+      AGENTOPS_POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
       AGENTOPS_POSTGRES_SSL: "false"
-      AGENTOPS_HUMAN_SESSION_HMAC_KEY: ${AGENTOPS_HUMAN_SESSION_HMAC_KEY:?set AGENTOPS_HUMAN_SESSION_HMAC_KEY}
-      AGENTOPS_ALLOWED_ORIGINS: ${AGENTOPS_ALLOWED_ORIGINS:?set AGENTOPS_ALLOWED_ORIGINS}
+    secrets:
+      - postgres_password
     depends_on:
       postgres:
         condition: service_healthy
@@ -44,9 +50,14 @@ services:
     image: ${AGENTOPS_IMAGE:-agentops-mis-byoc:local}
     restart: unless-stopped
     environment:
-      <<: *control_plane_environment
+      <<: *control_plane_database_environment
+      AGENTOPS_HUMAN_SESSION_HMAC_KEY_FILE: /run/secrets/human_session_hmac_key
+      AGENTOPS_ALLOWED_ORIGINS: ${AGENTOPS_ALLOWED_ORIGINS:?set AGENTOPS_ALLOWED_ORIGINS}
       AGENTOPS_NEXT_HOST: 0.0.0.0
       AGENTOPS_NEXT_PORT: "3001"
+    secrets:
+      - postgres_password
+      - human_session_hmac_key
     depends_on:
       migrate:
         condition: service_completed_successfully
@@ -71,3 +82,9 @@ volumes:
 networks:
   control_plane:
     driver: bridge
+
+secrets:
+  postgres_password:
+    file: ${AGENTOPS_POSTGRES_PASSWORD_FILE:?set AGENTOPS_POSTGRES_PASSWORD_FILE}
+  human_session_hmac_key:
+    file: ${AGENTOPS_HUMAN_SESSION_HMAC_KEY_FILE:?set AGENTOPS_HUMAN_SESSION_HMAC_KEY_FILE}

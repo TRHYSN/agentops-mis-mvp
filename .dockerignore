@@ -4,6 +4,7 @@
 .env
 .env.*
 !.env.example
+deploy/byoc/secrets
 **/.DS_Store
 **/__pycache__
 **/*.db

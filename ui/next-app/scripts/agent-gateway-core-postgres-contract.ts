@@ -42,6 +42,8 @@ const foreignToken = `contract_foreign_token_${randomBytes(18).toString("hex")}`
 const session = `contract_session_${randomBytes(18).toString("hex")}`;
 const workspaceId = "ws_gateway_core";
 const otherWorkspaceId = "ws_gateway_foreign";
+const postgresApplicationName =
+  `agentops-core-${randomBytes(6).toString("hex")}`;
 let pythonObserverRequests = 0;
 
 function sha(value: string) {
@@ -50,7 +52,11 @@ function sha(value: string) {
 
 function scopedDsn() {
   const parsed = new URL(baseDsn);
-  parsed.searchParams.set("options", `-csearch_path=${schema}`);
+  parsed.searchParams.set(
+    "options",
+    `-csearch_path=${schema} -cstatement_timeout=8000 -clock_timeout=6000`,
+  );
+  parsed.searchParams.set("application_name", postgresApplicationName);
   return parsed.toString();
 }
 
@@ -109,20 +115,53 @@ async function within<T>(work: Promise<T>, timeoutMs: number) {
   }
 }
 
-async function waitForLockWaiters(client: Client, minimum: number) {
+async function waitForBlockedByPid(
+  client: Client,
+  blockerPid: number,
+) {
   const deadline = Date.now() + 5_000;
   while (Date.now() < deadline) {
-    const result = await client.query<{ count: number }>(
-      `SELECT COUNT(*)::int AS count
+    const result = await client.query<{ pid: number }>(
+      `SELECT pid
       FROM pg_stat_activity
       WHERE datname=current_database()
         AND pid<>pg_backend_pid()
-        AND wait_event_type='Lock'`,
+        AND application_name=$1
+        AND wait_event_type='Lock'
+        AND $2::integer=ANY(pg_blocking_pids(pid))
+      ORDER BY query_start,pid`,
+      [postgresApplicationName, blockerPid],
     );
-    if ((result.rows[0]?.count || 0) >= minimum) return;
+    if (result.rows[0]?.pid) return result.rows[0].pid;
     await new Promise((resolve) => setTimeout(resolve, 20));
   }
-  throw new Error(`expected_${minimum}_postgres_lock_waiters`);
+  throw new Error("expected_target_postgres_lock_waiter");
+}
+
+async function waitForBlockedAdvisoryLock(
+  client: Client,
+  lockKey: number,
+) {
+  const deadline = Date.now() + 5_000;
+  while (Date.now() < deadline) {
+    const result = await client.query<{ pid: number }>(
+      `SELECT lock_row.pid
+      FROM pg_locks lock_row
+      JOIN pg_stat_activity activity ON activity.pid=lock_row.pid
+      WHERE activity.datname=current_database()
+        AND lock_row.pid<>pg_backend_pid()
+        AND activity.application_name=$1
+        AND lock_row.locktype='advisory'
+        AND lock_row.granted=false
+        AND lock_row.classid=0
+        AND lock_row.objid=$2::oid
+      ORDER BY activity.query_start,lock_row.pid`,
+      [postgresApplicationName, lockKey],
+    );
+    if (result.rows[0]?.pid) return result.rows[0].pid;
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  throw new Error("expected_target_postgres_advisory_lock_waiter");
 }
 
 type EntitlementDeniedResult = {
@@ -338,6 +377,7 @@ async function runContract() {
     deployment: process.env.AGENTOPS_DEPLOYMENT_MODE,
     mode: process.env.AGENTOPS_CONTROL_PLANE_MODE,
     upstream: process.env.AGENTOPS_API_BASE,
+    applicationName: process.env.AGENTOPS_POSTGRES_APPLICATION_NAME,
   };
   try {
     await admin.query(`CREATE SCHEMA "${schema}"`);
@@ -345,6 +385,8 @@ async function runContract() {
     process.env.AGENTOPS_DEPLOYMENT_MODE = "production";
     process.env.AGENTOPS_CONTROL_PLANE_MODE = "postgres";
     process.env.AGENTOPS_API_BASE = `http://127.0.0.1:${address.port}/api`;
+    process.env.AGENTOPS_POSTGRES_APPLICATION_NAME =
+      postgresApplicationName;
     await runPostgresSchemaCommand(
       "migrate",
       { connectionString: scopedDsn() },
@@ -720,13 +762,24 @@ async function runContract() {
       await entitlementClient.end();
     }
     const auditBlocker = new Client({ connectionString: scopedDsn() });
+    const lockObserver = new Client({
+      connectionString: scopedDsn(),
+      application_name: "agentops-core-lock-observer",
+    });
     await auditBlocker.connect();
+    await lockObserver.connect();
     let blockerReleased = false;
+    let lockOrderRunStart:
+      | ReturnType<typeof startAgentGatewayRun>
+      | undefined;
+    let lockOrderHeartbeat:
+      | ReturnType<typeof recordGatewayHeartbeat>
+      | undefined;
     try {
       await setRunEntitlement(auditBlocker);
       await auditBlocker.query("BEGIN");
       await auditBlocker.query("SELECT pg_advisory_xact_lock(1095779668)");
-      const lockOrderRunStart = startAgentGatewayRun(
+      lockOrderRunStart = startAgentGatewayRun(
         request(
           "POST",
           "/api/mis/agent-gateway/runs/start",
@@ -741,8 +794,12 @@ async function runContract() {
           },
         ),
       );
-      await waitForLockWaiters(auditBlocker, 1);
-      const lockOrderHeartbeat = recordGatewayHeartbeat(
+      void lockOrderRunStart.catch(() => undefined);
+      const runStartPid = await waitForBlockedAdvisoryLock(
+        lockObserver,
+        1095779668,
+      );
+      lockOrderHeartbeat = recordGatewayHeartbeat(
         request(
           "POST",
           "/api/mis/agent-gateway/heartbeat",
@@ -756,7 +813,12 @@ async function runContract() {
           },
         ),
       );
-      await waitForLockWaiters(auditBlocker, 2);
+      void lockOrderHeartbeat.catch(() => undefined);
+      const heartbeatPid = await waitForBlockedByPid(
+        lockObserver,
+        runStartPid,
+      );
+      assert.notEqual(heartbeatPid, runStartPid);
       await auditBlocker.query("COMMIT");
       blockerReleased = true;
       const runHeartbeatLockOrder = await within(
@@ -771,7 +833,12 @@ async function runContract() {
       if (!blockerReleased) {
         await auditBlocker.query("ROLLBACK").catch(() => undefined);
       }
+      const pendingOperations: Promise<unknown>[] = [];
+      if (lockOrderRunStart) pendingOperations.push(lockOrderRunStart);
+      if (lockOrderHeartbeat) pendingOperations.push(lockOrderHeartbeat);
+      await Promise.allSettled(pendingOperations);
       await auditBlocker.end().catch(() => undefined);
+      await lockObserver.end().catch(() => undefined);
     }
     await expectCode(
       "forbidden",
@@ -1086,6 +1153,12 @@ async function runContract() {
     else process.env.AGENTOPS_CONTROL_PLANE_MODE = originalEnv.mode;
     if (originalEnv.upstream === undefined) delete process.env.AGENTOPS_API_BASE;
     else process.env.AGENTOPS_API_BASE = originalEnv.upstream;
+    if (originalEnv.applicationName === undefined) {
+      delete process.env.AGENTOPS_POSTGRES_APPLICATION_NAME;
+    } else {
+      process.env.AGENTOPS_POSTGRES_APPLICATION_NAME =
+        originalEnv.applicationName;
+    }
     await admin.query(`DROP SCHEMA IF EXISTS "${schema}" CASCADE`);
     await admin.end();
   }

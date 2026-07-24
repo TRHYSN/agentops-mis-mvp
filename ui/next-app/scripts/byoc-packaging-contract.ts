@@ -41,7 +41,16 @@ async function run() {
   ]);
 
   activeCheck = "container_image";
-  assert.match(dockerfile, /FROM node:22-bookworm-slim AS dependencies/);
+  const pinnedNodeImage =
+    "node:22-bookworm-slim@sha256:6c74791e557ce11fc957704f6d4fe134a7bc8d6f5ca4403205b2966bd488f6b3";
+  assert.match(
+    dockerfile,
+    new RegExp(`FROM ${pinnedNodeImage} AS dependencies`),
+  );
+  assert.match(
+    dockerfile,
+    new RegExp(`FROM ${pinnedNodeImage} AS runtime`),
+  );
   assert.match(dockerfile, /npm ci --ignore-scripts/);
   assert.match(dockerfile, /npm run build/);
   assert.match(dockerfile, /npm prune --omit=dev --ignore-scripts/);
@@ -50,7 +59,10 @@ async function run() {
   assert.doesNotMatch(dockerfile, /python|sqlite|curl\s|wget\s/i);
 
   activeCheck = "compose_baseline";
-  assert.match(compose, /image: postgres:16-alpine/);
+  assert.match(
+    compose,
+    /image: postgres:16-alpine@sha256:57c72fd2a128e416c7fcc499958864df5301e940bca0a56f58fddf30ffc07777/,
+  );
   assert.match(compose, /command: \["npm", "run", "migrate:postgres"\]/);
   assert.match(compose, /condition: service_healthy/);
   assert.match(compose, /condition: service_completed_successfully/);
@@ -170,6 +182,8 @@ async function run() {
   assert.match(restoreScript, /restore_cleanup_failed/);
   assert.match(restoreScript, /restore_manifest_check_failed/);
   assert.match(restoreScript, /pg_restore/);
+  assert.match(restoreScript, /AGENTOPS_POSTGRES_PASSWORD_FILE/);
+  assert.match(restoreScript, /AGENTOPS_POSTGRES_DATABASE=\$1/);
   assert.match(restoreScript, /npm run check:postgres-schema/);
   assert.match(restoreScript, /production_overwritten":false/);
   assert.match(restoreScript, /migration_manifest_verified":true/);
@@ -187,6 +201,7 @@ async function run() {
     contract: "agentops_byoc_packaging_v1",
     node_major: 22,
     postgres_major: 16,
+    base_image_digests_pinned: true,
     non_root_runtime: true,
     migration_before_start: true,
     loopback_bind_default: true,

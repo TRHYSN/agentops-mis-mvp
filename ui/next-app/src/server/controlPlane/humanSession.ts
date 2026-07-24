@@ -7,7 +7,10 @@ import {
 } from "node:crypto";
 import type { PoolClient } from "pg";
 
-import { isProductionDeployment } from "./config";
+import {
+  isProductionDeployment,
+  secretEnvironmentValue,
+} from "./config";
 import { withPostgresTransaction } from "./db";
 import {
   HUMAN_PASSWORD_MAX_LENGTH,
@@ -76,6 +79,8 @@ type CredentialRow = UserRow & {
   credential_status: string;
 };
 
+type CredentialPasswordRow = Omit<CredentialRow, "name">;
+
 type MembershipRow = {
   workspace_id: string;
   user_id: string;
@@ -101,7 +106,7 @@ export type HumanSessionIdentity = {
 };
 
 function hmacKey() {
-  const key = String(process.env.AGENTOPS_HUMAN_SESSION_HMAC_KEY || "");
+  const key = secretEnvironmentValue("AGENTOPS_HUMAN_SESSION_HMAC_KEY");
   if (Buffer.byteLength(key, "utf8") < 32) {
     throw new ControlPlaneHttpError(
       503,
@@ -349,7 +354,10 @@ function deriveScrypt(
   });
 }
 
-async function passwordMatches(password: string, credential: CredentialRow) {
+async function passwordMatches(
+  password: string,
+  credential: CredentialPasswordRow,
+) {
   const params = parsePasswordParams(credential.password_params_json);
   const validSalt = /^[a-f0-9]{32,128}$/i.test(credential.password_salt);
   const validHash = /^[a-f0-9]{64}$/i.test(credential.password_hash);
@@ -366,7 +374,7 @@ async function passwordMatches(password: string, credential: CredentialRow) {
 
 async function verifyHumanLoginPassword(
   password: string,
-  credential: CredentialRow | undefined,
+  credential: CredentialPasswordRow | undefined,
 ) {
   const validShape = password.length >= HUMAN_PASSWORD_MIN_LENGTH
     && password.length <= HUMAN_PASSWORD_MAX_LENGTH;
@@ -561,19 +569,31 @@ export async function establishHumanSession(
           "Sign-in is temporarily blocked after repeated failures.",
         );
       }
-      const credential = username
-        ? (await client.query<CredentialRow>(
+      const storedCredential = username
+        ? (await client.query<CredentialPasswordRow>(
           `SELECT credential.credential_id,credential.user_id,
             credential.username,credential.password_hash,
             credential.password_salt,credential.password_params_json,
-            credential.status AS credential_status,users.name
+            credential.status AS credential_status
           FROM human_login_credentials credential
-          JOIN users ON users.user_id=credential.user_id
           WHERE credential.username=$1 FOR UPDATE OF credential`,
           [username],
         )).rows[0]
         : undefined;
-      const matches = await verifyHumanLoginPassword(password, credential);
+      const matches = await verifyHumanLoginPassword(
+        password,
+        storedCredential,
+      );
+      const user = matches && storedCredential
+        ? (await client.query<UserRow>(
+          `SELECT user_id,name FROM users
+          WHERE user_id=$1 FOR UPDATE`,
+          [storedCredential.user_id],
+        )).rows[0]
+        : undefined;
+      const credential = storedCredential && user
+        ? { ...storedCredential, ...user }
+        : undefined;
       const memberships = matches && credential
         ? (await client.query<MembershipRow>(
           `SELECT workspace_id,user_id,role,status

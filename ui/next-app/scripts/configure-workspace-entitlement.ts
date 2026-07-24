@@ -183,6 +183,21 @@ type TrustedOperatorRow = {
   password_params_json: unknown;
 };
 
+type TrustedCredentialRow = Pick<
+  TrustedOperatorRow,
+  | "credential_status"
+  | "password_hash"
+  | "password_salt"
+  | "password_params_json"
+>;
+
+type TrustedUserRow = Pick<TrustedOperatorRow, "user_role">;
+
+type TrustedMembershipRow = Pick<
+  TrustedOperatorRow,
+  "membership_role" | "membership_status"
+>;
+
 type CanonicalConfiguration = Readonly<{
   workspace_id: string;
   edition: string;
@@ -844,24 +859,32 @@ async function requireTrustedOperator(
       1,
     );
   }
-  const result = await client.query<TrustedOperatorRow>(
-    `SELECT u.role AS user_role,
-      m.role AS membership_role,
-      m.status AS membership_status,
-      credential.status AS credential_status,
+  const credential = (await client.query<TrustedCredentialRow>(
+    `SELECT credential.status AS credential_status,
       credential.password_hash,
       credential.password_salt,
       credential.password_params_json
-    FROM users u
-    JOIN workspace_memberships m ON m.user_id=u.user_id
-    JOIN human_login_credentials credential ON credential.user_id=u.user_id
-    WHERE u.user_id=$1 AND m.workspace_id=$2
+    FROM human_login_credentials credential
+    WHERE credential.user_id=$1
     ORDER BY credential.created_at DESC
     LIMIT 1
-    FOR UPDATE OF u,m,credential`,
+    FOR UPDATE`,
+    [operatorUserId],
+  )).rows[0];
+  const user = (await client.query<TrustedUserRow>(
+    `SELECT role AS user_role FROM users
+    WHERE user_id=$1 FOR UPDATE`,
+    [operatorUserId],
+  )).rows[0];
+  const membership = (await client.query<TrustedMembershipRow>(
+    `SELECT role AS membership_role,status AS membership_status
+    FROM workspace_memberships
+    WHERE user_id=$1 AND workspace_id=$2 FOR UPDATE`,
     [operatorUserId, workspaceId],
-  );
-  const operator = result.rows[0];
+  )).rows[0];
+  const operator = credential && user && membership
+    ? { ...credential, ...user, ...membership }
+    : undefined;
   let params: Record<string, unknown> = {};
   try {
     const parsed = typeof operator?.password_params_json === "string"

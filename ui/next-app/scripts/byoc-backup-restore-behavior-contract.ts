@@ -221,6 +221,9 @@ async function run() {
       FAKE_PRODUCTION_DB: "agentops_production",
       POSTGRES_PASSWORD: secretSentinel,
       AGENTOPS_POSTGRES_DSN: dsnSentinel,
+      AGENTOPS_POSTGRES_HOST: "postgres",
+      AGENTOPS_POSTGRES_PASSWORD_FILE:
+        "/run/secrets/postgres_password",
     };
 
     const concurrentBundle = join(fixtureRoot, "concurrent.bundle");

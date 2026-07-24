@@ -21,6 +21,8 @@ import {
   runPostgresSchemaCommand,
   SCHEMA_CONTRACT,
 } from "../src/server/controlPlane/schemaReadiness";
+import { closeControlPlanePoolForTests } from "../src/server/controlPlane/db";
+import { establishHumanSession } from "../src/server/controlPlane/humanSession";
 import { HUMAN_SCRYPT_PARAMS } from "../src/server/controlPlane/humanPasswordPolicy";
 
 const NOW = new Date("2026-07-24T12:00:00.000Z");
@@ -29,6 +31,9 @@ const EXPIRES_AT = "2027-07-24T12:00:00.000Z";
 const OPERATOR_ID = "husr_entitlement_operator";
 const OPERATOR_CANARY = "operator-private-canary";
 const OPERATOR_PASSWORD = `${randomBytes(24).toString("base64url")}Aa1!`;
+const ORIGIN = "https://entitlement.example.test";
+const LOGIN_APPLICATION_NAME =
+  `agentops-entitlement-login-${randomBytes(4).toString("hex")}`;
 
 type ArgumentOverrides = Readonly<{
   workspaceId?: string;
@@ -50,7 +55,10 @@ type ArgumentOverrides = Readonly<{
 
 function scopedDsn(baseDsn: string, schema: string) {
   const parsed = new URL(baseDsn);
-  parsed.searchParams.set("options", `-csearch_path=${schema}`);
+  parsed.searchParams.set(
+    "options",
+    `-csearch_path=${schema} -cstatement_timeout=8000 -clock_timeout=6000`,
+  );
   return parsed.toString();
 }
 
@@ -145,6 +153,101 @@ async function execute(
     );
   } finally {
     await client.end();
+  }
+}
+
+async function waitForBlockedByPid(
+  client: Client,
+  applicationName: string,
+  blockerPids: number[],
+  failureCode: string,
+) {
+  const deadline = Date.now() + 3_000;
+  while (Date.now() < deadline) {
+    const result = await client.query<{ pid: number }>(
+      `SELECT pid
+      FROM pg_stat_activity
+      WHERE datname=current_database()
+        AND pid<>pg_backend_pid()
+        AND application_name=$1
+        AND wait_event_type='Lock'
+        AND pg_blocking_pids(pid) && $2::integer[]
+      ORDER BY query_start,pid`,
+      [applicationName, blockerPids],
+    );
+    if (result.rows[0]?.pid) return result.rows[0].pid;
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  throw new Error(failureCode);
+}
+
+async function assertLoginEntitlementLockOrder(
+  connectionString: string,
+  fixture: Client,
+) {
+  const observer = new Client({
+    connectionString,
+    application_name: "agentops-entitlement-lock-observer",
+  });
+  await observer.connect();
+  let blockerReleased = false;
+  let loginPromise: ReturnType<typeof establishHumanSession> | undefined;
+  let entitlementPromise: ReturnType<typeof execute> | undefined;
+  try {
+    await fixture.query("BEGIN");
+    await fixture.query(
+      `SELECT credential_id FROM human_login_credentials
+      WHERE user_id=$1 FOR UPDATE`,
+      [OPERATOR_ID],
+    );
+    const blockerPid = (
+      await fixture.query<{ pid: number }>("SELECT pg_backend_pid() AS pid")
+    ).rows[0].pid;
+    loginPromise = establishHumanSession(
+      new Headers({ origin: ORIGIN, host: "entitlement.example.test" }),
+      {
+        username: `entitlement-${OPERATOR_ID}`,
+        password: OPERATOR_PASSWORD,
+      },
+    );
+    void loginPromise.catch(() => undefined);
+    const loginPid = await waitForBlockedByPid(
+      observer,
+      LOGIN_APPLICATION_NAME,
+      [blockerPid],
+      "expected_human_login_credential_lock_waiter",
+    );
+    entitlementPromise = execute(
+      connectionString,
+      parse({ workspaceId: "ws_entitlement_plan" }),
+    );
+    void entitlementPromise.catch(() => undefined);
+    const entitlementPid = await waitForBlockedByPid(
+      observer,
+      "agentops-entitlement-administration-contract",
+      [blockerPid, loginPid],
+      "expected_entitlement_cli_credential_lock_waiter",
+    );
+    assert.notEqual(entitlementPid, loginPid);
+    await fixture.query("COMMIT");
+    blockerReleased = true;
+    const settled = await Promise.allSettled([
+      loginPromise,
+      entitlementPromise,
+    ]);
+    assert.equal(settled[0].status, "fulfilled");
+    assert.equal(settled[0].value.status, 200);
+    assert.equal(settled[1].status, "fulfilled");
+    assert.equal(settled[1].value.mode, "plan");
+  } finally {
+    if (!blockerReleased) {
+      await fixture.query("ROLLBACK").catch(() => undefined);
+    }
+    const pendingOperations: Promise<unknown>[] = [];
+    if (loginPromise) pendingOperations.push(loginPromise);
+    if (entitlementPromise) pendingOperations.push(entitlementPromise);
+    await Promise.allSettled(pendingOperations);
+    await observer.end().catch(() => undefined);
   }
 }
 
@@ -841,7 +944,10 @@ async function assertStaticBoundary() {
   assert.match(source, /runPostgresSchemaCommand\("check"\)/);
   assert.match(source, /else await client\.query\("ROLLBACK"\)/);
   assert.match(source, /pg_advisory_xact_lock/);
-  assert.match(source, /FOR UPDATE OF u,m,credential/);
+  assert.match(
+    source,
+    /FROM human_login_credentials credential[\s\S]*?FOR UPDATE`[\s\S]*?SELECT role AS user_role FROM users[\s\S]*?FOR UPDATE`[\s\S]*?FROM workspace_memberships[\s\S]*?FOR UPDATE`/,
+  );
   assert.match(source, /AGENTOPS_ENTITLEMENT_OPERATOR_PASSWORD/);
   assert.match(source, /appendAudit/);
   assert.match(source, /updated_by_user_id/);
@@ -869,6 +975,16 @@ async function run() {
   });
   let schemaCreated = false;
   const originalFetch = globalThis.fetch;
+  const originalEnvironment = {
+    dsn: process.env.AGENTOPS_POSTGRES_DSN,
+    dsnFile: process.env.AGENTOPS_POSTGRES_DSN_FILE,
+    deployment: process.env.AGENTOPS_DEPLOYMENT_MODE,
+    mode: process.env.AGENTOPS_CONTROL_PLANE_MODE,
+    origins: process.env.AGENTOPS_ALLOWED_ORIGINS,
+    hmac: process.env.AGENTOPS_HUMAN_SESSION_HMAC_KEY,
+    hmacFile: process.env.AGENTOPS_HUMAN_SESSION_HMAC_KEY_FILE,
+    applicationName: process.env.AGENTOPS_POSTGRES_APPLICATION_NAME,
+  };
   let externalNetworkCalls = 0;
   globalThis.fetch = async () => {
     externalNetworkCalls += 1;
@@ -897,6 +1013,16 @@ async function run() {
     );
     assert.equal(POSTGRES_MIGRATION_MANIFEST.length, 10);
     await runPostgresSchemaCommand("check", { connectionString });
+    process.env.AGENTOPS_POSTGRES_DSN = connectionString;
+    delete process.env.AGENTOPS_POSTGRES_DSN_FILE;
+    process.env.AGENTOPS_DEPLOYMENT_MODE = "production";
+    process.env.AGENTOPS_CONTROL_PLANE_MODE = "postgres";
+    process.env.AGENTOPS_ALLOWED_ORIGINS = ORIGIN;
+    process.env.AGENTOPS_HUMAN_SESSION_HMAC_KEY =
+      randomBytes(48).toString("base64url");
+    delete process.env.AGENTOPS_HUMAN_SESSION_HMAC_KEY_FILE;
+    process.env.AGENTOPS_POSTGRES_APPLICATION_NAME =
+      LOGIN_APPLICATION_NAME;
 
     const fixture = new Client({
       connectionString,
@@ -905,6 +1031,7 @@ async function run() {
     await fixture.connect();
     try {
       await assertPlanOnlyZeroWrite(connectionString, fixture);
+      await assertLoginEntitlementLockOrder(connectionString, fixture);
       await assertCreateUpdateAndReplay(connectionString, fixture);
       await assertConcurrentSingleWinner(connectionString, fixture);
       await assertOperatorAndAbsentGuards(connectionString, fixture);
@@ -928,6 +1055,7 @@ async function run() {
       stale_expected_rejected: true,
       invalid_combinations_rejected: true,
       trusted_operator_enforced: true,
+      human_login_entitlement_lock_order: true,
       append_only_audit_verified: true,
       secret_omission_verified: true,
       external_network_calls: externalNetworkCalls,
@@ -943,6 +1071,7 @@ async function run() {
     assert.equal(serialized.includes(OPERATOR_CANARY), false);
     console.log(serialized);
   } finally {
+    await closeControlPlanePoolForTests();
     globalThis.fetch = originalFetch;
     if (schemaCreated) {
       await admin.query(
@@ -950,17 +1079,41 @@ async function run() {
       );
     }
     await admin.end().catch(() => undefined);
+    const restore = (key: string, value: string | undefined) => {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    };
+    restore("AGENTOPS_POSTGRES_DSN", originalEnvironment.dsn);
+    restore("AGENTOPS_POSTGRES_DSN_FILE", originalEnvironment.dsnFile);
+    restore(
+      "AGENTOPS_DEPLOYMENT_MODE",
+      originalEnvironment.deployment,
+    );
+    restore("AGENTOPS_CONTROL_PLANE_MODE", originalEnvironment.mode);
+    restore("AGENTOPS_ALLOWED_ORIGINS", originalEnvironment.origins);
+    restore("AGENTOPS_HUMAN_SESSION_HMAC_KEY", originalEnvironment.hmac);
+    restore(
+      "AGENTOPS_HUMAN_SESSION_HMAC_KEY_FILE",
+      originalEnvironment.hmacFile,
+    );
+    restore(
+      "AGENTOPS_POSTGRES_APPLICATION_NAME",
+      originalEnvironment.applicationName,
+    );
   }
 }
 
 run().catch((error: unknown) => {
+  const errorCode = error instanceof WorkspaceEntitlementAdministrationError
+    ? error.code
+    : error instanceof Error && /^[a-z0-9_]{1,80}$/.test(error.message)
+      ? error.message
+      : "contract_failed";
   console.log(JSON.stringify({
     contract:
       "agentops_workspace_entitlement_administration_postgres_contract_v1",
     ok: false,
-    error_code: error instanceof WorkspaceEntitlementAdministrationError
-      ? error.code
-      : "contract_failed",
+    error_code: errorCode,
     credentials_omitted: true,
     dsn_omitted: true,
     raw_config_omitted: true,

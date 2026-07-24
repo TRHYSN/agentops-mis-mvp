@@ -40,6 +40,8 @@ const FOREIGN_WORKSPACE = "ws_gateway_admin_foreign";
 const PASSWORD = `${randomBytes(24).toString("base64url")}Aa1!`;
 const SECRET_CANARY = "gateway-admin-sensitive-canary";
 const DSN_CANARY = `post${"gresql"}://admin:contract-db-password@internal/gateway`;
+const POSTGRES_APPLICATION_NAME =
+  `agentops-admin-${randomBytes(6).toString("hex")}`;
 
 type HumanSession = {
   cookie: string;
@@ -52,7 +54,11 @@ function sha(value: string) {
 
 function scopedDsn(baseDsn: string, schema: string) {
   const parsed = new URL(baseDsn);
-  parsed.searchParams.set("options", `-csearch_path=${schema}`);
+  parsed.searchParams.set(
+    "options",
+    `-csearch_path=${schema} -cstatement_timeout=8000 -clock_timeout=6000`,
+  );
+  parsed.searchParams.set("application_name", POSTGRES_APPLICATION_NAME);
   return parsed.toString();
 }
 
@@ -147,6 +153,55 @@ async function within<T>(work: Promise<T>, timeoutMs: number) {
   } finally {
     if (timeout) clearTimeout(timeout);
   }
+}
+
+async function waitForBlockedByPid(
+  client: Client,
+  blockerPid: number,
+) {
+  const deadline = Date.now() + 5_000;
+  while (Date.now() < deadline) {
+    const result = await client.query<{ pid: number }>(
+      `SELECT pid
+      FROM pg_stat_activity
+      WHERE datname=current_database()
+        AND pid<>pg_backend_pid()
+        AND application_name=$1
+        AND wait_event_type='Lock'
+        AND $2::integer=ANY(pg_blocking_pids(pid))
+      ORDER BY query_start,pid`,
+      [POSTGRES_APPLICATION_NAME, blockerPid],
+    );
+    if (result.rows[0]?.pid) return result.rows[0].pid;
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  throw new Error("expected_target_postgres_lock_waiter");
+}
+
+async function waitForBlockedAdvisoryLock(
+  client: Client,
+  lockKey: number,
+) {
+  const deadline = Date.now() + 5_000;
+  while (Date.now() < deadline) {
+    const result = await client.query<{ pid: number }>(
+      `SELECT lock_row.pid
+      FROM pg_locks lock_row
+      JOIN pg_stat_activity activity ON activity.pid=lock_row.pid
+      WHERE activity.datname=current_database()
+        AND lock_row.pid<>pg_backend_pid()
+        AND activity.application_name=$1
+        AND lock_row.locktype='advisory'
+        AND lock_row.granted=false
+        AND lock_row.classid=0
+        AND lock_row.objid=$2::oid
+      ORDER BY activity.query_start,lock_row.pid`,
+      [POSTGRES_APPLICATION_NAME, lockKey],
+    );
+    if (result.rows[0]?.pid) return result.rows[0].pid;
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  throw new Error("expected_target_postgres_advisory_lock_waiter");
 }
 
 async function seedHuman(
@@ -311,6 +366,8 @@ async function run() {
   const originalMode = process.env.AGENTOPS_CONTROL_PLANE_MODE;
   const originalOrigins = process.env.AGENTOPS_ALLOWED_ORIGINS;
   const originalHmac = process.env.AGENTOPS_HUMAN_SESSION_HMAC_KEY;
+  const originalApplicationName =
+    process.env.AGENTOPS_POSTGRES_APPLICATION_NAME;
   const originalFetch = globalThis.fetch;
   let fetchCalls = 0;
   let schemaCreated = false;
@@ -320,6 +377,8 @@ async function run() {
   process.env.AGENTOPS_ALLOWED_ORIGINS = ORIGIN;
   process.env.AGENTOPS_HUMAN_SESSION_HMAC_KEY = randomBytes(48)
     .toString("base64url");
+  process.env.AGENTOPS_POSTGRES_APPLICATION_NAME =
+    POSTGRES_APPLICATION_NAME;
   globalThis.fetch = async () => {
     fetchCalls += 1;
     throw new Error("Network access is forbidden in the administration contract.");
@@ -707,56 +766,103 @@ async function run() {
       ).find((row) => row.agent_id === "agt_admin_contract")?.session_ref || "",
     );
     assert.match(lockOrderSessionRef, /^session_ref_[a-f0-9]{16}$/);
-    const lockOrderRace = await within(
-      Promise.allSettled([
-        rotateGatewayEnrollment(humanRequest(
-          "POST",
-          "/api/mis/agent-gateway/enrollment/rotate",
-          owner,
-          {
-            workspace_id: WORKSPACE,
-            token_ref: rotatedTokenRef,
-            label: "lock order replacement",
-          },
-          { idempotencyKey: "admin-lock-order-rotate-0001" },
-        )),
-        getGatewayStatus(agentRequest(
-          "GET",
-          "/api/mis/agent-gateway/status",
-          lockOrderSessionToken,
-        )),
-        revokeGatewaySession(humanRequest(
-          "POST",
-          "/api/mis/agent-gateway/session/revoke",
-          owner,
-          {
-            workspace_id: WORKSPACE,
-            session_ref: lockOrderSessionRef,
-          },
-        )),
-      ]),
-      10_000,
-    );
-    const lockOrderRotation = lockOrderRace[0];
-    assert.equal(lockOrderRotation.status, "fulfilled");
-    assert.equal(lockOrderRotation.value.status, 201);
-    const lockOrderRotatedToken = String(lockOrderRotation.value.body.token);
-    const lockOrderSession = lockOrderRace[1];
-    if (lockOrderSession.status === "fulfilled") {
-      assert.equal(lockOrderSession.value.status, 200);
-    }
-    if (lockOrderSession.status === "rejected") {
-      assert(
-        lockOrderSession.reason instanceof ControlPlaneHttpError
-        && lockOrderSession.reason.code === "unauthorized",
+    const lockOrderBlocker = new Client({ connectionString: contractDsn });
+    const lockOrderObserver = new Client({
+      connectionString: contractDsn,
+      application_name: "agentops-admin-lock-observer",
+    });
+    await lockOrderBlocker.connect();
+    await lockOrderObserver.connect();
+    let lockOrderBlockerReleased = false;
+    let lockOrderRotationPromise:
+      | ReturnType<typeof rotateGatewayEnrollment>
+      | undefined;
+    let lockOrderRevokePromise:
+      | ReturnType<typeof revokeGatewaySession>
+      | undefined;
+    let lockOrderRotatedToken = "";
+    let lockOrderRotatedRef = "";
+    try {
+      await lockOrderBlocker.query("BEGIN");
+      await lockOrderBlocker.query(
+        "SELECT pg_advisory_xact_lock(1095779668)",
       );
+      lockOrderRotationPromise = rotateGatewayEnrollment(humanRequest(
+        "POST",
+        "/api/mis/agent-gateway/enrollment/rotate",
+        owner,
+        {
+          workspace_id: WORKSPACE,
+          token_ref: rotatedTokenRef,
+          label: "lock order replacement",
+        },
+        { idempotencyKey: "admin-lock-order-rotate-0001" },
+      ));
+      void lockOrderRotationPromise.catch(() => undefined);
+      const rotationPid = await waitForBlockedAdvisoryLock(
+        lockOrderObserver,
+        1095779668,
+      );
+      lockOrderRevokePromise = revokeGatewaySession(humanRequest(
+        "POST",
+        "/api/mis/agent-gateway/session/revoke",
+        concurrentOwners[0],
+        {
+          workspace_id: WORKSPACE,
+          session_ref: lockOrderSessionRef,
+        },
+      ));
+      void lockOrderRevokePromise.catch(() => undefined);
+      const revokePid = await waitForBlockedByPid(
+        lockOrderObserver,
+        rotationPid,
+      );
+      assert.notEqual(revokePid, rotationPid);
+      await lockOrderBlocker.query("COMMIT");
+      lockOrderBlockerReleased = true;
+      const lockOrderRace = await within(
+        Promise.allSettled([
+          lockOrderRotationPromise,
+          lockOrderRevokePromise,
+        ]),
+        10_000,
+      );
+      const lockOrderRotation = lockOrderRace[0];
+      assert.equal(lockOrderRotation.status, "fulfilled");
+      assert.equal(lockOrderRotation.value.status, 201);
+      lockOrderRotatedToken = String(lockOrderRotation.value.body.token);
+      lockOrderRotatedRef = String(
+        lockOrderRotation.value.body.token_ref,
+      );
+      const lockOrderHumanRevoke = lockOrderRace[1];
+      assert.equal(lockOrderHumanRevoke.status, "fulfilled");
+      assert.equal(lockOrderHumanRevoke.value.status, 200);
+      assert(
+        lockOrderHumanRevoke.value.body.revoked === 0
+        || lockOrderHumanRevoke.value.body.revoked === 1,
+      );
+    } finally {
+      if (!lockOrderBlockerReleased) {
+        await lockOrderBlocker.query("ROLLBACK").catch(() => undefined);
+      }
+      const pendingOperations: Promise<unknown>[] = [];
+      if (lockOrderRotationPromise) {
+        pendingOperations.push(lockOrderRotationPromise);
+      }
+      if (lockOrderRevokePromise) {
+        pendingOperations.push(lockOrderRevokePromise);
+      }
+      await Promise.allSettled(pendingOperations);
+      await lockOrderBlocker.end().catch(() => undefined);
+      await lockOrderObserver.end().catch(() => undefined);
     }
-    const lockOrderHumanRevoke = lockOrderRace[2];
-    assert.equal(lockOrderHumanRevoke.status, "fulfilled");
-    assert.equal(lockOrderHumanRevoke.value.status, 200);
-    assert(
-      lockOrderHumanRevoke.value.body.revoked === 0
-      || lockOrderHumanRevoke.value.body.revoked === 1,
+    await expectCode(
+      "unauthorized",
+      () => getGatewayStatus(agentRequest(
+        "GET",
+        "/api/mis/agent-gateway/status",
+        lockOrderSessionToken,
+      )),
     );
 
     await admin.query(
@@ -784,7 +890,7 @@ async function run() {
           owner,
           {
             workspace_id: WORKSPACE,
-            token_ref: String(lockOrderRotation.value.body.token_ref),
+            token_ref: lockOrderRotatedRef,
             label: "sibling lock order replacement",
           },
           { idempotencyKey: "admin-sibling-rotate-0001" },
@@ -1147,6 +1253,10 @@ async function run() {
     restore("AGENTOPS_CONTROL_PLANE_MODE", originalMode);
     restore("AGENTOPS_ALLOWED_ORIGINS", originalOrigins);
     restore("AGENTOPS_HUMAN_SESSION_HMAC_KEY", originalHmac);
+    restore(
+      "AGENTOPS_POSTGRES_APPLICATION_NAME",
+      originalApplicationName,
+    );
   }
 }
 

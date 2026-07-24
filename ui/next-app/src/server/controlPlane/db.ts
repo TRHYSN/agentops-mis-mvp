@@ -1,6 +1,10 @@
 import { Pool, type PoolClient } from "pg";
 
-import { postgresDsn, postgresSslEnabled } from "./config";
+import {
+  postgresApplicationName,
+  postgresDsn,
+  postgresSslEnabled,
+} from "./config";
 import { ControlPlaneHttpError } from "./http";
 
 declare global {
@@ -17,7 +21,7 @@ function controlPlanePool() {
       connectionString: postgresDsn(),
       max,
       ssl: postgresSslEnabled() ? { rejectUnauthorized: true } : undefined,
-      application_name: "agentops-mis-typescript-control-plane",
+      application_name: postgresApplicationName(),
     });
   }
   return globalThis.__agentOpsControlPlanePool;
