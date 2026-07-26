@@ -11,6 +11,12 @@ It installs one temporary `agentops-mis-relay.service` whose only process is
 The workflow job is `Relay recovery on real Linux systemd` in
 `.github/workflows/ci.yml`.
 
+The same job now includes one real process-death gate at the confirmed
+`daemon_reload` boundary. It does not simulate an exception: the parent starts
+an independent execution child, waits for a fixed pipe marker, sends
+`SIGKILL`, and starts a second process to reopen and recover the same durable
+fixture journal.
+
 ## Safety Guard
 
 The script refuses to run unless:
@@ -39,18 +45,31 @@ Active units still require `ExecMainStatus=0`; failed results remain invalid.
 
 It exercises:
 
-1. real daemon reload;
-2. confirmed forward enable;
-3. confirmed forward start;
-4. forward verification without a mutation;
-5. confirmed rollback stop;
-6. confirmed rollback disable;
-7. exact restored-state rollback verification;
-8. rollback receipt and terminal revision; and
-9. idempotent `service_state_rolled_back` completion.
+1. durable `daemon_reload_requested` intent publication;
+2. one real confirmed daemon reload in an independent child;
+3. `SIGKILL` after the production mutation adapter has returned, but before
+   the executor can obtain or publish the post-mutation observation;
+4. an intent-only journal checkpoint after process death;
+5. a new process reopening the same journal and receiving exactly
+   `resume + record_observation`;
+6. strict target-mutation marker count `1` before and after recovery;
+7. a next recovery decision of `run_step + enable`, never another
+   `daemon_reload`;
+8. confirmed forward enable and start;
+9. forward verification without a mutation;
+10. confirmed rollback stop and disable;
+11. exact restored-state rollback verification;
+12. rollback receipt and terminal revision; and
+13. idempotent `service_state_rolled_back` completion.
 
 Every executor invocation still advances only one confirmed decision. The next
 step requires a new stable preview and decision hash.
+
+The mutation marker is an acceptance-only sidecar in the temporary directory.
+It counts only the confirmed transaction's target `daemon_reload`; setup and
+cleanup reloads are outside that marker. The pipe marker is emitted by the
+first post-mutation scanner call, so receiving it proves that the production
+mutation adapter returned while observation publication remains unreachable.
 
 ## Verification
 
@@ -82,6 +101,17 @@ Expected bounded result:
   "network_used": false,
   "ok": true,
   "operation": "relay_linux_systemd_recovery_acceptance",
+  "process_death": {
+    "checkpoint": "after_daemon_reload_before_observation",
+    "child_exit_signal": "SIGKILL",
+    "journal_reopened": true,
+    "latest_revision": 3,
+    "mutation_count": 1,
+    "mutation_replayed": false,
+    "next_step": "enable",
+    "observation_operation": "record_observation",
+    "ok": true
+  },
   "rollback_steps": [
     "rollback_stop",
     "rollback_disable",
@@ -96,6 +126,11 @@ Expected bounded result:
 the intentional unit-file change. The setup still performs one real bound
 daemon reload even if that flag is false.
 
+macOS cannot execute this gate because it has no system-wide systemd manager.
+Local macOS verification is limited to compilation and the deterministic
+recovery executor/controller smokes. The process-death claim is CI-only until
+the existing Ubuntu job reports this exact source revision green.
+
 ## Truth Boundary
 
 This is real systemd mutation and observation evidence, but it is not yet the
@@ -105,8 +140,9 @@ full production installation acceptance:
 - non-systemd prerequisite identities use bounded synthetic fixtures;
 - the production installed-tree scanner is not run against a provisioned
   service account, Relay binary, configuration, TLS material, or route key;
-- process interruption is not injected between every intent, mutation,
-  observation, receipt, and terminal boundary; and
+- process interruption is proven only for the forward `daemon_reload`
+  mutation-returned/observation-not-published window, not every intent,
+  mutation, observation, receipt, or terminal boundary; and
 - no CLI, API, browser caller, public Relay, DNS, or physical second-device
   acceptance is enabled by this slice.
 
@@ -114,5 +150,5 @@ The separate production installation, scanner, and journal-opener baseline is
 recorded in `RELAY_LINUX_PRODUCTION_INSTALL_ACCEPTANCE.md`, and
 `RELAY_LINUX_PRODUCTION_SYSTEMD_ACCEPTANCE.md` combines both baselines with the
 packaged Relay process and controller-store reopen boundaries. Actual process
-death inside intent/mutation/observation and receipt/terminal windows remains
-the next gate. Only then may the guarded operator CLI be exposed.
+death at the remaining mutation and receipt/terminal windows remains open.
+This one gate is not sufficient to expose the guarded operator CLI.

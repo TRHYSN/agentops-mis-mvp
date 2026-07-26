@@ -5,10 +5,13 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import select
+import signal
 import stat
 import subprocess
 import sys
 import tempfile
+from contextlib import ExitStack
 from dataclasses import replace
 from pathlib import Path
 
@@ -23,6 +26,7 @@ from agentops_mis_cli.relay_activation import (  # noqa: E402
     ENABLEMENT_LINK_PATH,
     INVOCATION_ID_PATTERN,
     MAX_SYSTEMD_SHOW_BYTES,
+    SHA256_PATTERN,
     SYSTEMCTL_PATHS,
     SYSTEMD_PROPERTIES,
     UNIT_PATH,
@@ -81,6 +85,14 @@ WantedBy=multi-user.target
 UNIT_CHANGED_BYTES = UNIT_BYTES + b"\n# recovery acceptance\n"
 MAX_STEP_COUNT = 16
 SYSTEMD_SHOW_TIMEOUT_SECONDS = 5
+PROCESS_DEATH_CHILD_TIMEOUT_SECONDS = 30
+PROCESS_DEATH_EXECUTE_MODE = "--process-death-execute"
+PROCESS_DEATH_RECOVER_MODE = "--process-death-recover"
+PROCESS_DEATH_PIPE_MARKER = b"daemon_reload_returned\n"
+PROCESS_DEATH_MUTATION_RECORD = b"daemon_reload\n"
+PROCESS_DEATH_MUTATION_FILE = "daemon-reload-mutations.log"
+MAX_PROCESS_DEATH_RESULT_BYTES = 4096
+MAX_PROCESS_DEATH_MUTATION_RECORDS = 4
 
 
 class AcceptanceFailure(Exception):
@@ -476,6 +488,553 @@ def _cleanup(systemctl: FileIdentity | None) -> bool:
     )
 
 
+def _process_death_environment() -> dict[str, str]:
+    return {
+        OPT_IN: "1",
+        "LANG": "C",
+        "LC_ALL": "C",
+        "PATH": "/usr/bin:/bin",
+        "PYTHONDONTWRITEBYTECODE": "1",
+    }
+
+
+def _process_death_paths(
+    journal_argument: str,
+    marker_argument: str,
+) -> tuple[Path, Path]:
+    journal_root = Path(journal_argument)
+    marker_path = Path(marker_argument)
+    if (
+        not journal_root.is_absolute()
+        or not marker_path.is_absolute()
+        or marker_path != journal_root / PROCESS_DEATH_MUTATION_FILE
+        or not journal_root.is_dir()
+        or not os.path.lexists(UNIT_PATH)
+        or not _owned_unit()
+        or _enablement_links()
+    ):
+        raise AcceptanceFailure("process_death_child_preflight")
+    return journal_root, marker_path
+
+
+def _process_death_scanner() -> ActivationPrerequisiteSnapshot:
+    return replace(
+        prerequisites(),
+        unit=_file_identity(UNIT_PATH),
+        systemctl=_systemctl_identity(),
+        enablement_links=_enablement_links(),
+    )
+
+
+def _marker_identity(metadata: os.stat_result) -> tuple[int, ...]:
+    return (
+        metadata.st_dev,
+        metadata.st_ino,
+        stat.S_IFMT(metadata.st_mode),
+        stat.S_IMODE(metadata.st_mode),
+        metadata.st_uid,
+        metadata.st_gid,
+        metadata.st_nlink,
+    )
+
+
+def _append_process_death_mutation(marker_path: Path) -> None:
+    descriptor = -1
+    try:
+        descriptor = os.open(
+            marker_path,
+            os.O_WRONLY
+            | os.O_CREAT
+            | os.O_APPEND
+            | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_CLOEXEC", 0),
+            0o600,
+        )
+        before = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(before.st_mode)
+            or stat.S_IMODE(before.st_mode) != 0o600
+            or before.st_uid != os.geteuid()
+            or before.st_gid != os.getegid()
+            or before.st_nlink != 1
+            or before.st_size % len(PROCESS_DEATH_MUTATION_RECORD)
+            or before.st_size
+            >= len(PROCESS_DEATH_MUTATION_RECORD)
+            * MAX_PROCESS_DEATH_MUTATION_RECORDS
+        ):
+            raise AcceptanceFailure(
+                "process_death_mutation_marker_invalid"
+            )
+        if (
+            os.write(descriptor, PROCESS_DEATH_MUTATION_RECORD)
+            != len(PROCESS_DEATH_MUTATION_RECORD)
+        ):
+            raise AcceptanceFailure(
+                "process_death_mutation_marker_write"
+            )
+        os.fsync(descriptor)
+        after = os.fstat(descriptor)
+        current = os.lstat(marker_path)
+        if (
+            _marker_identity(before)
+            != _marker_identity(after)
+            or _marker_identity(after) != _marker_identity(current)
+            or after.st_size
+            != before.st_size + len(PROCESS_DEATH_MUTATION_RECORD)
+            or current.st_size != after.st_size
+        ):
+            raise AcceptanceFailure(
+                "process_death_mutation_marker_invalid"
+            )
+    except AcceptanceFailure:
+        raise
+    except Exception:
+        raise AcceptanceFailure(
+            "process_death_mutation_marker_write"
+        ) from None
+    finally:
+        if descriptor >= 0:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+
+
+def _process_death_mutation_count(
+    marker_path: Path,
+    *,
+    allow_missing: bool = False,
+) -> int:
+    descriptor = -1
+    try:
+        descriptor = os.open(
+            marker_path,
+            os.O_RDONLY
+            | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_CLOEXEC", 0),
+        )
+        opened = os.fstat(descriptor)
+        maximum = (
+            len(PROCESS_DEATH_MUTATION_RECORD)
+            * MAX_PROCESS_DEATH_MUTATION_RECORDS
+        )
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or stat.S_IMODE(opened.st_mode) != 0o600
+            or opened.st_uid != os.geteuid()
+            or opened.st_gid != os.getegid()
+            or opened.st_nlink != 1
+            or opened.st_size <= 0
+            or opened.st_size > maximum
+            or opened.st_size % len(PROCESS_DEATH_MUTATION_RECORD)
+        ):
+            raise AcceptanceFailure(
+                "process_death_mutation_marker_invalid"
+            )
+        payload = bytearray()
+        while len(payload) < opened.st_size:
+            chunk = os.read(descriptor, opened.st_size - len(payload))
+            if not chunk:
+                raise AcceptanceFailure(
+                    "process_death_mutation_marker_invalid"
+                )
+            payload.extend(chunk)
+        if os.read(descriptor, 1):
+            raise AcceptanceFailure(
+                "process_death_mutation_marker_invalid"
+            )
+        after = os.fstat(descriptor)
+        current = os.lstat(marker_path)
+        if not (
+            _fingerprint(opened)
+            == _fingerprint(after)
+            == _fingerprint(current)
+        ):
+            raise AcceptanceFailure(
+                "process_death_mutation_marker_invalid"
+            )
+        count = opened.st_size // len(PROCESS_DEATH_MUTATION_RECORD)
+        if bytes(payload) != PROCESS_DEATH_MUTATION_RECORD * count:
+            raise AcceptanceFailure(
+                "process_death_mutation_marker_invalid"
+            )
+        return count
+    except FileNotFoundError:
+        if allow_missing:
+            return 0
+        raise AcceptanceFailure(
+            "process_death_mutation_marker_missing"
+        ) from None
+    except AcceptanceFailure:
+        raise
+    except Exception:
+        raise AcceptanceFailure(
+            "process_death_mutation_marker_invalid"
+        ) from None
+    finally:
+        if descriptor >= 0:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+
+
+def _process_death_execute_child(arguments: list[str]) -> int:
+    pipe_descriptor = -1
+    try:
+        if (
+            len(arguments) != 5
+            or os.environ.get(OPT_IN) != "1"
+            or not sys.platform.startswith("linux")
+            or os.geteuid() != 0
+            or not Path("/run/systemd/system").is_dir()
+            or SHA256_PATTERN.fullmatch(arguments[2]) is None
+            or SHA256_PATTERN.fullmatch(arguments[3]) is None
+        ):
+            return 1
+        journal_root, marker_path = _process_death_paths(
+            arguments[0],
+            arguments[1],
+        )
+        pipe_descriptor = int(arguments[4])
+        pipe_metadata = os.fstat(pipe_descriptor)
+        if pipe_descriptor < 3 or not stat.S_ISFIFO(pipe_metadata.st_mode):
+            return 1
+        mutation_returned = False
+        checkpoint_published = False
+
+        def mutation_runner(
+            systemctl: FileIdentity,
+            operation: str,
+        ) -> None:
+            nonlocal mutation_returned
+            if operation != "daemon_reload" or mutation_returned:
+                raise AcceptanceFailure(
+                    "process_death_unexpected_mutation"
+                )
+            _run_bound_systemd_mutation(systemctl, operation)
+            _append_process_death_mutation(marker_path)
+            mutation_returned = True
+
+        def checkpoint_scanner() -> ActivationPrerequisiteSnapshot:
+            nonlocal checkpoint_published, pipe_descriptor
+            if mutation_returned:
+                if checkpoint_published:
+                    raise AcceptanceFailure(
+                        "process_death_checkpoint_reentered"
+                    )
+                if (
+                    os.write(
+                        pipe_descriptor,
+                        PROCESS_DEATH_PIPE_MARKER,
+                    )
+                    != len(PROCESS_DEATH_PIPE_MARKER)
+                ):
+                    raise AcceptanceFailure(
+                        "process_death_pipe_marker_write"
+                    )
+                os.close(pipe_descriptor)
+                pipe_descriptor = -1
+                checkpoint_published = True
+                while True:
+                    signal.pause()
+            return _process_death_scanner()
+
+        with _open_fixture_store(journal_root) as store:
+            _run_confirmed_recovery_step_with(
+                arguments[2],
+                "resume",
+                arguments[3],
+                store=store,
+                scanner=checkpoint_scanner,
+                systemd_reader=read_systemd_show,
+                mutation_runner=mutation_runner,
+            )
+        return 1
+    except Exception:
+        return 1
+    finally:
+        if pipe_descriptor >= 0:
+            try:
+                os.close(pipe_descriptor)
+            except OSError:
+                pass
+
+
+def _process_death_recover_child(arguments: list[str]) -> int:
+    stage = "recover_child_preflight"
+    try:
+        if (
+            len(arguments) != 3
+            or os.environ.get(OPT_IN) != "1"
+            or not sys.platform.startswith("linux")
+            or os.geteuid() != 0
+            or not Path("/run/systemd/system").is_dir()
+            or SHA256_PATTERN.fullmatch(arguments[2]) is None
+        ):
+            raise AcceptanceFailure(stage)
+        journal_root, marker_path = _process_death_paths(
+            arguments[0],
+            arguments[1],
+        )
+        plan_sha256 = arguments[2]
+        if _process_death_mutation_count(marker_path) != 1:
+            raise AcceptanceFailure(stage)
+
+        stage = "recover_child_reopen"
+        with _open_fixture_store(journal_root) as store:
+            before = store._load_recovery_snapshot(plan_sha256)
+            if (
+                len(before.revisions) != 2
+                or before.receipt is not None
+                or before.revisions[-1].phase != "intent"
+                or before.revisions[-1].step_id != "daemon_reload"
+                or before.revisions[-1].intent_id
+                != "daemon_reload_requested"
+            ):
+                raise AcceptanceFailure(stage)
+
+            stage = "recover_child_preview_observation"
+            decision = _preview_activation_recovery_with(
+                plan_sha256,
+                "resume",
+                snapshot_loader=store._load_recovery_snapshot,
+                scanner=_process_death_scanner,
+                systemd_reader=read_systemd_show,
+            )
+            if (
+                decision.get("action_id") != "resume"
+                or decision.get("operation_id") != "record_observation"
+                or decision.get("reason_id") != "resume_ready"
+                or decision.get("step_id") != "daemon_reload"
+            ):
+                raise AcceptanceFailure(stage)
+
+            stage = "recover_child_record_observation"
+            result = _run_confirmed_recovery_write_with(
+                plan_sha256,
+                "resume",
+                str(decision["decision_sha256"]),
+                store=store,
+                scanner=_process_death_scanner,
+                systemd_reader=read_systemd_show,
+            )
+            after = store._load_recovery_snapshot(plan_sha256)
+            if (
+                result.get("write_id") != "observed_revision"
+                or len(after.revisions) != 3
+                or after.receipt is not None
+                or after.revisions[-1].phase != "observed"
+                or after.revisions[-1].step_id != "daemon_reload"
+            ):
+                raise AcceptanceFailure(stage)
+
+            stage = "recover_child_next_decision"
+            next_decision = _preview_activation_recovery_with(
+                plan_sha256,
+                "resume",
+                snapshot_loader=store._load_recovery_snapshot,
+                scanner=_process_death_scanner,
+                systemd_reader=read_systemd_show,
+            )
+            if (
+                next_decision.get("action_id") != "resume"
+                or next_decision.get("operation_id") != "run_step"
+                or next_decision.get("reason_id") != "resume_ready"
+                or next_decision.get("step_id") != "enable"
+            ):
+                raise AcceptanceFailure(stage)
+
+        if _process_death_mutation_count(marker_path) != 1:
+            raise AcceptanceFailure(
+                "recover_child_mutation_replayed"
+            )
+        print(
+            json.dumps(
+                {
+                    "journal_reopened": True,
+                    "latest_revision": 3,
+                    "mutation_count": 1,
+                    "mutation_replayed": False,
+                    "next_step": "enable",
+                    "observation_operation": "record_observation",
+                    "ok": True,
+                },
+                ensure_ascii=True,
+                sort_keys=True,
+            )
+        )
+        return 0
+    except Exception:
+        print(
+            json.dumps(
+                {
+                    "failure_id": "process_death_recovery_failed",
+                    "ok": False,
+                    "stage": stage,
+                },
+                ensure_ascii=True,
+                sort_keys=True,
+            )
+        )
+        return 1
+
+
+def _run_process_death_gate(
+    journal_root: Path,
+    plan_sha256: str,
+    confirmed_decision_sha256: str,
+) -> dict[str, object]:
+    marker_path = journal_root / PROCESS_DEATH_MUTATION_FILE
+    if _process_death_mutation_count(
+        marker_path,
+        allow_missing=True,
+    ) != 0:
+        raise AcceptanceFailure("process_death_marker_preexisting")
+
+    read_descriptor = -1
+    write_descriptor = -1
+    child: subprocess.Popen[bytes] | None = None
+    try:
+        read_descriptor, write_descriptor = os.pipe()
+        child = subprocess.Popen(
+            (
+                sys.executable,
+                str(Path(__file__).resolve()),
+                PROCESS_DEATH_EXECUTE_MODE,
+                str(journal_root),
+                str(marker_path),
+                plan_sha256,
+                confirmed_decision_sha256,
+                str(write_descriptor),
+            ),
+            shell=False,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            cwd="/",
+            env=_process_death_environment(),
+            close_fds=True,
+            pass_fds=(write_descriptor,),
+            start_new_session=True,
+        )
+        os.close(write_descriptor)
+        write_descriptor = -1
+        ready, _writable, _exceptional = select.select(
+            (read_descriptor,),
+            (),
+            (),
+            PROCESS_DEATH_CHILD_TIMEOUT_SECONDS,
+        )
+        if not ready:
+            raise AcceptanceFailure("process_death_marker_timeout")
+        marker = os.read(
+            read_descriptor,
+            len(PROCESS_DEATH_PIPE_MARKER) + 1,
+        )
+        if (
+            marker != PROCESS_DEATH_PIPE_MARKER
+            or child.poll() is not None
+        ):
+            raise AcceptanceFailure("process_death_marker_invalid")
+        child.kill()
+        return_code = child.wait(
+            timeout=PROCESS_DEATH_CHILD_TIMEOUT_SECONDS
+        )
+        if return_code != -signal.SIGKILL:
+            raise AcceptanceFailure("process_death_sigkill_unproven")
+    except AcceptanceFailure:
+        raise
+    except Exception:
+        raise AcceptanceFailure("process_death_execution_failed") from None
+    finally:
+        for descriptor in (write_descriptor, read_descriptor):
+            if descriptor >= 0:
+                try:
+                    os.close(descriptor)
+                except OSError:
+                    pass
+        if child is not None and child.poll() is None:
+            try:
+                child.kill()
+                child.wait(
+                    timeout=PROCESS_DEATH_CHILD_TIMEOUT_SECONDS
+                )
+            except Exception:
+                pass
+
+    if _process_death_mutation_count(marker_path) != 1:
+        raise AcceptanceFailure("process_death_mutation_count")
+    with _open_fixture_store(journal_root) as checkpoint_store:
+        checkpoint = checkpoint_store._load_recovery_snapshot(
+            plan_sha256
+        )
+        if (
+            len(checkpoint.revisions) != 2
+            or checkpoint.receipt is not None
+            or checkpoint.revisions[-1].phase != "intent"
+            or checkpoint.revisions[-1].step_id != "daemon_reload"
+            or checkpoint.revisions[-1].intent_id
+            != "daemon_reload_requested"
+        ):
+            raise AcceptanceFailure("process_death_checkpoint_invalid")
+
+    try:
+        recovered = subprocess.run(
+            (
+                sys.executable,
+                str(Path(__file__).resolve()),
+                PROCESS_DEATH_RECOVER_MODE,
+                str(journal_root),
+                str(marker_path),
+                plan_sha256,
+            ),
+            check=False,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            cwd="/",
+            env=_process_death_environment(),
+            timeout=PROCESS_DEATH_CHILD_TIMEOUT_SECONDS,
+        )
+    except Exception:
+        raise AcceptanceFailure(
+            "process_death_recovery_child_failed"
+        ) from None
+    if (
+        recovered.returncode != 0
+        or not recovered.stdout
+        or len(recovered.stdout) > MAX_PROCESS_DEATH_RESULT_BYTES
+        or b"\x00" in recovered.stdout
+        or b"\r" in recovered.stdout
+    ):
+        raise AcceptanceFailure("process_death_recovery_child_failed")
+    try:
+        recovery_result = json.loads(recovered.stdout.decode("ascii"))
+    except Exception:
+        raise AcceptanceFailure(
+            "process_death_recovery_result_invalid"
+        ) from None
+    expected = {
+        "journal_reopened": True,
+        "latest_revision": 3,
+        "mutation_count": 1,
+        "mutation_replayed": False,
+        "next_step": "enable",
+        "observation_operation": "record_observation",
+        "ok": True,
+    }
+    if recovery_result != expected:
+        raise AcceptanceFailure("process_death_recovery_result_invalid")
+    if _process_death_mutation_count(marker_path) != 1:
+        raise AcceptanceFailure("process_death_mutation_replayed")
+    return {
+        "checkpoint": "after_daemon_reload_before_observation",
+        "child_exit_signal": "SIGKILL",
+        **expected,
+    }
+
+
 def _run() -> dict[str, object]:
     if (
         os.environ.get(OPT_IN) != "1"
@@ -493,6 +1052,7 @@ def _run() -> dict[str, object]:
     forward_steps: list[str] = []
     rollback_steps: list[str] = []
     final_state = ""
+    process_death_result: dict[str, object] = {}
     try:
         systemctl = _systemctl_identity()
         _write_unit()
@@ -540,8 +1100,45 @@ def _run() -> dict[str, object]:
         ) as temporary:
             journal_root = Path(temporary)
             journal_root.chmod(0o700)
-            with _open_fixture_store(journal_root) as store:
+            with ExitStack() as stores:
+                store = stores.enter_context(
+                    _open_fixture_store(journal_root)
+                )
                 store.publish_revision(prepared)
+
+                stage = "process_death_preview"
+                process_death_decision = (
+                    _preview_activation_recovery_with(
+                        plan.plan_sha256,
+                        "resume",
+                        snapshot_loader=store._load_recovery_snapshot,
+                        scanner=scanner,
+                        systemd_reader=read_systemd_show,
+                    )
+                )
+                if (
+                    process_death_decision.get("action_id") != "resume"
+                    or process_death_decision.get("operation_id")
+                    != "run_step"
+                    or process_death_decision.get("reason_id")
+                    != "resume_ready"
+                    or process_death_decision.get("step_id")
+                    != "daemon_reload"
+                ):
+                    raise AcceptanceFailure
+                store.close()
+                stage = "process_death_daemon_reload"
+                process_death_result = _run_process_death_gate(
+                    journal_root,
+                    plan.plan_sha256,
+                    str(
+                        process_death_decision["decision_sha256"]
+                    ),
+                )
+                forward_steps.append("daemon_reload")
+                store = stores.enter_context(
+                    _open_fixture_store(journal_root)
+                )
 
                 stage = "forward_execution"
                 for _index in range(MAX_STEP_COUNT):
@@ -747,6 +1344,7 @@ def _run() -> dict[str, object]:
             "network_used": False,
             "ok": True,
             "operation": "relay_linux_systemd_recovery_acceptance",
+            "process_death": process_death_result,
             "rollback_steps": rollback_steps,
             "stage": stage,
             "systemctl_bound": True,
@@ -764,6 +1362,13 @@ def _run() -> dict[str, object]:
 
 
 def main() -> int:
+    if len(sys.argv) > 1:
+        if sys.argv[1] == PROCESS_DEATH_EXECUTE_MODE:
+            return _process_death_execute_child(sys.argv[2:])
+        if sys.argv[1] == PROCESS_DEATH_RECOVER_MODE:
+            return _process_death_recover_child(sys.argv[2:])
+        return 1
+
     result: dict[str, object]
     try:
         result = _run()
