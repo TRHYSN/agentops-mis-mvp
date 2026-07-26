@@ -40,6 +40,7 @@ from agentops_mis_cli.relay_activation_recovery_executor import (  # noqa: E402
     _run_confirmed_recovery_step_with,
 )
 from agentops_mis_cli.relay_activation_recovery_preview import (  # noqa: E402
+    RelayActivationRecoveryPreviewError,
     _preview_activation_recovery_with,
 )
 from agentops_mis_cli.relay_activation_scan import (  # noqa: E402
@@ -88,6 +89,8 @@ CONNECTOR_PORT = 19443
 MAX_STEP_COUNT = 16
 MAX_TLS_BYTES = 1024 * 1024
 MAX_DIAGNOSTIC_BYTES = 64 * 1024
+MAX_TRANSIENT_PREVIEW_RETRIES = 20
+TRANSIENT_PREVIEW_RETRY_DELAY_SECONDS = 0.05
 OPENSSL_PATHS = (Path("/usr/bin/openssl"), Path("/bin/openssl"))
 JOURNALCTL_PATHS = (Path("/usr/bin/journalctl"), Path("/bin/journalctl"))
 RUNUSER_PATH = Path("/usr/sbin/runuser")
@@ -771,6 +774,36 @@ def _preview_once(
         )
 
 
+def _preview_once_with_retry(
+    plan_sha256: str,
+    requested_outcome: str,
+    store_open_count: list[int],
+    retry_count: list[int],
+) -> dict[str, object]:
+    for attempt in range(MAX_TRANSIENT_PREVIEW_RETRIES + 1):
+        try:
+            return _preview_once(
+                plan_sha256,
+                requested_outcome,
+                store_open_count,
+            )
+        except RelayActivationRecoveryPreviewError as exc:
+            if (
+                exc.error_id
+                not in {
+                    "activation_prerequisite_changed",
+                    "activation_prerequisite_scan_invalid",
+                }
+                or attempt == MAX_TRANSIENT_PREVIEW_RETRIES
+            ):
+                raise
+            retry_count[0] += 1
+            time.sleep(TRANSIENT_PREVIEW_RETRY_DELAY_SECONDS)
+    raise RelayActivationRecoveryPreviewError(
+        "activation_recovery_preview_failed"
+    )
+
+
 def _run_step_once(
     plan_sha256: str,
     requested_outcome: str,
@@ -889,6 +922,7 @@ def _run() -> dict[str, object]:
     recovered_late_observation_steps: list[str] = []
     pending_late_observation_step: str | None = None
     store_open_count = [0]
+    transient_preview_retry_count = [0]
     final_state = ""
     relay_started = False
     initial_reload_required = False
@@ -977,11 +1011,17 @@ def _run() -> dict[str, object]:
         stage = "forward_execution"
         for _index in range(MAX_STEP_COUNT):
             stage = "forward_preview"
-            decision = _preview_once(
-                plan_sha256,
-                "resume",
-                store_open_count,
-            )
+            try:
+                decision = _preview_once_with_retry(
+                    plan_sha256,
+                    "resume",
+                    store_open_count,
+                    transient_preview_retry_count,
+                )
+            except RelayActivationRecoveryPreviewError as exc:
+                raise AcceptanceFailure(
+                    f"forward_preview_{exc.error_id}"
+                ) from None
             operation = str(decision.get("operation_id"))
             if operation == "publish_success_receipt":
                 break
@@ -1043,11 +1083,17 @@ def _run() -> dict[str, object]:
         stage = "rollback_execution"
         for _index in range(MAX_STEP_COUNT):
             stage = "rollback_preview"
-            decision = _preview_once(
-                plan_sha256,
-                "rollback",
-                store_open_count,
-            )
+            try:
+                decision = _preview_once_with_retry(
+                    plan_sha256,
+                    "rollback",
+                    store_open_count,
+                    transient_preview_retry_count,
+                )
+            except RelayActivationRecoveryPreviewError as exc:
+                raise AcceptanceFailure(
+                    f"rollback_preview_{exc.error_id}"
+                ) from None
             operation = str(decision.get("operation_id"))
             if pending_late_observation_step is not None and (
                 decision.get("action_id") != "inverse"
@@ -1198,6 +1244,9 @@ def _run() -> dict[str, object]:
             ),
             "rollback_steps": rollback_steps,
             "stage": stage,
+            "transient_preview_retry_count": (
+                transient_preview_retry_count[0]
+            ),
         }
     except AcceptanceFailure as exc:
         raise AcceptanceFailure(

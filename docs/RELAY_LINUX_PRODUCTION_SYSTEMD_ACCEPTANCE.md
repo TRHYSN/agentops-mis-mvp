@@ -60,6 +60,14 @@ the runtime status file's service-owned `0600` boundary; root retains systemd
 orchestration and uses the separate administrator status surface instead of
 weakening daemon-file ownership checks.
 
+Recovery preview remains read-only and fail-closed. Because the live Relay
+atomically replaces its service-owned status leaf, the acceptance may reopen
+the journal and retry a preview up to 20 times only for
+`activation_prerequisite_changed` or
+`activation_prerequisite_scan_invalid`. Each attempt revalidates the complete
+scanner contract. Plan, journal, systemd, decision, and unknown failures are
+never retried, and no systemd mutation occurs in this retry path.
+
 Cleanup first stops and disables the service, then removes only identities
 owned by the exact installation acceptance, restores parent modes, removes the
 service account, reloads systemd, and verifies all fixed paths are absent.
@@ -120,7 +128,8 @@ Expected bounded result:
     "rollback_disable",
     "verify"
   ],
-  "stage": "complete"
+  "stage": "complete",
+  "transient_preview_retry_count": 0
 }
 ```
 
