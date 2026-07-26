@@ -112,6 +112,10 @@ ENABLE_INTENT_RECOVERY_FAILURE_STAGES = frozenset(
         "enable_intent_recover_child_reopen",
         "enable_intent_recover_child_preview",
         "enable_intent_recover_child_execute",
+        "enable_intent_recover_child_mutation_call",
+        "enable_intent_recover_child_mutation_marker",
+        "enable_intent_recover_child_post_mutation",
+        "enable_intent_recover_child_result_check",
         "enable_intent_recover_child_reopen_after",
     }
 )
@@ -1484,16 +1488,19 @@ def _enable_intent_process_death_recover_child(
                 systemctl: FileIdentity,
                 operation: str,
             ) -> None:
-                nonlocal mutation_count
+                nonlocal mutation_count, stage
                 if operation != "enable" or mutation_count != 0:
                     raise AcceptanceFailure(
                         "enable_intent_recovery_mutation_replayed"
                     )
+                stage = "enable_intent_recover_child_mutation_call"
                 _run_bound_systemd_mutation(systemctl, operation)
+                stage = "enable_intent_recover_child_mutation_marker"
                 _append_enable_intent_process_death_mutation(
                     enable_marker_path
                 )
                 mutation_count = 1
+                stage = "enable_intent_recover_child_post_mutation"
 
             stage = "enable_intent_recover_child_execute"
             counting_store = _CountingRecoveryStore(store)
@@ -1506,6 +1513,7 @@ def _enable_intent_process_death_recover_child(
                 systemd_reader=read_systemd_show,
                 mutation_runner=mutation_runner,
             )
+            stage = "enable_intent_recover_child_result_check"
             after = store._load_recovery_snapshot(plan_sha256)
             after_last = after.revisions[-1]
             if (
