@@ -90,6 +90,8 @@ MAX_TLS_BYTES = 1024 * 1024
 MAX_DIAGNOSTIC_BYTES = 64 * 1024
 OPENSSL_PATHS = (Path("/usr/bin/openssl"), Path("/bin/openssl"))
 JOURNALCTL_PATHS = (Path("/usr/bin/journalctl"), Path("/bin/journalctl"))
+RUNUSER_PATH = Path("/usr/sbin/runuser")
+RELAY_SERVICE_USER = "agentops-relay"
 RELAY_JOURNAL_ERROR_IDS = frozenset(
     {
         "browser_acceptor_start_failed",
@@ -125,6 +127,52 @@ def _command_result(argv: tuple[str, ...]) -> int | None:
     except Exception:
         return None
     return result.returncode
+
+
+def _trusted_runuser_path() -> Path | None:
+    try:
+        metadata = os.lstat(RUNUSER_PATH)
+    except OSError:
+        return None
+    if (
+        not stat.S_ISREG(metadata.st_mode)
+        or stat.S_ISLNK(metadata.st_mode)
+        or metadata.st_uid != 0
+        or stat.S_IMODE(metadata.st_mode) & 0o022
+        or not stat.S_IMODE(metadata.st_mode) & 0o111
+    ):
+        return None
+    return RUNUSER_PATH
+
+
+def _run_as_relay_service(
+    argv: tuple[str, ...],
+    *,
+    capture_stdout: bool = False,
+    timeout: int = 30,
+) -> subprocess.CompletedProcess[bytes] | None:
+    runuser = _trusted_runuser_path()
+    if runuser is None:
+        return None
+    try:
+        return subprocess.run(
+            (
+                str(runuser),
+                "--user",
+                RELAY_SERVICE_USER,
+                "--",
+                *argv,
+            ),
+            check=False,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE if capture_stdout else subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            cwd="/",
+            env={"LANG": "C", "LC_ALL": "C", "PATH": "/usr/bin:/bin"},
+            timeout=timeout,
+        )
+    except Exception:
+        return None
 
 
 def _openssl_path() -> Path:
@@ -360,41 +408,35 @@ def _mark_unit_stale() -> None:
 
 
 def _relay_status_ready() -> bool:
+    status_command = (
+        str(STABLE_LAUNCHER),
+        "status",
+        "--config",
+        str(CONFIG_ROOT / "config.json"),
+    )
     deadline = time.monotonic() + 5.0
     while time.monotonic() < deadline:
-        if (
-            _command_result(
-                (
-                    str(STABLE_LAUNCHER),
-                    "status",
-                    "--config",
-                    str(CONFIG_ROOT / "config.json"),
-                )
-            )
-            == 0
-        ):
+        result = _run_as_relay_service(status_command)
+        if result is not None and result.returncode == 0:
             return True
         time.sleep(0.1)
     return False
 
 
 def _relay_status_projection() -> tuple[int | None, dict[str, object] | None]:
+    result = _run_as_relay_service(
+        (
+            str(STABLE_LAUNCHER),
+            "status",
+            "--config",
+            str(CONFIG_ROOT / "config.json"),
+        ),
+        capture_stdout=True,
+        timeout=5,
+    )
+    if result is None:
+        return None, None
     try:
-        result = subprocess.run(
-            (
-                str(STABLE_LAUNCHER),
-                "status",
-                "--config",
-                str(CONFIG_ROOT / "config.json"),
-            ),
-            check=False,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-            cwd="/",
-            env={"LANG": "C", "LC_ALL": "C", "PATH": "/usr/bin:/bin"},
-            timeout=5,
-        )
         if not result.stdout or len(result.stdout) > MAX_DIAGNOSTIC_BYTES:
             return result.returncode, None
         payload = json.loads(result.stdout.decode("utf-8"))
@@ -519,31 +561,10 @@ def _diagnose_forward_start(systemctl_path: str) -> str:
     )
     if _command_result(check_command) != 0:
         return "forward_start_diagnostic_root_check"
-    runuser = Path("/usr/sbin/runuser")
-    try:
-        runuser_metadata = os.lstat(runuser)
-    except OSError:
+    if _trusted_runuser_path() is None:
         return "forward_start_diagnostic_runuser"
-    if (
-        not stat.S_ISREG(runuser_metadata.st_mode)
-        or stat.S_ISLNK(runuser_metadata.st_mode)
-        or runuser_metadata.st_uid != 0
-        or stat.S_IMODE(runuser_metadata.st_mode) & 0o022
-        or not stat.S_IMODE(runuser_metadata.st_mode) & 0o111
-    ):
-        return "forward_start_diagnostic_runuser"
-    if (
-        _command_result(
-            (
-                str(runuser),
-                "--user",
-                "agentops-relay",
-                "--",
-                *check_command,
-            )
-        )
-        != 0
-    ):
+    service_check = _run_as_relay_service(check_command)
+    if service_check is None or service_check.returncode != 0:
         return "forward_start_diagnostic_service_check"
     if not _port_available(BROWSER_PORT):
         return "forward_start_diagnostic_browser_port"

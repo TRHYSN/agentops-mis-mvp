@@ -15,7 +15,8 @@ real-systemd evidence on one disposable GitHub-hosted Ubuntu VM. It:
 5. closes and reopens the production store between every recovery preview and
    confirmed controller invocation;
 6. runs the packaged `agentops-relay` process through the packaged systemd
-   unit and verifies its bounded status command reports ready;
+   unit and verifies its bounded status command reports ready when invoked
+   under the dedicated `agentops-relay` service identity;
 7. performs the real daemon-reload, enable, start, verify, rollback-stop,
    rollback-disable, and rollback-verify sequence;
 8. publishes the rollback receipt and terminal revision into the production
@@ -49,6 +50,12 @@ Host connector, customer credential, public route, DNS, ACME, or external
 network dependency. Certificate and route material exist only on the
 disposable VM and are never emitted. Output is limited to fixed identifiers,
 step names, counts, and booleans.
+
+The low-level daemon `status` command runs through the root-owned,
+non-writable `/usr/sbin/runuser` executable as `agentops-relay`. This preserves
+the runtime status file's service-owned `0600` boundary; root retains systemd
+orchestration and uses the separate administrator status surface instead of
+weakening daemon-file ownership checks.
 
 Cleanup first stops and disables the service, then removes only identities
 owned by the exact installation acceptance, restores parent modes, removes the
