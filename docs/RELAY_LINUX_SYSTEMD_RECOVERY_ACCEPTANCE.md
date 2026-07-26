@@ -80,15 +80,18 @@ cleanup reloads are outside that marker. The pipe marker is emitted by the
 first post-mutation scanner call, so receiving it proves that the production
 mutation adapter returned while observation publication remains unreachable.
 
-The enable-intent gate uses a separate bounded mutation sidecar. The execution
-child opens the production-shaped journal through the lifecycle-lock opener.
-The one-shot mutation runner validates exact operation `enable`, emits
+The enable-intent gate uses a separate bounded mutation sidecar. The parent
+creates and syncs the empty `0600` sidecar before any production journal
+session opens, so recording the later mutation cannot change the bound
+production-root directory identity. The execution child then opens the
+production-shaped journal through the lifecycle-lock opener. The one-shot
+mutation runner validates exact operation `enable`, emits
 `enable_intent_persisted`, and blocks without invoking systemd. Reaching that
 boundary proves the executor already published and reloaded revision 4
 `enable_requested` and completed its stable pre-mutation scan. The parent
 proves the child is alive, the lifecycle lock is busy, systemd remains
-disabled and inactive, and the enable mutation count is zero before sending
-`SIGKILL`.
+disabled and inactive, and the validated sidecar is still empty before
+sending `SIGKILL`.
 
 A fresh recovery process reacquires the lifecycle lock, previews exactly
 `resume + run_step + enable + resume_ready`, reuses the existing intent,

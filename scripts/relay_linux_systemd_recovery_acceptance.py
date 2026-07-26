@@ -871,6 +871,63 @@ def _append_enable_intent_process_death_mutation(
                 pass
 
 
+def _prepare_enable_intent_process_death_marker(
+    marker_path: Path,
+) -> None:
+    descriptor = -1
+    parent_descriptor = -1
+    try:
+        parent_descriptor = os.open(
+            marker_path.parent,
+            os.O_RDONLY
+            | getattr(os, "O_DIRECTORY", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_CLOEXEC", 0),
+        )
+        descriptor = os.open(
+            marker_path,
+            os.O_WRONLY
+            | os.O_CREAT
+            | os.O_EXCL
+            | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_CLOEXEC", 0),
+            0o600,
+        )
+        os.fchmod(descriptor, 0o600)
+        opened = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or stat.S_IMODE(opened.st_mode) != 0o600
+            or opened.st_uid != os.geteuid()
+            or opened.st_gid != os.getegid()
+            or opened.st_nlink != 1
+            or opened.st_size != 0
+        ):
+            raise AcceptanceFailure(
+                "enable_intent_process_death_mutation_marker_invalid"
+            )
+        os.fsync(descriptor)
+        os.fsync(parent_descriptor)
+        current = os.lstat(marker_path)
+        if _fingerprint(opened) != _fingerprint(current):
+            raise AcceptanceFailure(
+                "enable_intent_process_death_mutation_marker_invalid"
+            )
+    except AcceptanceFailure:
+        raise
+    except Exception:
+        raise AcceptanceFailure(
+            "enable_intent_process_death_mutation_marker_prepare"
+        ) from None
+    finally:
+        for opened_descriptor in (descriptor, parent_descriptor):
+            if opened_descriptor >= 0:
+                try:
+                    os.close(opened_descriptor)
+                except OSError:
+                    pass
+
+
 def _enable_intent_process_death_mutation_count(
     marker_path: Path,
     *,
@@ -892,11 +949,24 @@ def _enable_intent_process_death_mutation_count(
             or opened.st_uid != os.geteuid()
             or opened.st_gid != os.getegid()
             or opened.st_nlink != 1
-            or opened.st_size != expected_size
+            or opened.st_size not in {0, expected_size}
         ):
             raise AcceptanceFailure(
                 "enable_intent_process_death_mutation_marker_invalid"
             )
+        if opened.st_size == 0:
+            after = os.fstat(descriptor)
+            current = os.lstat(marker_path)
+            if (
+                not allow_missing
+                or os.read(descriptor, 1)
+                or _fingerprint(opened) != _fingerprint(after)
+                or _fingerprint(after) != _fingerprint(current)
+            ):
+                raise AcceptanceFailure(
+                    "enable_intent_process_death_mutation_marker_invalid"
+                )
+            return 0
         payload = os.read(descriptor, expected_size + 1)
         after = os.fstat(descriptor)
         current = os.lstat(marker_path)
@@ -1625,6 +1695,11 @@ def _run_enable_intent_process_death_gate(
         _enable_intent_process_death_marker_path(journal_root)
     )
     production_root = _production_root_for_journal(journal_root)
+    if os.path.lexists(enable_marker_path):
+        raise AcceptanceFailure(
+            "enable_intent_process_death_mutation_precondition"
+        )
+    _prepare_enable_intent_process_death_marker(enable_marker_path)
     if (
         _process_death_mutation_count(daemon_marker_path) != 1
         or _enable_intent_process_death_mutation_count(
