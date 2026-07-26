@@ -87,7 +87,23 @@ BROWSER_PORT = 18443
 CONNECTOR_PORT = 19443
 MAX_STEP_COUNT = 16
 MAX_TLS_BYTES = 1024 * 1024
+MAX_DIAGNOSTIC_BYTES = 64 * 1024
 OPENSSL_PATHS = (Path("/usr/bin/openssl"), Path("/bin/openssl"))
+JOURNALCTL_PATHS = (Path("/usr/bin/journalctl"), Path("/bin/journalctl"))
+RELAY_JOURNAL_ERROR_IDS = frozenset(
+    {
+        "browser_acceptor_start_failed",
+        "connector_acceptor_start_failed",
+        "file_parent_untrusted",
+        "relay_acceptor_unavailable",
+        "relay_instance_active",
+        "relay_instance_lock_rejected",
+        "relay_socket_failed",
+        "state_lock_failed",
+        "state_lock_rejected",
+        "state_write_failed",
+    }
+)
 
 
 class AcceptanceFailure(Exception):
@@ -360,6 +376,130 @@ def _relay_status_ready() -> bool:
             return True
         time.sleep(0.1)
     return False
+
+
+def _relay_status_projection() -> tuple[int | None, dict[str, object] | None]:
+    try:
+        result = subprocess.run(
+            (
+                str(STABLE_LAUNCHER),
+                "status",
+                "--config",
+                str(CONFIG_ROOT / "config.json"),
+            ),
+            check=False,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            cwd="/",
+            env={"LANG": "C", "LC_ALL": "C", "PATH": "/usr/bin:/bin"},
+            timeout=5,
+        )
+        if not result.stdout or len(result.stdout) > MAX_DIAGNOSTIC_BYTES:
+            return result.returncode, None
+        payload = json.loads(result.stdout.decode("utf-8"))
+        if not isinstance(payload, dict):
+            return result.returncode, None
+        return result.returncode, payload
+    except Exception:
+        return None, None
+
+
+def _relay_journal_error() -> str | None:
+    journalctl: Path | None = None
+    for path in JOURNALCTL_PATHS:
+        try:
+            metadata = os.lstat(path)
+        except OSError:
+            continue
+        if (
+            stat.S_ISREG(metadata.st_mode)
+            and not stat.S_ISLNK(metadata.st_mode)
+            and metadata.st_uid == 0
+            and not stat.S_IMODE(metadata.st_mode) & 0o022
+            and stat.S_IMODE(metadata.st_mode) & 0o111
+        ):
+            journalctl = path
+            break
+    if journalctl is None:
+        return None
+    try:
+        result = subprocess.run(
+            (
+                str(journalctl),
+                "--no-pager",
+                "--output=cat",
+                "--unit=agentops-mis-relay.service",
+                "--lines=30",
+            ),
+            check=False,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            cwd="/",
+            env={"LANG": "C", "LC_ALL": "C", "PATH": "/usr/bin:/bin"},
+            timeout=5,
+        )
+        if (
+            result.returncode != 0
+            or not result.stdout
+            or len(result.stdout) > MAX_DIAGNOSTIC_BYTES
+        ):
+            return None
+        for line in reversed(result.stdout.decode("utf-8").splitlines()):
+            try:
+                payload = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(payload, dict):
+                continue
+            error_id = payload.get("error")
+            if (
+                payload.get("operation") == "relay_serve"
+                and isinstance(error_id, str)
+                and error_id in RELAY_JOURNAL_ERROR_IDS
+            ):
+                return error_id
+    except Exception:
+        return None
+    return None
+
+
+def _diagnose_relay_status(systemctl_path: str) -> str:
+    status_code, projection = _relay_status_projection()
+    if status_code == 0 and projection is not None:
+        return "relay_status_diagnostic_ready_late"
+
+    command = (systemctl_path, "--system")
+    active = (
+        _command_result(
+            (*command, "is-active", "agentops-mis-relay.service")
+        )
+        == 0
+    )
+    failed = (
+        _command_result(
+            (*command, "is-failed", "agentops-mis-relay.service")
+        )
+        == 0
+    )
+    journal_error = _relay_journal_error()
+    if journal_error is not None:
+        return f"relay_status_diagnostic_journal_{journal_error}"
+    state_id = "active" if active else ("failed" if failed else "inactive")
+    if projection is None:
+        return f"relay_status_diagnostic_{state_id}_projection_invalid"
+    if projection.get("status_fresh") is False:
+        return f"relay_status_diagnostic_{state_id}_stale"
+    if projection.get("pid_alive") is False:
+        return f"relay_status_diagnostic_{state_id}_pid_unavailable"
+    if projection.get("ready") is False:
+        return f"relay_status_diagnostic_{state_id}_not_ready"
+    if _port_available(BROWSER_PORT):
+        return f"relay_status_diagnostic_{state_id}_browser_unbound"
+    if _port_available(CONNECTOR_PORT):
+        return f"relay_status_diagnostic_{state_id}_connector_unbound"
+    return f"relay_status_diagnostic_{state_id}_status_rejected"
 
 
 def _diagnose_forward_start(systemctl_path: str) -> str:
@@ -873,7 +1013,9 @@ def _run() -> dict[str, object]:
         stage = "relay_status"
         relay_started = _relay_status_ready()
         if not relay_started:
-            raise AcceptanceFailure(stage)
+            raise AcceptanceFailure(
+                _diagnose_relay_status(systemctl_path)
+            )
 
         stage = "rollback_execution"
         for _index in range(MAX_STEP_COUNT):
