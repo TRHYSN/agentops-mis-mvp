@@ -426,7 +426,9 @@ A real Linux VM with systemd and root authority is required to verify:
 - real daemon reload, enable, start, stop, and disable behavior;
 - service account and group access;
 - `ExecStartPre` configuration validation;
-- `StateDirectory` and `RuntimeDirectory` creation and permissions;
+- `StateDirectory` and `RuntimeDirectory` creation and permissions, including
+  preservation of the runtime directory across a controlled stop until
+  rollback observation and explicit cleanup complete;
 - active/running state, boot persistence, and restart behavior.
 
 Neither fixture nor VM activation is evidence of firewall, DNS, ACME, public

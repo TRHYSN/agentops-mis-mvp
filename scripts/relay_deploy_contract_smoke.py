@@ -593,6 +593,7 @@ def main() -> int:
         "RestartSec": "5s",
         "KillSignal": "SIGTERM",
         "RuntimeDirectoryMode": "0700",
+        "RuntimeDirectoryPreserve": "yes",
         "StateDirectoryMode": "0700",
         "UMask": "0077",
         "NoNewPrivileges": "true",

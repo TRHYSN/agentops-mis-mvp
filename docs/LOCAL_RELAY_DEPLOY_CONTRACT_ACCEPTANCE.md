@@ -73,6 +73,9 @@ The template:
 - runs as the dedicated `agentops-relay` user and group;
 - grants only `CAP_NET_BIND_SERVICE` for an operator-configured low port;
 - creates private `0700` runtime and state directories under systemd ownership;
+- preserves the runtime directory across a controlled stop so activation
+  rollback can verify the service-owned stopped-status leaf before explicit
+  cleanup;
 - applies `UMask=0077`, a bounded file-descriptor/task budget, and a five-second
   on-failure restart delay;
 - restricts writable paths to the Relay state and runtime directories;
