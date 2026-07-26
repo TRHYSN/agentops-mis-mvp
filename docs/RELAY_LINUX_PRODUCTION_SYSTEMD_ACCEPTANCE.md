@@ -131,8 +131,10 @@ journaled daemon-reload step is exercised without changing packaged unit
 bytes. A run may report `rollback_stop` in
 `recovered_late_observation_steps` and a correspondingly larger reopen count
 when systemd's stopped state becomes observable just after the mutation call.
-That path records the existing intent's exact observation and does not execute
-the stop mutation again.
+That path requires the next reopened preview to return exactly
+`inverse + record_observation + rollback_stop` for the retained intent. Any
+other decision fails before a mutation call, so the stop action cannot be
+replayed by the acceptance.
 
 ## Truth Boundary
 

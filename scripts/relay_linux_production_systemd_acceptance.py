@@ -887,6 +887,7 @@ def _run() -> dict[str, object]:
     forward_steps: list[str] = []
     rollback_steps: list[str] = []
     recovered_late_observation_steps: list[str] = []
+    pending_late_observation_step: str | None = None
     store_open_count = [0]
     final_state = ""
     relay_started = False
@@ -1048,6 +1049,16 @@ def _run() -> dict[str, object]:
                 store_open_count,
             )
             operation = str(decision.get("operation_id"))
+            if pending_late_observation_step is not None and (
+                decision.get("action_id") != "inverse"
+                or operation != "record_observation"
+                or decision.get("reason_id") != "resume_ready"
+                or decision.get("step_id")
+                != pending_late_observation_step
+            ):
+                raise AcceptanceFailure(
+                    _unexpected_decision_stage("rollback", decision)
+                )
             if operation == "run_step":
                 step_id = str(decision.get("step_id"))
                 if step_id not in {
@@ -1073,6 +1084,7 @@ def _run() -> dict[str, object]:
                             "rollback_rollback_stop_diagnostic_"
                             "valid_late_state"
                         ):
+                            pending_late_observation_step = step_id
                             continue
                         raise AcceptanceFailure(diagnostic) from None
                     raise
@@ -1098,13 +1110,7 @@ def _run() -> dict[str, object]:
                 raise AcceptanceFailure(
                     _unexpected_decision_stage("rollback", decision)
                 )
-            stage = f"rollback_{expected_write}"
-            result = _run_write_once(
-                plan_sha256,
-                "rollback",
-                str(decision["decision_sha256"]),
-                store_open_count,
-            )
+            recovered_step: str | None = None
             if expected_write == "record_observation":
                 recovered_step = str(decision.get("step_id"))
                 if (
@@ -1114,12 +1120,23 @@ def _run() -> dict[str, object]:
                         "verify",
                     }
                     or recovered_step in rollback_steps
+                    or recovered_step
+                    != pending_late_observation_step
                 ):
                     raise AcceptanceFailure(
                         _unexpected_decision_stage("rollback", decision)
                     )
+            stage = f"rollback_{expected_write}"
+            result = _run_write_once(
+                plan_sha256,
+                "rollback",
+                str(decision["decision_sha256"]),
+                store_open_count,
+            )
+            if recovered_step is not None:
                 rollback_steps.append(recovered_step)
                 recovered_late_observation_steps.append(recovered_step)
+                pending_late_observation_step = None
             if expected_write == "complete":
                 final_state = str(result.get("state"))
                 break
@@ -1150,6 +1167,7 @@ def _run() -> dict[str, object]:
                 or final_systemd.active_state != "inactive"
                 or final_systemd.unit_file_state != "disabled"
                 or final_prerequisites.enablement_links
+                or pending_late_observation_step is not None
                 or store_state.get("ok") is not True
                 or store_state.get("state") != "ready"
                 or store_state.get("completed_transaction_count") != 1
