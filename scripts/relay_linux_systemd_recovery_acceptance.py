@@ -112,6 +112,7 @@ ENABLE_INTENT_RECOVERY_FAILURE_STAGES = frozenset(
         "enable_intent_recover_child_reopen",
         "enable_intent_recover_child_preview",
         "enable_intent_recover_child_execute",
+        "enable_intent_recover_child_mutation_preflight",
         "enable_intent_recover_child_mutation_call",
         "enable_intent_recover_child_mutation_marker",
         "enable_intent_recover_child_post_mutation",
@@ -667,6 +668,11 @@ def _marker_identity(metadata: os.stat_result) -> tuple[int, ...]:
     )
 
 
+def _marker_identity_sha256(metadata: os.stat_result) -> str:
+    payload = ",".join(str(value) for value in _marker_identity(metadata))
+    return hashlib.sha256(payload.encode("ascii")).hexdigest()
+
+
 def _append_process_death_mutation(marker_path: Path) -> None:
     descriptor = -1
     try:
@@ -808,9 +814,10 @@ def _process_death_mutation_count(
                 pass
 
 
-def _append_enable_intent_process_death_mutation(
+def _open_empty_enable_intent_process_death_marker(
     marker_path: Path,
-) -> None:
+    expected_identity_sha256: str,
+) -> int:
     descriptor = -1
     try:
         descriptor = os.open(
@@ -821,6 +828,7 @@ def _append_enable_intent_process_death_mutation(
             | getattr(os, "O_CLOEXEC", 0),
         )
         before = os.fstat(descriptor)
+        current = os.lstat(marker_path)
         if (
             not stat.S_ISREG(before.st_mode)
             or stat.S_IMODE(before.st_mode) != 0o600
@@ -828,6 +836,51 @@ def _append_enable_intent_process_death_mutation(
             or before.st_gid != os.getegid()
             or before.st_nlink != 1
             or before.st_size != 0
+            or _fingerprint(before) != _fingerprint(current)
+            or _marker_identity_sha256(before)
+            != expected_identity_sha256
+        ):
+            raise AcceptanceFailure(
+                "enable_intent_process_death_mutation_marker_invalid"
+            )
+        return descriptor
+    except AcceptanceFailure:
+        if descriptor >= 0:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+        raise
+    except Exception:
+        if descriptor >= 0:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+        raise AcceptanceFailure(
+            "enable_intent_process_death_mutation_marker_invalid"
+        ) from None
+
+
+def _append_enable_intent_process_death_mutation(
+    marker_path: Path,
+    descriptor: int,
+    expected_identity_sha256: str,
+) -> None:
+    try:
+        before = os.fstat(descriptor)
+        current_before = os.lstat(marker_path)
+        if (
+            descriptor < 0
+            or not stat.S_ISREG(before.st_mode)
+            or stat.S_IMODE(before.st_mode) != 0o600
+            or before.st_uid != os.geteuid()
+            or before.st_gid != os.getegid()
+            or before.st_nlink != 1
+            or before.st_size != 0
+            or _fingerprint(before) != _fingerprint(current_before)
+            or _marker_identity_sha256(before)
+            != expected_identity_sha256
         ):
             raise AcceptanceFailure(
                 "enable_intent_process_death_mutation_marker_invalid"
@@ -848,6 +901,8 @@ def _append_enable_intent_process_death_mutation(
         if (
             _marker_identity(before) != _marker_identity(after)
             or _marker_identity(after) != _marker_identity(current)
+            or _marker_identity_sha256(after)
+            != expected_identity_sha256
             or after.st_size
             != len(ENABLE_INTENT_PROCESS_DEATH_MUTATION_RECORD)
             or current.st_size != after.st_size
@@ -861,17 +916,11 @@ def _append_enable_intent_process_death_mutation(
         raise AcceptanceFailure(
             "enable_intent_process_death_mutation_marker_write"
         ) from None
-    finally:
-        if descriptor >= 0:
-            try:
-                os.close(descriptor)
-            except OSError:
-                pass
 
 
 def _prepare_enable_intent_process_death_marker(
     marker_path: Path,
-) -> None:
+) -> str:
     descriptor = -1
     parent_descriptor = -1
     try:
@@ -911,6 +960,7 @@ def _prepare_enable_intent_process_death_marker(
             raise AcceptanceFailure(
                 "enable_intent_process_death_mutation_marker_invalid"
             )
+        return _marker_identity_sha256(opened)
     except AcceptanceFailure:
         raise
     except Exception:
@@ -929,7 +979,8 @@ def _prepare_enable_intent_process_death_marker(
 def _enable_intent_process_death_mutation_count(
     marker_path: Path,
     *,
-    allow_missing: bool = False,
+    allow_empty: bool = False,
+    expected_identity_sha256: str | None = None,
 ) -> int:
     descriptor = -1
     try:
@@ -948,6 +999,11 @@ def _enable_intent_process_death_mutation_count(
             or opened.st_gid != os.getegid()
             or opened.st_nlink != 1
             or opened.st_size not in {0, expected_size}
+            or (
+                expected_identity_sha256 is not None
+                and _marker_identity_sha256(opened)
+                != expected_identity_sha256
+            )
         ):
             raise AcceptanceFailure(
                 "enable_intent_process_death_mutation_marker_invalid"
@@ -956,7 +1012,7 @@ def _enable_intent_process_death_mutation_count(
             after = os.fstat(descriptor)
             current = os.lstat(marker_path)
             if (
-                not allow_missing
+                not allow_empty
                 or os.read(descriptor, 1)
                 or _fingerprint(opened) != _fingerprint(after)
                 or _fingerprint(after) != _fingerprint(current)
@@ -978,8 +1034,6 @@ def _enable_intent_process_death_mutation_count(
             )
         return 1
     except FileNotFoundError:
-        if allow_missing:
-            return 0
         raise AcceptanceFailure(
             "enable_intent_process_death_mutation_marker_missing"
         ) from None
@@ -1386,13 +1440,14 @@ def _enable_intent_process_death_execute_child(
     pipe_descriptor = -1
     try:
         if (
-            len(arguments) != 5
+            len(arguments) != 6
             or os.environ.get(OPT_IN) != "1"
             or not sys.platform.startswith("linux")
             or os.geteuid() != 0
             or not Path("/run/systemd/system").is_dir()
             or SHA256_PATTERN.fullmatch(arguments[2]) is None
             or SHA256_PATTERN.fullmatch(arguments[3]) is None
+            or SHA256_PATTERN.fullmatch(arguments[4]) is None
         ):
             return 1
         journal_root, daemon_marker_path = _process_death_paths(
@@ -1407,12 +1462,13 @@ def _enable_intent_process_death_execute_child(
             _process_death_mutation_count(daemon_marker_path) != 1
             or _enable_intent_process_death_mutation_count(
                 enable_marker_path,
-                allow_missing=True,
+                allow_empty=True,
+                expected_identity_sha256=arguments[4],
             )
             != 0
         ):
             return 1
-        pipe_descriptor = int(arguments[4])
+        pipe_descriptor = int(arguments[5])
         pipe_metadata = os.fstat(pipe_descriptor)
         if pipe_descriptor < 3 or not stat.S_ISFIFO(pipe_metadata.st_mode):
             return 1
@@ -1486,12 +1542,13 @@ def _enable_intent_process_death_recover_child(
     stage = "enable_intent_recover_child_preflight"
     try:
         if (
-            len(arguments) != 3
+            len(arguments) != 4
             or os.environ.get(OPT_IN) != "1"
             or not sys.platform.startswith("linux")
             or os.geteuid() != 0
             or not Path("/run/systemd/system").is_dir()
             or SHA256_PATTERN.fullmatch(arguments[2]) is None
+            or SHA256_PATTERN.fullmatch(arguments[3]) is None
         ):
             raise AcceptanceFailure(stage)
         journal_root, daemon_marker_path = _process_death_paths(
@@ -1503,11 +1560,15 @@ def _enable_intent_process_death_recover_child(
             _enable_intent_process_death_marker_path(journal_root)
         )
         plan_sha256 = arguments[2]
+        expected_marker_identity_sha256 = arguments[3]
         if (
             _process_death_mutation_count(daemon_marker_path) != 1
             or _enable_intent_process_death_mutation_count(
                 enable_marker_path,
-                allow_missing=True,
+                allow_empty=True,
+                expected_identity_sha256=(
+                    expected_marker_identity_sha256
+                ),
             )
             != 0
         ):
@@ -1561,12 +1622,40 @@ def _enable_intent_process_death_recover_child(
                     raise AcceptanceFailure(
                         "enable_intent_recovery_mutation_replayed"
                     )
-                stage = "enable_intent_recover_child_mutation_call"
-                _run_bound_systemd_mutation(systemctl, operation)
-                stage = "enable_intent_recover_child_mutation_marker"
-                _append_enable_intent_process_death_mutation(
-                    enable_marker_path
-                )
+                marker_descriptor = -1
+                stage = "enable_intent_recover_child_mutation_preflight"
+                try:
+                    marker_descriptor = (
+                        _open_empty_enable_intent_process_death_marker(
+                            enable_marker_path,
+                            expected_marker_identity_sha256,
+                        )
+                    )
+                    if (
+                        _enable_intent_process_death_mutation_count(
+                            enable_marker_path,
+                            allow_empty=True,
+                            expected_identity_sha256=(
+                                expected_marker_identity_sha256
+                            ),
+                        )
+                        != 0
+                    ):
+                        raise AcceptanceFailure(stage)
+                    stage = "enable_intent_recover_child_mutation_call"
+                    _run_bound_systemd_mutation(systemctl, operation)
+                    stage = "enable_intent_recover_child_mutation_marker"
+                    _append_enable_intent_process_death_mutation(
+                        enable_marker_path,
+                        marker_descriptor,
+                        expected_marker_identity_sha256,
+                    )
+                finally:
+                    if marker_descriptor >= 0:
+                        try:
+                            os.close(marker_descriptor)
+                        except OSError:
+                            pass
                 mutation_count = 1
                 stage = "enable_intent_recover_child_post_mutation"
 
@@ -1634,7 +1723,10 @@ def _enable_intent_process_death_recover_child(
 
         if (
             _enable_intent_process_death_mutation_count(
-                enable_marker_path
+                enable_marker_path,
+                expected_identity_sha256=(
+                    expected_marker_identity_sha256
+                ),
             )
             != 1
         ):
@@ -1697,12 +1789,34 @@ def _run_enable_intent_process_death_gate(
         raise AcceptanceFailure(
             "enable_intent_process_death_mutation_precondition"
         )
-    _prepare_enable_intent_process_death_marker(enable_marker_path)
+    try:
+        _enable_intent_process_death_mutation_count(
+            enable_marker_path,
+            allow_empty=True,
+        )
+    except AcceptanceFailure as exc:
+        if (
+            exc.stage
+            != "enable_intent_process_death_mutation_marker_missing"
+        ):
+            raise AcceptanceFailure(
+                "enable_intent_process_death_mutation_precondition"
+            ) from None
+    else:
+        raise AcceptanceFailure(
+            "enable_intent_process_death_mutation_precondition"
+        )
+    expected_marker_identity_sha256 = (
+        _prepare_enable_intent_process_death_marker(enable_marker_path)
+    )
     if (
         _process_death_mutation_count(daemon_marker_path) != 1
         or _enable_intent_process_death_mutation_count(
             enable_marker_path,
-            allow_missing=True,
+            allow_empty=True,
+            expected_identity_sha256=(
+                expected_marker_identity_sha256
+            ),
         )
         != 0
     ):
@@ -1724,6 +1838,7 @@ def _run_enable_intent_process_death_gate(
                 str(daemon_marker_path),
                 plan_sha256,
                 confirmed_decision_sha256,
+                expected_marker_identity_sha256,
                 str(write_descriptor),
             ),
             shell=False,
@@ -1762,7 +1877,10 @@ def _run_enable_intent_process_death_gate(
         if (
             _enable_intent_process_death_mutation_count(
                 enable_marker_path,
-                allow_missing=True,
+                allow_empty=True,
+                expected_identity_sha256=(
+                    expected_marker_identity_sha256
+                ),
             )
             != 0
         ):
@@ -1845,7 +1963,10 @@ def _run_enable_intent_process_death_gate(
     if (
         _enable_intent_process_death_mutation_count(
             enable_marker_path,
-            allow_missing=True,
+            allow_empty=True,
+            expected_identity_sha256=(
+                expected_marker_identity_sha256
+            ),
         )
         != 0
     ):
@@ -1862,6 +1983,7 @@ def _run_enable_intent_process_death_gate(
                 str(journal_root),
                 str(daemon_marker_path),
                 plan_sha256,
+                expected_marker_identity_sha256,
             ),
             check=False,
             stdin=subprocess.DEVNULL,
@@ -1928,7 +2050,10 @@ def _run_enable_intent_process_death_gate(
         )
     if (
         _enable_intent_process_death_mutation_count(
-            enable_marker_path
+            enable_marker_path,
+            expected_identity_sha256=(
+                expected_marker_identity_sha256
+            ),
         )
         != 1
     ):
@@ -1973,6 +2098,8 @@ def _run_enable_intent_process_death_gate(
         "checkpoint_latest_revision": 4,
         "child_exit_signal": "SIGKILL",
         "lifecycle_lock_held_at_checkpoint": True,
+        "missing_marker_rejected_before_mutation": True,
+        "mutation_marker_identity_bound": True,
         **expected,
     }
 

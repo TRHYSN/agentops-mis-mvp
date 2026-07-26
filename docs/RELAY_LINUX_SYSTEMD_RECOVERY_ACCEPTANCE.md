@@ -95,11 +95,17 @@ sending `SIGKILL`.
 
 A fresh recovery process reacquires the lifecycle lock, previews exactly
 `resume + run_step + enable + resume_ready`, reuses the existing intent,
-invokes the real bound `systemctl enable` once, and appends exactly one
-observed revision 5 with `owns_enable=true` and `owns_start=false`. It then
-reopens the locked journal, verifies systemd is enabled and inactive, and
-previews `resume + run_step + start + resume_ready`. The separate enable
-mutation sidecar must remain exactly one.
+requires the prepared sidecar to still exist and remain empty immediately
+before entering the real mutation, and matches its stable identity to the
+parent-prepared inode. The recovery child keeps one validated append descriptor
+open across the bound `systemctl enable` call and writes the mutation marker
+through that same descriptor rather than reopening the path. A missing or
+substituted sidecar fails closed before systemd mutation; an empty sidecar is
+not treated as a missing one. Recovery appends exactly one observed revision 5
+with `owns_enable=true` and `owns_start=false`, then reopens the locked journal,
+verifies systemd is enabled and inactive, and previews
+`resume + run_step + start + resume_ready`. The separate enable mutation
+sidecar must remain exactly one.
 
 The rollback receipt gate begins only after an observed `verify` revision
 records `rollback_verified`, with both ownership flags false. The temporary
@@ -172,6 +178,8 @@ Expected bounded result:
     "latest_revision": 5,
     "lifecycle_lock_held_at_checkpoint": true,
     "lifecycle_lock_reacquired": true,
+    "missing_marker_rejected_before_mutation": true,
+    "mutation_marker_identity_bound": true,
     "mutation_count_after_recovery": 1,
     "mutation_count_before_recovery": 0,
     "mutation_replayed": false,
@@ -253,6 +261,11 @@ full production installation acceptance:
   interruption; and
 - no CLI, API, browser caller, public Relay, DNS, or physical second-device
   acceptance is enabled by this slice.
+
+The sidecar identity and held-descriptor checks cover ordinary crash recovery
+and non-concurrent path loss or substitution. They do not claim atomicity
+against a concurrently hostile root process that can mutate the temporary
+acceptance directory while the privileged systemd call is already in flight.
 
 The separate production installation, scanner, and journal-opener baseline is
 recorded in `RELAY_LINUX_PRODUCTION_INSTALL_ACCEPTANCE.md`, and
