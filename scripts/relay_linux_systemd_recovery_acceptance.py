@@ -43,7 +43,10 @@ from agentops_mis_cli.relay_activation_evidence import (  # noqa: E402
 )
 from agentops_mis_cli.relay_activation_journal import (  # noqa: E402
     GENESIS_REVISION_SHA256,
+    RelayActivationJournalError,
+    _PRODUCTION_ADMIN_PARTS,
     _open_fixture_store,
+    _open_locked_production_store,
     build_activation_revision,
 )
 from agentops_mis_cli.relay_activation_recovery_controller import (  # noqa: E402
@@ -558,6 +561,39 @@ def _process_death_environment() -> dict[str, str]:
     }
 
 
+def _prepare_journal_root(production_root: Path) -> Path:
+    production_root.chmod(0o700)
+    var = production_root / _PRODUCTION_ADMIN_PARTS[0]
+    library = var / _PRODUCTION_ADMIN_PARTS[1]
+    journal_root = library / _PRODUCTION_ADMIN_PARTS[2]
+    var.mkdir(mode=0o755)
+    library.mkdir(mode=0o755)
+    journal_root.mkdir(mode=0o700)
+    var.chmod(0o755)
+    library.chmod(0o755)
+    journal_root.chmod(0o700)
+    lifecycle = journal_root / "lifecycle.lock"
+    lifecycle.touch(mode=0o600, exist_ok=False)
+    lifecycle.chmod(0o600)
+    return journal_root
+
+
+def _production_root_for_journal(journal_root: Path) -> Path:
+    if not journal_root.is_absolute() or len(journal_root.parents) < 3:
+        raise AcceptanceFailure("process_death_journal_root_invalid")
+    production_root = journal_root.parents[2]
+    if journal_root != production_root.joinpath(*_PRODUCTION_ADMIN_PARTS):
+        raise AcceptanceFailure("process_death_journal_root_invalid")
+    return production_root
+
+
+def _process_death_marker_path(journal_root: Path) -> Path:
+    return (
+        _production_root_for_journal(journal_root)
+        / PROCESS_DEATH_MUTATION_FILE
+    )
+
+
 def _process_death_paths(
     journal_argument: str,
     marker_argument: str,
@@ -567,7 +603,7 @@ def _process_death_paths(
     if (
         not journal_root.is_absolute()
         or not marker_path.is_absolute()
-        or marker_path != journal_root / PROCESS_DEATH_MUTATION_FILE
+        or marker_path != _process_death_marker_path(journal_root)
         or not journal_root.is_dir()
         or not os.path.lexists(UNIT_PATH)
         or not _owned_unit()
@@ -742,7 +778,18 @@ def _process_death_mutation_count(
 def _receipt_count(store: Any, snapshot: Any) -> int:
     receipt = snapshot.receipt
     try:
-        names = tuple(sorted(os.listdir(store.receipts_fd)))
+        receipts_fd = getattr(store, "receipts_fd", None)
+        if not isinstance(receipts_fd, int):
+            receipts_fd = getattr(
+                getattr(store, "_store", None),
+                "receipts_fd",
+                None,
+            )
+        if not isinstance(receipts_fd, int) or receipts_fd < 0:
+            raise AcceptanceFailure(
+                "receipt_process_death_receipt_count"
+            )
+        names = tuple(sorted(os.listdir(receipts_fd)))
     except Exception:
         raise AcceptanceFailure(
             "receipt_process_death_receipt_count"
@@ -961,7 +1008,7 @@ def _run_process_death_gate(
     plan_sha256: str,
     confirmed_decision_sha256: str,
 ) -> dict[str, object]:
-    marker_path = journal_root / PROCESS_DEATH_MUTATION_FILE
+    marker_path = _process_death_marker_path(journal_root)
     if _process_death_mutation_count(
         marker_path,
         allow_missing=True,
@@ -1128,6 +1175,7 @@ def _receipt_process_death_execute_child(arguments: list[str]) -> int:
             arguments[0],
             arguments[1],
         )
+        production_root = _production_root_for_journal(journal_root)
         if _process_death_mutation_count(marker_path) != 1:
             return 1
         pipe_descriptor = int(arguments[4])
@@ -1135,7 +1183,7 @@ def _receipt_process_death_execute_child(arguments: list[str]) -> int:
         if pipe_descriptor < 3 or not stat.S_ISFIFO(pipe_metadata.st_mode):
             return 1
 
-        with _open_fixture_store(journal_root) as store:
+        with _open_locked_production_store(production_root) as store:
             before = store._load_recovery_snapshot(arguments[2])
             last = before.revisions[-1]
             if (
@@ -1188,13 +1236,14 @@ def _receipt_process_death_recover_child(arguments: list[str]) -> int:
             arguments[0],
             arguments[1],
         )
+        production_root = _production_root_for_journal(journal_root)
         plan_sha256 = arguments[2]
         receipt_decision_sha256 = arguments[3]
         if _process_death_mutation_count(marker_path) != 1:
             raise AcceptanceFailure(stage)
 
         stage = "receipt_recover_child_reopen"
-        with _open_fixture_store(journal_root) as store:
+        with _open_locked_production_store(production_root) as store:
             before = store._load_recovery_snapshot(plan_sha256)
             last = before.revisions[-1]
             receipt = before.receipt
@@ -1281,7 +1330,7 @@ def _receipt_process_death_recover_child(arguments: list[str]) -> int:
                 raise AcceptanceFailure(stage)
 
         stage = "receipt_recover_child_reopen_complete"
-        with _open_fixture_store(journal_root) as store:
+        with _open_locked_production_store(production_root) as store:
             complete_before = store._load_recovery_snapshot(plan_sha256)
             if (
                 complete_before.receipt is None
@@ -1351,6 +1400,7 @@ def _receipt_process_death_recover_child(arguments: list[str]) -> int:
                     "decision_recomputed": True,
                     "final_state": "service_state_rolled_back",
                     "journal_reopened": True,
+                    "lifecycle_lock_reacquired": True,
                     "ok": True,
                     "receipt_count": 1,
                     "receipt_rewritten": False,
@@ -1386,7 +1436,8 @@ def _run_receipt_process_death_gate(
     plan_sha256: str,
     confirmed_decision_sha256: str,
 ) -> dict[str, object]:
-    marker_path = journal_root / PROCESS_DEATH_MUTATION_FILE
+    marker_path = _process_death_marker_path(journal_root)
+    production_root = _production_root_for_journal(journal_root)
     if _process_death_mutation_count(marker_path) != 1:
         raise AcceptanceFailure(
             "receipt_process_death_mutation_precondition"
@@ -1441,6 +1492,18 @@ def _run_receipt_process_death_gate(
             raise AcceptanceFailure(
                 "receipt_process_death_marker_invalid"
             )
+        try:
+            with _open_locked_production_store(production_root):
+                pass
+        except RelayActivationJournalError as exc:
+            if exc.error_id != "activation_journal_busy":
+                raise AcceptanceFailure(
+                    "receipt_process_death_lock_invalid"
+                ) from None
+        else:
+            raise AcceptanceFailure(
+                "receipt_process_death_lock_not_held"
+            )
         child.kill()
         return_code = child.wait(
             timeout=PROCESS_DEATH_CHILD_TIMEOUT_SECONDS
@@ -1475,7 +1538,9 @@ def _run_receipt_process_death_gate(
         raise AcceptanceFailure(
             "receipt_process_death_unexpected_mutation"
         )
-    with _open_fixture_store(journal_root) as checkpoint_store:
+    with _open_locked_production_store(
+        production_root
+    ) as checkpoint_store:
         checkpoint = checkpoint_store._load_recovery_snapshot(
             plan_sha256
         )
@@ -1548,6 +1613,7 @@ def _run_receipt_process_death_gate(
         "decision_recomputed": True,
         "final_state": "service_state_rolled_back",
         "journal_reopened": True,
+        "lifecycle_lock_reacquired": True,
         "ok": True,
         "receipt_count": 1,
         "receipt_rewritten": False,
@@ -1561,7 +1627,7 @@ def _run_receipt_process_death_gate(
             "receipt_process_death_recovery_result_invalid"
         )
 
-    with _open_fixture_store(journal_root) as final_store:
+    with _open_locked_production_store(production_root) as final_store:
         final_snapshot = final_store._load_recovery_snapshot(plan_sha256)
         if (
             final_snapshot.receipt is None
@@ -1588,6 +1654,7 @@ def _run_receipt_process_death_gate(
     return {
         "checkpoint": "after_rollback_receipt_before_terminal",
         "child_exit_signal": "SIGKILL",
+        "lifecycle_lock_held_at_checkpoint": True,
         **expected,
     }
 
@@ -1656,8 +1723,7 @@ def _run() -> dict[str, object]:
         with tempfile.TemporaryDirectory(
             prefix="relay-linux-systemd-recovery-"
         ) as temporary:
-            journal_root = Path(temporary)
-            journal_root.chmod(0o700)
+            journal_root = _prepare_journal_root(Path(temporary))
             with ExitStack() as stores:
                 store = stores.enter_context(
                     _open_fixture_store(journal_root)

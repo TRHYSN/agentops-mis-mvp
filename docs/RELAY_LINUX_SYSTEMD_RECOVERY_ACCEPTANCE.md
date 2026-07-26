@@ -74,21 +74,24 @@ first post-mutation scanner call, so receiving it proves that the production
 mutation adapter returned while observation publication remains unreachable.
 
 The rollback receipt gate begins only after an observed `verify` revision
-records `rollback_verified`, with both ownership flags false. Its checkpoint
-wrapper delegates to the production journal implementation used by the
-fixture opener. Only after its real `publish_receipt()` method returns does
-the wrapper emit
+records `rollback_verified`, with both ownership flags false. The temporary
+journal uses the exact production namespace shape and lifecycle-lock opener.
+Its checkpoint wrapper delegates to the locked production journal session.
+Only after its real `publish_receipt()` method returns does the wrapper emit
 `rollback_receipt_published` through the anonymous pipe and block. Therefore
 the receipt file publication, file sync, hard-link publication, parent
 directory sync, temporary-file unlink, and final directory sync have
 completed, while the controller's `_load_after` call and terminal revision
 publication remain unreachable.
 
-After `SIGKILL`, the parent proves that exactly one canonical receipt exists
-and that the latest revision is still the observed rollback verification. A
-new recovery process then:
+Before `SIGKILL`, the parent proves that the live checkpoint child still owns
+the nonblocking lifecycle lock. After `SIGKILL`, it reacquires and validates
+that same lock, proves that exactly one canonical receipt exists, and confirms
+that the latest revision is still the observed rollback verification. A new
+recovery process then:
 
-1. reopens the descriptor-bound journal namespace;
+1. reacquires the lifecycle lock and reopens the descriptor-bound journal
+   namespace;
 2. previews exactly
    `terminalize + publish_terminal_revision + terminal + receipt_ready`;
 3. recomputes a decision hash for that recovered state;
@@ -150,6 +153,8 @@ Expected bounded result:
     "decision_recomputed": true,
     "final_state": "service_state_rolled_back",
     "journal_reopened": true,
+    "lifecycle_lock_held_at_checkpoint": true,
+    "lifecycle_lock_reacquired": true,
     "ok": true,
     "receipt_count": 1,
     "receipt_rewritten": false,
@@ -182,7 +187,9 @@ the existing Ubuntu job reports this exact source revision green.
 This is real systemd mutation and observation evidence, but it is not yet the
 full production installation acceptance:
 
-- the immutable journal uses a temporary fixture store;
+- the immutable journal remains in a temporary production-shaped namespace;
+  the receipt gate uses the production lifecycle-lock opener, but this is not
+  an installed-tree journal;
 - non-systemd prerequisite identities use bounded synthetic fixtures;
 - the production installed-tree scanner is not run against a provisioned
   service account, Relay binary, configuration, TLS material, or route key;
