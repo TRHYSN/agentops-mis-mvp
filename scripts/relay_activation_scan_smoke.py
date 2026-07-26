@@ -446,6 +446,10 @@ def main() -> int:
     failures: list[str] = []
     rejected_cases = 0
     active_transaction_locked_scan = False
+    generic_scan_failure_not_retried = False
+    mutable_leaf_race_classified = False
+    mutable_leaf_retry_bounded = False
+    mutable_leaf_source_classification = False
     with tempfile.TemporaryDirectory(
         prefix="relay-activation-scan-"
     ) as temporary_name:
@@ -457,6 +461,111 @@ def main() -> int:
         release_id = build_installed_tree(valid, wheel_directory)
 
         snapshot, counters = scan_guarded(valid)
+        original_scan_anchored = scanner._scan_anchored
+
+        def raise_mutable_leaf_race(*_args, **_kwargs):
+            raise scanner._MutableLeafRace
+
+        scanner._scan_anchored = raise_mutable_leaf_race
+        try:
+            try:
+                scanner._scan_root(
+                    valid,
+                    account_resolver=fixture_resolver,
+                    fixture=True,
+                )
+            except scanner.RelayActivationScanError as exc:
+                mutable_leaf_race_classified = (
+                    exc.error_id == scanner.MUTABLE_LEAF_RACE_ERROR_ID
+                    and exc.__cause__ is None
+                    and exc.__context__ is None
+                )
+        finally:
+            scanner._scan_anchored = original_scan_anchored
+        require(
+            mutable_leaf_race_classified,
+            "mutable leaf race was not classified with its bounded error id",
+            failures,
+        )
+
+        transient_calls = 0
+        transient_delays: list[float] = []
+
+        def transient_mutable_scan():
+            nonlocal transient_calls
+            transient_calls += 1
+            if transient_calls <= 2:
+                raise scanner.RelayActivationScanError(
+                    scanner.MUTABLE_LEAF_RACE_ERROR_ID
+                )
+            return snapshot
+
+        require(
+            scanner._scan_with_mutable_leaf_retry(
+                transient_mutable_scan,
+                sleeper=transient_delays.append,
+            )
+            == snapshot
+            and transient_calls == 3
+            and transient_delays
+            == [scanner.MUTABLE_LEAF_RETRY_SECONDS] * 2,
+            "transient mutable leaf scan was not retried exactly",
+            failures,
+        )
+
+        generic_calls = 0
+        generic_delays: list[float] = []
+
+        def generic_invalid_scan():
+            nonlocal generic_calls
+            generic_calls += 1
+            raise scanner.RelayActivationScanError(scanner.SCAN_ERROR_ID)
+
+        try:
+            scanner._scan_with_mutable_leaf_retry(
+                generic_invalid_scan,
+                sleeper=generic_delays.append,
+            )
+        except scanner.RelayActivationScanError as exc:
+            generic_scan_failure_not_retried = (
+                exc.error_id == scanner.SCAN_ERROR_ID
+                and generic_calls == 1
+                and generic_delays == []
+            )
+        require(
+            generic_scan_failure_not_retried,
+            "generic scanner failure was retried",
+            failures,
+        )
+
+        exhausted_calls = 0
+        exhausted_delays: list[float] = []
+
+        def persistent_mutable_scan():
+            nonlocal exhausted_calls
+            exhausted_calls += 1
+            raise scanner.RelayActivationScanError(
+                scanner.MUTABLE_LEAF_RACE_ERROR_ID
+            )
+
+        try:
+            scanner._scan_with_mutable_leaf_retry(
+                persistent_mutable_scan,
+                sleeper=exhausted_delays.append,
+            )
+        except scanner.RelayActivationScanError as exc:
+            mutable_leaf_retry_bounded = (
+                exc.error_id == scanner.MUTABLE_LEAF_RACE_ERROR_ID
+                and exhausted_calls == scanner.MUTABLE_LEAF_RETRY_LIMIT + 1
+                and exhausted_delays
+                == [scanner.MUTABLE_LEAF_RETRY_SECONDS]
+                * scanner.MUTABLE_LEAF_RETRY_LIMIT
+            )
+        require(
+            mutable_leaf_retry_bounded,
+            "mutable leaf scanner retry was not bounded",
+            failures,
+        )
         require(
             snapshot.release_id == release_id
             and snapshot.version_id == backend.VERSION,
@@ -814,6 +923,191 @@ def main() -> int:
             and existing_leaf_plan.plan_sha256
             == replacement_leaf_plan.plan_sha256,
             "safe mutable leaf replacement changed the plan hash",
+            failures,
+        )
+
+        def exercise_status_race(
+            root: Path,
+            *,
+            label: str,
+            trigger_stat_call: int,
+            replacement: Path | None = None,
+            injected_error: OSError | None = None,
+            remove_status: bool = False,
+            expect_success: bool,
+        ) -> tuple[int, bool]:
+            original_stat = os.stat
+            original_scan_root = scanner._scan_root
+            raw_replace = os.replace
+            raw_unlink = os.unlink
+            runtime = root / RUNTIME_DIRECTORY.lstrip("/")
+            runtime_metadata = original_stat(runtime)
+            runtime_identity = (
+                runtime_metadata.st_dev,
+                runtime_metadata.st_ino,
+            )
+            status = runtime / "status.json"
+            scan_attempts = 0
+            status_stat_calls = 0
+            injected = False
+
+            def counted_scan_root(*args, **kwargs):
+                nonlocal scan_attempts
+                scan_attempts += 1
+                return original_scan_root(*args, **kwargs)
+
+            def racing_stat(path, *args, **kwargs):
+                nonlocal injected, status_stat_calls
+                dir_fd = kwargs.get("dir_fd")
+                if (
+                    path == "status.json"
+                    and dir_fd is not None
+                    and (
+                        os.fstat(dir_fd).st_dev,
+                        os.fstat(dir_fd).st_ino,
+                    )
+                    == runtime_identity
+                ):
+                    status_stat_calls += 1
+                    if (
+                        not injected
+                        and status_stat_calls == trigger_stat_call
+                    ):
+                        injected = True
+                        if injected_error is not None:
+                            raise injected_error
+                        if remove_status:
+                            raw_unlink(status)
+                            return original_stat(path, *args, **kwargs)
+                        if replacement is None:
+                            raise AssertionError(
+                                "status race replacement missing"
+                            )
+                        raw_replace(replacement, status)
+                return original_stat(path, *args, **kwargs)
+
+            scanner._scan_root = counted_scan_root
+            os.stat = racing_stat
+            try:
+                if expect_success:
+                    scan_guarded(root)
+                else:
+                    expect_rejected(root, failures, label)
+            finally:
+                os.stat = original_stat
+                scanner._scan_root = original_scan_root
+            return scan_attempts, injected
+
+        safe_replace_race = clone_root(
+            existing_leaves,
+            temporary / "safe-status-replace-race",
+        )
+        safe_replace_source = temporary / "safe-status-replace-source"
+        write_file(safe_replace_source, b'{"ready":true}\n', 0o600)
+        safe_replace_attempts, safe_replace_injected = (
+            exercise_status_race(
+                safe_replace_race,
+                label="safe-status-inode-replacement",
+                trigger_stat_call=2,
+                replacement=safe_replace_source,
+                expect_success=True,
+            )
+        )
+
+        safe_appearance_race = clone_root(
+            valid,
+            temporary / "safe-status-appearance-race",
+        )
+        safe_appearance_source = temporary / "safe-status-appearance-source"
+        write_file(safe_appearance_source, b'{"ready":true}\n', 0o600)
+        safe_appearance_attempts, safe_appearance_injected = (
+            exercise_status_race(
+                safe_appearance_race,
+                label="safe-status-appearance",
+                trigger_stat_call=2,
+                replacement=safe_appearance_source,
+                expect_success=True,
+            )
+        )
+
+        safe_disappearance_race = clone_root(
+            existing_leaves,
+            temporary / "safe-status-disappearance-race",
+        )
+        safe_disappearance_attempts, safe_disappearance_injected = (
+            exercise_status_race(
+                safe_disappearance_race,
+                label="safe-status-disappearance",
+                trigger_stat_call=2,
+                remove_status=True,
+                expect_success=True,
+            )
+        )
+
+        unsafe_replace_race = clone_root(
+            existing_leaves,
+            temporary / "unsafe-status-replace-race",
+        )
+        unsafe_replace_source = temporary / "unsafe-status-replace-source"
+        write_file(unsafe_replace_source, b'{"ready":true}\n', 0o644)
+        unsafe_replace_attempts, unsafe_replace_injected = (
+            exercise_status_race(
+                unsafe_replace_race,
+                label="unsafe-status-inode-replacement",
+                trigger_stat_call=2,
+                replacement=unsafe_replace_source,
+                expect_success=False,
+            )
+        )
+        rejected_cases += 1
+
+        unsafe_appearance_race = clone_root(
+            valid,
+            temporary / "unsafe-status-appearance-race",
+        )
+        unsafe_appearance_source = temporary / "unsafe-status-appearance-source"
+        write_file(unsafe_appearance_source, b'{"ready":true}\n', 0o644)
+        unsafe_appearance_attempts, unsafe_appearance_injected = (
+            exercise_status_race(
+                unsafe_appearance_race,
+                label="unsafe-status-appearance",
+                trigger_stat_call=2,
+                replacement=unsafe_appearance_source,
+                expect_success=False,
+            )
+        )
+        rejected_cases += 1
+
+        permission_race = clone_root(
+            valid,
+            temporary / "status-permission-race",
+        )
+        permission_attempts, permission_injected = exercise_status_race(
+            permission_race,
+            label="status-permission-error",
+            trigger_stat_call=1,
+            injected_error=PermissionError("injected"),
+            expect_success=False,
+        )
+        rejected_cases += 1
+
+        mutable_leaf_source_classification = (
+            safe_replace_injected
+            and safe_replace_attempts == 2
+            and safe_appearance_injected
+            and safe_appearance_attempts == 2
+            and safe_disappearance_injected
+            and safe_disappearance_attempts == 2
+            and unsafe_replace_injected
+            and unsafe_replace_attempts == 1
+            and unsafe_appearance_injected
+            and unsafe_appearance_attempts == 1
+            and permission_injected
+            and permission_attempts == 1
+        )
+        require(
+            mutable_leaf_source_classification,
+            "mutable leaf source errors crossed the retry boundary",
             failures,
         )
 
@@ -1281,8 +1575,16 @@ def main() -> int:
         "compile_activation_plan": not failures,
         "exact_wheel_module_set": not failures,
         "fd_leak_free": not failures,
+        "generic_scan_failure_not_retried": (
+            generic_scan_failure_not_retried
+        ),
         "journal_drift_rejected": journal_drift_rejected,
         "live_release_tree_hash": not failures,
+        "mutable_leaf_race_classified": mutable_leaf_race_classified,
+        "mutable_leaf_retry_bounded": mutable_leaf_retry_bounded,
+        "mutable_leaf_source_classification": (
+            mutable_leaf_source_classification
+        ),
         "ok": not failures,
         "rejected_cases": rejected_cases,
         "schema_id": "agentops.relay.activation-scan-smoke.v0",

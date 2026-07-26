@@ -10,6 +10,7 @@ from agentops_mis_cli.relay_activation import (
     project_activation_plan,
 )
 from agentops_mis_cli.relay_activation_scan import (
+    MUTABLE_LEAF_RACE_ERROR_ID,
     RelayActivationScanError,
     scan_activation_prerequisites,
 )
@@ -27,6 +28,7 @@ class RelayActivationPreviewError(Exception):
 
     def __init__(self, error_id: str) -> None:
         if error_id not in {
+            MUTABLE_LEAF_RACE_ERROR_ID,
             "activation_prerequisite_scan_invalid",
             "systemd_show_failed",
             ACTIVATION_PREREQUISITE_CHANGED,

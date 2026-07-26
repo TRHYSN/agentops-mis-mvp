@@ -65,7 +65,12 @@ The packaged unit sets `RuntimeDirectoryPreserve=yes`. The service-owned
 available while the controller reopens its journal and completes rollback
 observation. Cleanup still removes the disposable runtime tree. Preview does
 not retry generic scanner failures: path, owner, mode, configuration, journal,
-plan, systemd, and unknown failures remain fail-closed.
+plan, systemd, and unknown failures remain fail-closed. The scanner retries
+only its dedicated mutable-leaf error for atomic appearance, disappearance, or
+inode replacement of the configured state/status leaves after every observed
+file has passed the exact service owner/group, regular-file, `0600`, and
+single-link checks, with twenty bounded 50 ms retries that each repeat the
+complete anchored scan.
 
 Cleanup first stops and disables the service, then removes only identities
 owned by the exact installation acceptance, restores parent modes, removes the

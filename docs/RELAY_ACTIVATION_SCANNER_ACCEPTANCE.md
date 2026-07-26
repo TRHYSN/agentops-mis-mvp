@@ -54,6 +54,14 @@ correctly return `recovery_required`.
 - validate both absence and safe existing `0600` state/status leaves on every
   anchored scan, while excluding their expected runtime creation/replacement
   from the stable parent-chain hash;
+- validate every before/opened/after/revalidated mutable-leaf observation as a
+  service-owned, service-group-owned, single-link `0600` regular file before
+  classifying disappearance, appearance, or safe inode replacement as
+  `activation_mutable_leaf_changed`, then retry the complete read-only scan at
+  most twenty times with a 50 ms delay;
+- keep same-inode mutation, unsafe type/owner/mode/link count, parent, config,
+  enablement, journal, account, and unknown failures on the generic
+  fail-closed path with no retry;
 - bind the exact optional `multi-user.target.wants` symlink identity and target,
   including an explicitly revalidated absent state;
 - return only an internal private snapshot suitable for
@@ -66,7 +74,7 @@ backend, runs the scanner under write, network, subprocess and unanchored-open
 guards, and verifies that the resulting snapshot compiles into the expected
 activation plan.
 
-It also rejects twenty-four unsafe or raced fixtures, including:
+It also rejects twenty-seven unsafe or raced fixtures, including:
 
 - a non-root production call before any host path is opened;
 - symlinked, hard-linked, wrongly-modeled and duplicate sensitive material;
@@ -77,7 +85,19 @@ It also rejects twenty-four unsafe or raced fixtures, including:
 - reused or oversized route keys;
 - root replacement, release/unit changes after initial status validation,
   absent-link creation, same-target enablement-link replacement and in-place
-  file mutation.
+  file mutation;
+- unsafe mutable-leaf replacement, unsafe appearance after observed absence,
+  and a generic permission error without retry.
+
+Deterministic injected checks prove that the dedicated mutable-leaf error is
+classified without an exception chain, a transient race is retried and
+converges, a persistent race stops after twenty retries, and the generic scan
+error is attempted exactly once. Safe inode replacement and safe appearance
+converge on the second complete scan; unsafe `0644` replacement/appearance and
+`PermissionError` fail on the first attempt. Each retry closes the previous
+root and leaf descriptors and repeats every ownership, mode, type, parent,
+configuration, installed-tree, account, journal and namespace check from the
+host root.
 
 The smoke also publishes a durable prepared revision and proves that the
 ordinary scanner rejects it while the live same-root capability succeeds. It

@@ -23,6 +23,7 @@ from agentops_mis_cli.relay_activation_recovery import (
     project_activation_recovery_decision,
 )
 from agentops_mis_cli.relay_activation_scan import (
+    MUTABLE_LEAF_RACE_ERROR_ID,
     RelayActivationScanError,
     _scan_activation_prerequisites_while_locked,
 )
@@ -35,6 +36,7 @@ from agentops_mis_cli.relay_systemd_read import (
 _OUTCOMES = frozenset({"resume", "rollback"})
 _ERROR_IDS = frozenset(
     {
+        MUTABLE_LEAF_RACE_ERROR_ID,
         "activation_prerequisite_changed",
         "activation_prerequisite_scan_invalid",
         "activation_recovery_preview_busy",

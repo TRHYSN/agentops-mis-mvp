@@ -7,6 +7,7 @@ import json
 import os
 import pwd
 import stat
+import time
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Callable
@@ -54,6 +55,9 @@ MAX_CERTIFICATE_BYTES = 1024 * 1024
 MAX_PRIVATE_KEY_BYTES = 1024 * 1024
 MAX_HELD_DESCRIPTORS = 512
 SCAN_ERROR_ID = "activation_prerequisite_scan_invalid"
+MUTABLE_LEAF_RACE_ERROR_ID = "activation_mutable_leaf_changed"
+MUTABLE_LEAF_RETRY_LIMIT = 20
+MUTABLE_LEAF_RETRY_SECONDS = 0.05
 _CONFIG_BASE = PurePosixPath("/etc/agentops-mis-relay")
 _ROUTE_KEY_BASE = _CONFIG_BASE / "routes"
 
@@ -67,6 +71,10 @@ class RelayActivationScanError(Exception):
 
 
 class _ScanInvalid(Exception):
+    pass
+
+
+class _MutableLeafRace(Exception):
     pass
 
 
@@ -209,7 +217,13 @@ class _AnchoredInventory:
         self._metadata_files: dict[
             tuple[str, ...], tuple[int, tuple[int, ...], os.stat_result]
         ] = {}
+        self._metadata_file_owners: dict[
+            tuple[str, ...], tuple[int, int]
+        ] = {}
         self._absent: set[tuple[str, ...]] = set()
+        self._mutable_absent: dict[
+            tuple[str, ...], tuple[int, int]
+        ] = {}
         self._links: dict[
             tuple[str, ...], tuple[tuple[int, ...], _ObservedLink]
         ] = {}
@@ -363,13 +377,19 @@ class _AnchoredInventory:
             if descriptor >= 0:
                 os.close(descriptor)
 
-    def observe_optional_regular(self, path: str) -> os.stat_result | None:
+    def observe_optional_regular(
+        self,
+        path: str,
+        *,
+        service_uid: int,
+        service_gid: int,
+    ) -> os.stat_result | None:
         parts = _path_parts(path)
         if not parts:
             raise _ScanInvalid
         if parts in self._metadata_files:
             return self._metadata_files[parts][2]
-        if parts in self._absent:
+        if parts in self._mutable_absent:
             return None
         if self._descriptor_count() >= MAX_HELD_DESCRIPTORS:
             raise _ScanInvalid
@@ -378,34 +398,61 @@ class _AnchoredInventory:
         try:
             before = os.stat(name, dir_fd=parent, follow_symlinks=False)
         except FileNotFoundError:
-            self._absent.add(parts)
+            self._mutable_absent[parts] = (service_uid, service_gid)
             return None
         except OSError:
             raise _ScanInvalid from None
-        if not stat.S_ISREG(before.st_mode):
-            raise _ScanInvalid
+        _validate_mutable_leaf(
+            before,
+            service_uid=service_uid,
+            service_gid=service_gid,
+        )
         descriptor = -1
         try:
             descriptor = os.open(name, _status_file_flags(), dir_fd=parent)
             opened = os.fstat(descriptor)
+            _validate_mutable_leaf(
+                opened,
+                service_uid=service_uid,
+                service_gid=service_gid,
+            )
             after = os.stat(name, dir_fd=parent, follow_symlinks=False)
+            _validate_mutable_leaf(
+                after,
+                service_uid=service_uid,
+                service_gid=service_gid,
+            )
+            identities = {
+                (before.st_dev, before.st_ino),
+                (opened.st_dev, opened.st_ino),
+                (after.st_dev, after.st_ino),
+            }
+            if len(identities) != 1:
+                raise _MutableLeafRace
+            if not (
+                _fingerprint(before)
+                == _fingerprint(opened)
+                == _fingerprint(after)
+            ):
+                raise _ScanInvalid
+            self._metadata_files[parts] = (
+                descriptor,
+                _fingerprint(opened),
+                opened,
+            )
+            self._metadata_file_owners[parts] = (
+                service_uid,
+                service_gid,
+            )
+            descriptor = -1
+            return opened
+        except FileNotFoundError:
+            raise _MutableLeafRace from None
         except OSError:
+            raise _ScanInvalid from None
+        finally:
             if descriptor >= 0:
                 os.close(descriptor)
-            raise _ScanInvalid from None
-        if not (
-            _fingerprint(before)
-            == _fingerprint(opened)
-            == _fingerprint(after)
-        ):
-            os.close(descriptor)
-            raise _ScanInvalid
-        self._metadata_files[parts] = (
-            descriptor,
-            _fingerprint(opened),
-            opened,
-        )
-        return opened
 
     def lstat_optional(
         self,
@@ -462,7 +509,14 @@ class _AnchoredInventory:
             if _fingerprint(os.fstat(descriptor)) != observed:
                 raise _ScanInvalid
         for _parts, (descriptor, observed, _value) in self._metadata_files.items():
-            if _fingerprint(os.fstat(descriptor)) != observed:
+            current = os.fstat(descriptor)
+            service_uid, service_gid = self._metadata_file_owners[_parts]
+            _validate_mutable_leaf(
+                current,
+                service_uid=service_uid,
+                service_gid=service_gid,
+            )
+            if _fingerprint(current) != observed:
                 raise _ScanInvalid
         for _parts, (descriptor, observed) in self._directories.items():
             if _fingerprint(os.fstat(descriptor)) != observed:
@@ -543,10 +597,20 @@ class _AnchoredInventory:
                     dir_fd=parent,
                     follow_symlinks=False,
                 )
+            except FileNotFoundError:
+                raise _MutableLeafRace from None
             except OSError:
                 raise _ScanInvalid from None
             finally:
                 os.close(parent)
+            service_uid, service_gid = self._metadata_file_owners[parts]
+            _validate_mutable_leaf(
+                current,
+                service_uid=service_uid,
+                service_gid=service_gid,
+            )
+            if (current.st_dev, current.st_ino) != (observed[0], observed[1]):
+                raise _MutableLeafRace
             if _fingerprint(current) != observed:
                 raise _ScanInvalid
         for parts in self._absent:
@@ -559,6 +623,27 @@ class _AnchoredInventory:
                 raise _ScanInvalid from None
             else:
                 raise _ScanInvalid
+            finally:
+                os.close(parent)
+        for parts, (service_uid, service_gid) in self._mutable_absent.items():
+            parent = self._reopen_directory(parts[:-1])
+            try:
+                current = os.stat(
+                    parts[-1],
+                    dir_fd=parent,
+                    follow_symlinks=False,
+                )
+            except FileNotFoundError:
+                pass
+            except OSError:
+                raise _ScanInvalid from None
+            else:
+                _validate_mutable_leaf(
+                    current,
+                    service_uid=service_uid,
+                    service_gid=service_gid,
+                )
+                raise _MutableLeafRace
             finally:
                 os.close(parent)
 
@@ -1076,12 +1161,20 @@ def _scan_anchored(
         ):
             raise _ScanInvalid
         _validate_mutable_leaf(
-            inventory.observe_optional_regular(state_path.as_posix()),
+            inventory.observe_optional_regular(
+                state_path.as_posix(),
+                service_uid=account.uid,
+                service_gid=account.gid,
+            ),
             service_uid=account.uid,
             service_gid=account.gid,
         )
         _validate_mutable_leaf(
-            inventory.observe_optional_regular(status_path.as_posix()),
+            inventory.observe_optional_regular(
+                status_path.as_posix(),
+                service_uid=account.uid,
+                service_gid=account.gid,
+            ),
             service_uid=account.uid,
             service_gid=account.gid,
         )
@@ -1243,6 +1336,7 @@ def _scan_root(
 ) -> ActivationPrerequisiteSnapshot:
     root_descriptor = -1
     snapshot: ActivationPrerequisiteSnapshot | None = None
+    failure_id = SCAN_ERROR_ID
     try:
         if (
             activation_capability is not None
@@ -1304,6 +1398,9 @@ def _scan_root(
         ):
             raise _ScanInvalid
         snapshot = candidate
+    except _MutableLeafRace:
+        failure_id = MUTABLE_LEAF_RACE_ERROR_ID
+        snapshot = None
     except Exception:
         snapshot = None
     finally:
@@ -1313,17 +1410,38 @@ def _scan_root(
             except OSError:
                 pass
     if snapshot is None:
-        raise RelayActivationScanError()
+        raise RelayActivationScanError(failure_id)
     return snapshot
+
+
+def _scan_with_mutable_leaf_retry(
+    scan_once: Callable[[], ActivationPrerequisiteSnapshot],
+    *,
+    sleeper: Callable[[float], None] = time.sleep,
+) -> ActivationPrerequisiteSnapshot:
+    retries = 0
+    while True:
+        try:
+            return scan_once()
+        except RelayActivationScanError as exc:
+            if (
+                exc.error_id != MUTABLE_LEAF_RACE_ERROR_ID
+                or retries >= MUTABLE_LEAF_RETRY_LIMIT
+            ):
+                raise
+        retries += 1
+        sleeper(MUTABLE_LEAF_RETRY_SECONDS)
 
 
 def scan_activation_prerequisites() -> ActivationPrerequisiteSnapshot:
     """Scan the real host root without exposing a root or resolver override."""
 
-    return _scan_root(
-        Path("/"),
-        account_resolver=_resolve_production_account,
-        fixture=False,
+    return _scan_with_mutable_leaf_retry(
+        lambda: _scan_root(
+            Path("/"),
+            account_resolver=_resolve_production_account,
+            fixture=False,
+        )
     )
 
 
@@ -1332,11 +1450,13 @@ def _scan_activation_prerequisites_while_locked(
 ) -> ActivationPrerequisiteSnapshot:
     """Scan the real host while one exact journal lifecycle lock remains live."""
 
-    return _scan_root(
-        Path("/"),
-        account_resolver=_resolve_production_account,
-        fixture=False,
-        activation_capability=capability,
+    return _scan_with_mutable_leaf_retry(
+        lambda: _scan_root(
+            Path("/"),
+            account_resolver=_resolve_production_account,
+            fixture=False,
+            activation_capability=capability,
+        )
     )
 
 
@@ -1347,10 +1467,12 @@ def _scan_fixture_activation_prerequisites(
 ) -> ActivationPrerequisiteSnapshot:
     """Test-only root relocation; intentionally private and absent from any CLI."""
 
-    return _scan_root(
-        root,
-        account_resolver=account_resolver,
-        fixture=True,
+    return _scan_with_mutable_leaf_retry(
+        lambda: _scan_root(
+            root,
+            account_resolver=account_resolver,
+            fixture=True,
+        )
     )
 
 
@@ -1362,9 +1484,11 @@ def _scan_fixture_activation_prerequisites_while_locked(
 ) -> ActivationPrerequisiteSnapshot:
     """Test-only locked scan for an isolated absolute fixture root."""
 
-    return _scan_root(
-        root,
-        account_resolver=account_resolver,
-        fixture=True,
-        activation_capability=capability,
+    return _scan_with_mutable_leaf_retry(
+        lambda: _scan_root(
+            root,
+            account_resolver=account_resolver,
+            fixture=True,
+            activation_capability=capability,
+        )
     )
