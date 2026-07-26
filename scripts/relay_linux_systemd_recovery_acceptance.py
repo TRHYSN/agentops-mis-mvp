@@ -106,6 +106,15 @@ ENABLE_INTENT_PROCESS_DEATH_PIPE_MARKER = (
 )
 ENABLE_INTENT_PROCESS_DEATH_MUTATION_RECORD = b"enable\n"
 ENABLE_INTENT_PROCESS_DEATH_MUTATION_FILE = "enable-mutations.log"
+ENABLE_INTENT_RECOVERY_FAILURE_STAGES = frozenset(
+    {
+        "enable_intent_recover_child_preflight",
+        "enable_intent_recover_child_reopen",
+        "enable_intent_recover_child_preview",
+        "enable_intent_recover_child_execute",
+        "enable_intent_recover_child_reopen_after",
+    }
+)
 RECEIPT_PROCESS_DEATH_EXECUTE_MODE = "--receipt-process-death-execute"
 RECEIPT_PROCESS_DEATH_RECOVER_MODE = "--receipt-process-death-recover"
 RECEIPT_PROCESS_DEATH_PIPE_MARKER = b"rollback_receipt_published\n"
@@ -1786,8 +1795,7 @@ def _run_enable_intent_process_death_gate(
             "enable_intent_process_death_recovery_child_failed"
         ) from None
     if (
-        recovered.returncode != 0
-        or not recovered.stdout
+        not recovered.stdout
         or len(recovered.stdout) > MAX_PROCESS_DEATH_RESULT_BYTES
         or b"\x00" in recovered.stdout
         or b"\r" in recovered.stdout
@@ -1801,6 +1809,20 @@ def _run_enable_intent_process_death_gate(
         raise AcceptanceFailure(
             "enable_intent_process_death_recovery_result_invalid"
         ) from None
+    if recovered.returncode != 0:
+        failure_stage = recovery_result.get("stage")
+        if (
+            set(recovery_result)
+            == {"failure_id", "ok", "stage"}
+            and recovery_result.get("failure_id")
+            == "enable_intent_process_death_recovery_failed"
+            and recovery_result.get("ok") is False
+            and failure_stage in ENABLE_INTENT_RECOVERY_FAILURE_STAGES
+        ):
+            raise AcceptanceFailure(str(failure_stage))
+        raise AcceptanceFailure(
+            "enable_intent_process_death_recovery_child_failed"
+        )
     expected = {
         "intent_reused": True,
         "journal_reopened": True,
