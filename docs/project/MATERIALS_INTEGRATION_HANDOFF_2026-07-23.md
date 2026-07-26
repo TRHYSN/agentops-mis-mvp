@@ -5,7 +5,7 @@
 
 ## Purpose
 
-整合 2026-06-21 至 2026-06-23 项目讨论材料，并与当前 GitHub/Notion 状态重新对齐。
+整合 2026-06-21 至 2026-06-23 项目讨论材料，形成等待 GitHub/Notion freshness reconciliation 的候选交接基线。本文件不声称代表当前项目状态。
 
 ## Authority
 
@@ -37,6 +37,6 @@ AgentOps MIS 是 Agent Control Plane，不是 LLM runtime。
 
 ## Next Actions
 
-1. 审核是否刷新 PROJECT_STATE/BACKLOG/HANDOFF。
-2. 完成 Private Host PR #104 用户验收。
-3. 用真实项目跑通 Goal → Plan → Approval → Run → Artifact → Evaluation → Audit 闭环。
+1. 从 GitHub 核验 exact branch/commit/PR/CI，并从可用的 Notion 连接读取 reviewed Ledger 状态。
+2. 将 `PROJECT_STATE`、`BACKLOG`、`HANDOFF` 的日期和事实标记为 current 或 stale；未经证据支持不得刷新 Canonical 状态。
+3. reconciliation 完成后重新确定 Private Host 和真实项目闭环的剩余验收门禁。
