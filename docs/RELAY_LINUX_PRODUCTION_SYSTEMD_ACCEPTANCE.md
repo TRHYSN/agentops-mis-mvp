@@ -19,9 +19,12 @@ real-systemd evidence on one disposable GitHub-hosted Ubuntu VM. It:
    under the dedicated `agentops-relay` service identity;
 7. performs the real daemon-reload, enable, start, verify, rollback-stop,
    rollback-disable, and rollback-verify sequence;
-8. publishes the rollback receipt and terminal revision into the production
+8. if systemd reaches a valid stopped state just after the one-step executor
+   returns recovery-required, reopens the journal and records the already
+   completed stop observation without replaying the mutation;
+9. publishes the rollback receipt and terminal revision into the production
    journal; and
-9. verifies one completed transaction, restored inactive/disabled systemd
+10. verifies one completed transaction, restored inactive/disabled systemd
    state, stopped Relay status, and complete cleanup.
 
 The workflow job is
@@ -111,6 +114,7 @@ Expected bounded result:
   "production_store_reopen_boundaries": 22,
   "real_relay_process_started": true,
   "real_systemd": true,
+  "recovered_late_observation_steps": [],
   "rollback_steps": [
     "rollback_stop",
     "rollback_disable",
@@ -124,7 +128,11 @@ Expected bounded result:
 closes and reopens. `initial_reload_required` records that the acceptance
 deliberately changes only the installed unit mtime after a setup reload so the
 journaled daemon-reload step is exercised without changing packaged unit
-bytes.
+bytes. A run may report `rollback_stop` in
+`recovered_late_observation_steps` and a correspondingly larger reopen count
+when systemd's stopped state becomes observable just after the mutation call.
+That path records the existing intent's exact observation and does not execute
+the stop mutation again.
 
 ## Truth Boundary
 

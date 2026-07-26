@@ -886,6 +886,7 @@ def _run() -> dict[str, object]:
     systemctl_path: str | None = None
     forward_steps: list[str] = []
     rollback_steps: list[str] = []
+    recovered_late_observation_steps: list[str] = []
     store_open_count = [0]
     final_state = ""
     relay_started = False
@@ -1067,14 +1068,22 @@ def _run() -> dict[str, object]:
                     )
                 except Exception:
                     if step_id == "rollback_stop":
-                        raise AcceptanceFailure(
-                            _diagnose_rollback_stop(systemctl)
-                        ) from None
+                        diagnostic = _diagnose_rollback_stop(systemctl)
+                        if diagnostic == (
+                            "rollback_rollback_stop_diagnostic_"
+                            "valid_late_state"
+                        ):
+                            continue
+                        raise AcceptanceFailure(diagnostic) from None
                     raise
                 rollback_steps.append(step_id)
                 continue
 
             expected_write = {
+                (
+                    "inverse",
+                    "record_observation",
+                ): "record_observation",
                 (
                     "inverse",
                     "publish_rollback_receipt",
@@ -1096,6 +1105,21 @@ def _run() -> dict[str, object]:
                 str(decision["decision_sha256"]),
                 store_open_count,
             )
+            if expected_write == "record_observation":
+                recovered_step = str(decision.get("step_id"))
+                if (
+                    recovered_step not in {
+                        "rollback_stop",
+                        "rollback_disable",
+                        "verify",
+                    }
+                    or recovered_step in rollback_steps
+                ):
+                    raise AcceptanceFailure(
+                        _unexpected_decision_stage("rollback", decision)
+                    )
+                rollback_steps.append(recovered_step)
+                recovered_late_observation_steps.append(recovered_step)
             if expected_write == "complete":
                 final_state = str(result.get("state"))
                 break
@@ -1151,6 +1175,9 @@ def _run() -> dict[str, object]:
             ),
             "real_relay_process_started": relay_started,
             "real_systemd": True,
+            "recovered_late_observation_steps": (
+                recovered_late_observation_steps
+            ),
             "rollback_steps": rollback_steps,
             "stage": stage,
         }
