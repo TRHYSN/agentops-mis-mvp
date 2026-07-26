@@ -295,10 +295,19 @@ Implementation slices:
      `RELAY_ACTIVATION_RECOVERY_CONTROLLER_ACCEPTANCE.md`; private scanner-bound
      one-step recovery execution and production-store composition are
      fixture-accepted in
-     `RELAY_ACTIVATION_RECOVERY_EXECUTOR_ACCEPTANCE.md`; real Linux interruption
-     acceptance and partial namespace resume remain unimplemented;
-   - upgrade, rollback, uninstall, Linux account provisioning, service
-     activation and public infrastructure acceptance: pending;
+     `RELAY_ACTIVATION_RECOVERY_EXECUTOR_ACCEPTANCE.md`; the full forward and
+     rollback sequence now passes against real Linux systemd as recorded in
+     `RELAY_LINUX_SYSTEMD_RECOVERY_ACCEPTANCE.md`; exact offline installation,
+     account ownership, the production scanner and the production store now
+     pass separately on a real Linux root as recorded in
+     `RELAY_LINUX_PRODUCTION_INSTALL_ACCEPTANCE.md`; the production installed
+     tree, production journal, packaged Relay process and real systemd now run
+     together across controller-store reopen boundaries as recorded in
+     `RELAY_LINUX_PRODUCTION_SYSTEMD_ACCEPTANCE.md`; process-death injection
+     inside the intent/mutation/observation and receipt/terminal windows plus
+     partial namespace resume remain unimplemented;
+   - upgrade, rollback, uninstall, the operator activation surface and public
+     infrastructure acceptance: pending;
    - public endpoint, DNS/ACME provisioning, stable per-Host Console origin,
      production credential lifecycle, retention/monitoring, deployment and
      rollback receipt: pending external infrastructure acceptance.

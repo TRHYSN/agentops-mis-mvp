@@ -70,6 +70,8 @@ jobs:
             scripts/relay_activation_plan_smoke.py \
             scripts/relay_activation_preview_smoke.py \
             scripts/relay_activation_scan_smoke.py \
+            scripts/relay_linux_production_install_acceptance.py \
+            scripts/relay_linux_production_systemd_acceptance.py \
             scripts/relay_linux_systemd_recovery_acceptance.py \
             scripts/relay_systemd_mutation_smoke.py \
             scripts/relay_config_parser_smoke.py \
@@ -125,6 +127,69 @@ jobs:
             PYTHONDONTWRITEBYTECODE=1 \
             "$python_bin" \
             scripts/relay_linux_systemd_recovery_acceptance.py
+
+  relay-linux-production-install:
+    name: Relay production install and systemd recovery on real Linux
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Build exact release bundle without root
+        id: bundle
+        run: |
+          set -euo pipefail
+          output_dir="$RUNNER_TEMP/agentops-relay-production-acceptance"
+          result_file="$RUNNER_TEMP/agentops-relay-production-result.json"
+          install -d -m 0700 "$output_dir"
+          python3 scripts/build_relay_release.py \
+            --output-dir "$output_dir" > "$result_file"
+          bundle_name="$(
+            python3 -c \
+              'import json,sys; print(json.load(open(sys.argv[1]))["bundle"])' \
+              "$result_file"
+          )"
+          bundle_sha256="$(
+            python3 -c \
+              'import json,sys; print(json.load(open(sys.argv[1]))["bundle_sha256"])' \
+              "$result_file"
+          )"
+          printf 'bundle=%s/%s\n' "$output_dir" "$bundle_name" \
+            >> "$GITHUB_OUTPUT"
+          printf 'bundle_sha256=%s\n' "$bundle_sha256" \
+            >> "$GITHUB_OUTPUT"
+
+      - name: Run disposable production install acceptance
+        run: |
+          set -euo pipefail
+          python_bin="$(command -v python3)"
+          sudo env \
+            AGENTOPS_RELAY_LINUX_PRODUCTION_ACCEPTANCE=1 \
+            AGENTOPS_RELAY_LINUX_PRODUCTION_HARDEN_INSTALL_PARENTS=1 \
+            AGENTOPS_RELAY_LINUX_PRODUCTION_BUNDLE="${{ steps.bundle.outputs.bundle }}" \
+            AGENTOPS_RELAY_LINUX_PRODUCTION_BUNDLE_SHA256="${{ steps.bundle.outputs.bundle_sha256 }}" \
+            PYTHONDONTWRITEBYTECODE=1 \
+            "$python_bin" \
+            scripts/relay_linux_production_install_acceptance.py
+
+      - name: Run production journal and systemd acceptance
+        run: |
+          set -euo pipefail
+          python_bin="$(command -v python3)"
+          sudo env \
+            AGENTOPS_RELAY_LINUX_PRODUCTION_SYSTEMD_ACCEPTANCE=1 \
+            AGENTOPS_RELAY_LINUX_PRODUCTION_HARDEN_INSTALL_PARENTS=1 \
+            AGENTOPS_RELAY_LINUX_PRODUCTION_BUNDLE="${{ steps.bundle.outputs.bundle }}" \
+            AGENTOPS_RELAY_LINUX_PRODUCTION_BUNDLE_SHA256="${{ steps.bundle.outputs.bundle_sha256 }}" \
+            PYTHONDONTWRITEBYTECODE=1 \
+            "$python_bin" \
+            scripts/relay_linux_production_systemd_acceptance.py
 
   backend-deterministic:
     name: Backend deterministic smokes

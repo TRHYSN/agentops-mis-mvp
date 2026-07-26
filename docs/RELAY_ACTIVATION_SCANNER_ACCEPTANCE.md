@@ -51,8 +51,9 @@ correctly return `recovery_required`.
   reject reused key material;
 - require service-owned `0700` state/runtime directories and service-traversable
   trusted parent chains;
-- bind both absence and safe existing `0600` state/status leaves into the
-  private parent-chain hash;
+- validate both absence and safe existing `0600` state/status leaves on every
+  anchored scan, while excluding their expected runtime creation/replacement
+  from the stable parent-chain hash;
 - bind the exact optional `multi-user.target.wants` symlink identity and target,
   including an explicitly revalidated absent state;
 - return only an internal private snapshot suitable for

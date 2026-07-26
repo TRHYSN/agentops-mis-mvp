@@ -732,6 +732,9 @@ def main() -> int:
         )
 
         existing_leaves = clone_root(valid, temporary / "existing-leaves")
+        empty_leaf_snapshot, _empty_leaf_counters = scan_guarded(
+            existing_leaves
+        )
         write_file(
             existing_leaves
             / STATE_DIRECTORY.lstrip("/")
@@ -747,10 +750,70 @@ def main() -> int:
             0o600,
         )
         existing_snapshot, _existing_counters = scan_guarded(existing_leaves)
+        if sys.platform.startswith("linux"):
+            require(
+                existing_snapshot.trusted_parent_chain_sha256
+                == empty_leaf_snapshot.trusted_parent_chain_sha256,
+                "safe mutable leaf creation changed the Linux parent hash",
+                failures,
+            )
+        (
+            existing_leaves
+            / STATE_DIRECTORY.lstrip("/")
+            / "epochs.json"
+        ).unlink()
+        (
+            existing_leaves
+            / RUNTIME_DIRECTORY.lstrip("/")
+            / "status.json"
+        ).unlink()
+        write_file(
+            existing_leaves
+            / STATE_DIRECTORY.lstrip("/")
+            / "epochs.json",
+            b'{"routes":{},"schema_version":1}\n',
+            0o600,
+        )
+        write_file(
+            existing_leaves
+            / RUNTIME_DIRECTORY.lstrip("/")
+            / "status.json",
+            b'{"ready":true}\n',
+            0o600,
+        )
+        replacement_snapshot, _replacement_counters = scan_guarded(
+            existing_leaves
+        )
         require(
-            existing_snapshot.trusted_parent_chain_sha256
-            != snapshot.trusted_parent_chain_sha256,
-            "existing mutable leaves were not bound into the private hash",
+            replacement_snapshot.trusted_parent_chain_sha256
+            == existing_snapshot.trusted_parent_chain_sha256,
+            "safe mutable leaf replacement changed the parent-chain hash",
+            failures,
+        )
+        empty_leaf_plan = compile_activation_plan(
+            empty_leaf_snapshot,
+            parse_systemd_show_bytes(disabled_systemd_bytes()),
+        )
+        existing_leaf_plan = compile_activation_plan(
+            existing_snapshot,
+            parse_systemd_show_bytes(disabled_systemd_bytes()),
+        )
+        replacement_leaf_plan = compile_activation_plan(
+            replacement_snapshot,
+            parse_systemd_show_bytes(disabled_systemd_bytes()),
+        )
+        if sys.platform.startswith("linux"):
+            require(
+                empty_leaf_plan.plan_sha256
+                == existing_leaf_plan.plan_sha256,
+                "safe mutable leaf creation changed the Linux plan hash",
+                failures,
+            )
+        require(
+            existing_leaf_plan.ok is True
+            and existing_leaf_plan.plan_sha256
+            == replacement_leaf_plan.plan_sha256,
+            "safe mutable leaf replacement changed the plan hash",
             failures,
         )
 

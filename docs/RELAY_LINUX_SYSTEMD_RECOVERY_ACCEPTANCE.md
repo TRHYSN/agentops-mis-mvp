@@ -110,6 +110,9 @@ full production installation acceptance:
 - no CLI, API, browser caller, public Relay, DNS, or physical second-device
   acceptance is enabled by this slice.
 
-The next gate is an ephemeral Linux installation fixture that passes the full
-production scanner and production journal opener, followed by interruption
-injection. Only then may the guarded operator CLI be exposed.
+The separate production installation, scanner, and journal-opener baseline is
+recorded in `RELAY_LINUX_PRODUCTION_INSTALL_ACCEPTANCE.md`, and
+`RELAY_LINUX_PRODUCTION_SYSTEMD_ACCEPTANCE.md` combines both baselines with the
+packaged Relay process and controller-store reopen boundaries. Actual process
+death inside intent/mutation/observation and receipt/terminal windows remains
+the next gate. Only then may the guarded operator CLI be exposed.

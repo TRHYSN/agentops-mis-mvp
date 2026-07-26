@@ -19,6 +19,7 @@ TimeoutStartSec=30s
 TimeoutStopSec=15s
 RuntimeDirectory=agentops-mis-relay
 RuntimeDirectoryMode=0700
+RuntimeDirectoryPreserve=yes
 StateDirectory=agentops-mis-relay
 StateDirectoryMode=0700
 UMask=0077

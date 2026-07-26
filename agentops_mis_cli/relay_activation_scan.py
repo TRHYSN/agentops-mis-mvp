@@ -794,7 +794,6 @@ def _trusted_parent_hash(
     service_gid: int,
     service_group_ids: tuple[int, ...],
     service_paths: tuple[str, ...],
-    mutable_leaf_records: tuple[dict[str, object], ...],
 ) -> str:
     parents: set[str] = {"/"}
     service_parents: set[str] = {"/"}
@@ -859,23 +858,18 @@ def _trusted_parent_hash(
             if not traversable:
                 raise _ScanInvalid
         records.append(_directory_payload(path, metadata))
-    records.extend(mutable_leaf_records)
     records.sort(key=lambda value: str(value["canonical_path"]))
     return _sha256(_canonical_json(records))
 
 
-def _mutable_leaf_record(
-    path: str,
+def _validate_mutable_leaf(
     metadata: os.stat_result | None,
     *,
     service_uid: int,
     service_gid: int,
-) -> dict[str, object]:
+) -> None:
     if metadata is None:
-        return {
-            "canonical_path": path,
-            "kind": "absent",
-        }
+        return
     if (
         not stat.S_ISREG(metadata.st_mode)
         or metadata.st_uid != service_uid
@@ -884,17 +878,6 @@ def _mutable_leaf_record(
         or metadata.st_nlink != 1
     ):
         raise _ScanInvalid
-    return {
-        "canonical_path": path,
-        "device_id": metadata.st_dev,
-        "group_id": metadata.st_gid,
-        "inode": metadata.st_ino,
-        "kind": "regular",
-        "mode": stat.S_IMODE(metadata.st_mode),
-        "nlink": metadata.st_nlink,
-        "owner_id": metadata.st_uid,
-        "size": metadata.st_size,
-    }
 
 
 def _select_systemctl(
@@ -1092,14 +1075,12 @@ def _scan_anchored(
             runtime_metadata.st_ino,
         ):
             raise _ScanInvalid
-        state_leaf_record = _mutable_leaf_record(
-            state_path.as_posix(),
+        _validate_mutable_leaf(
             inventory.observe_optional_regular(state_path.as_posix()),
             service_uid=account.uid,
             service_gid=account.gid,
         )
-        status_leaf_record = _mutable_leaf_record(
-            status_path.as_posix(),
+        _validate_mutable_leaf(
             inventory.observe_optional_regular(status_path.as_posix()),
             service_uid=account.uid,
             service_gid=account.gid,
@@ -1169,10 +1150,6 @@ def _scan_anchored(
                 state_path.as_posix(),
                 status_path.as_posix(),
                 *(path.as_posix() for path in route_paths),
-            ),
-            mutable_leaf_records=(
-                state_leaf_record,
-                status_leaf_record,
             ),
         )
 

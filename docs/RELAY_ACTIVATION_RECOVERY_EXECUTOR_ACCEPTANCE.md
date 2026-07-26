@@ -106,11 +106,16 @@ the mutation.
 
 ## Truth Boundary
 
-The production composition is implemented but has not been invoked on a real
-Linux systemd host. The deterministic smoke uses only fixture journals and a
-fake stateful mutation runner. No CLI, API, or browser caller is exposed.
+The deterministic executor smoke uses fixture journals and a fake stateful
+mutation runner. `RELAY_LINUX_SYSTEMD_RECOVERY_ACCEPTANCE.md` records the
+complete forward and rollback sequence against real systemd, and
+`RELAY_LINUX_PRODUCTION_INSTALL_ACCEPTANCE.md` records the exact real-root
+installation baseline. `RELAY_LINUX_PRODUCTION_SYSTEMD_ACCEPTANCE.md` now
+combines those paths with the packaged Relay process and closes/reopens the
+production store between every preview and confirmed controller invocation.
 
-The next gate is disposable Linux acceptance with interruption injection at
-intent, mutation, observation, receipt, and terminal boundaries. Only after
-that evidence may an operator-facing confirmed activation/recovery command be
-enabled. Public Relay and physical ordinary-browser acceptance remain separate.
+No CLI, API, or browser caller is exposed. The next gate injects actual process
+death at intent, mutation, observation, receipt, and terminal boundaries. Only
+after that evidence may an operator-facing confirmed activation/recovery
+command be enabled. Public Relay and physical ordinary-browser acceptance
+remain separate.

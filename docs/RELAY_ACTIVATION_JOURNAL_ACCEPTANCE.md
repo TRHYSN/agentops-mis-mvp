@@ -128,11 +128,14 @@ Expected result:
 
 ## Remaining Gates
 
-This acceptance is not evidence of confirmed service activation. The remaining
-sequence is:
+This fixture acceptance is not by itself evidence of confirmed service
+activation. The production tree, production journal, packaged Relay process,
+and real systemd are now combined with controller-store reopen boundaries in
+`RELAY_LINUX_PRODUCTION_SYSTEMD_ACCEPTANCE.md`. The remaining sequence is:
 
-1. pass real Linux systemd interruption tests for the private executor;
-2. validate receipt/terminal recovery after real process interruption;
+1. inject real process interruption at intent, mutation, observation, receipt,
+   and terminal boundaries;
+2. exercise safe partial-namespace recovery;
 3. expose an operator confirmation surface only after those gates;
 4. pass public Relay and physical ordinary-browser acceptance.
 
