@@ -70,7 +70,16 @@ only its dedicated mutable-leaf error for atomic appearance, disappearance, or
 inode replacement of the configured state/status leaves after every observed
 file has passed the exact service owner/group, regular-file, `0600`, and
 single-link checks, with twenty bounded 50 ms retries that each repeat the
-complete anchored scan.
+complete anchored scan. If a configured leaf appears after observed absence,
+its exact service-owned `0700` state/runtime parent may also change namespace
+metadata (including directory link count on APFS); the scanner first proves
+the exact leaf transition and unchanged parent device, inode, type, mode,
+owner, and group before retrying. An unrelated sibling-only change remains a
+generic, non-retried failure. If one occurs in the same observation window as
+the proved exact leaf transition, the bounded retry can coalesce both
+namespace changes; the sibling is never consumed as a prerequisite or
+authority input. Parent identity or security drift remains a generic,
+non-retried failure.
 
 Cleanup first stops and disables the service, then removes only identities
 owned by the exact installation acceptance, restores parent modes, removes the

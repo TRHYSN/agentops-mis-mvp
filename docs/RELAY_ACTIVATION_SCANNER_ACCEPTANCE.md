@@ -59,6 +59,14 @@ correctly return `recovery_required`.
   classifying disappearance, appearance, or safe inode replacement as
   `activation_mutable_leaf_changed`, then retry the complete read-only scan at
   most twenty times with a 50 ms delay;
+- classify a change only after re-observing the exact configured state/status
+  leaf and proving its service-owned `0700` parent retained the same device,
+  inode, type, mode, owner, and group; directory link count is intentionally
+  excluded because APFS changes it when a regular child entry appears;
+- keep an unrelated sibling-only change on the generic non-retried path; if it
+  occurs in the same observation window as a proved exact leaf transition,
+  that one bounded retry may coalesce both namespace changes, but the sibling
+  is never read, hashed as an input, or authorized by the scanner;
 - keep same-inode mutation, unsafe type/owner/mode/link count, parent, config,
   enablement, journal, account, and unknown failures on the generic
   fail-closed path with no retry;
@@ -74,7 +82,7 @@ backend, runs the scanner under write, network, subprocess and unanchored-open
 guards, and verifies that the resulting snapshot compiles into the expected
 activation plan.
 
-It also rejects twenty-seven unsafe or raced fixtures, including:
+It also rejects thirty-one unsafe or raced fixtures, including:
 
 - a non-root production call before any host path is opened;
 - symlinked, hard-linked, wrongly-modeled and duplicate sensitive material;
@@ -87,15 +95,20 @@ It also rejects twenty-seven unsafe or raced fixtures, including:
   absent-link creation, same-target enablement-link replacement and in-place
   file mutation;
 - unsafe mutable-leaf replacement, unsafe appearance after observed absence,
-  and a generic permission error without retry.
+  an unrelated sibling appearance, a mutable-leaf appearance paired with
+  unsafe parent-mode drift, and a generic permission error without retry.
 
 Deterministic injected checks prove that the dedicated mutable-leaf error is
 classified without an exception chain, a transient race is retried and
 converges, a persistent race stops after twenty retries, and the generic scan
 error is attempted exactly once. Safe inode replacement and safe appearance
-converge on the second complete scan; unsafe `0644` replacement/appearance and
-`PermissionError` fail on the first attempt. Each retry closes the previous
-root and leaf descriptors and repeats every ownership, mode, type, parent,
+converge on the second complete scan, including state and status appearances
+after the leaf was observed absent but before final parent revalidation. A
+simultaneous exact status transition plus ignored sibling also converges on
+the second complete scan; the same sibling appearing alone fails without
+retry. Unsafe `0644` state/status appearance, replacement, parent-mode drift,
+and `PermissionError` fail without retry. Each retry closes the previous root
+and leaf descriptors and repeats every ownership, mode, type, parent,
 configuration, installed-tree, account, journal and namespace check from the
 host root.
 

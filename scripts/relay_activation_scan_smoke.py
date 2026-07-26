@@ -450,6 +450,7 @@ def main() -> int:
     mutable_leaf_race_classified = False
     mutable_leaf_retry_bounded = False
     mutable_leaf_source_classification = False
+    mutable_parent_race_classified = False
     with tempfile.TemporaryDirectory(
         prefix="relay-activation-scan-"
     ) as temporary_name:
@@ -998,6 +999,75 @@ def main() -> int:
                 scanner._scan_root = original_scan_root
             return scan_attempts, injected
 
+        def exercise_post_observation_appearance(
+            root: Path,
+            *,
+            label: str,
+            replacement: Path,
+            expect_success: bool,
+            parent_mode_after: int | None = None,
+            mutable_parent: str = RUNTIME_DIRECTORY,
+            leaf_name: str = "status.json",
+            created_name: str | None = None,
+            additional_entry: tuple[Path, str] | None = None,
+        ) -> tuple[int, bool]:
+            original_observe = (
+                scanner._AnchoredInventory.observe_optional_regular
+            )
+            original_scan_root = scanner._scan_root
+            raw_replace = os.replace
+            raw_chmod = os.chmod
+            parent = root / mutable_parent.lstrip("/")
+            created = parent / (created_name or leaf_name)
+            mutable_path = f"{mutable_parent}/{leaf_name}"
+            scan_attempts = 0
+            injected = False
+
+            def counted_scan_root(*args, **kwargs):
+                nonlocal scan_attempts
+                scan_attempts += 1
+                return original_scan_root(*args, **kwargs)
+
+            def create_after_observation(inventory, path, **kwargs):
+                nonlocal injected
+                observed = original_observe(
+                    inventory,
+                    path,
+                    **kwargs,
+                )
+                if (
+                    path == mutable_path
+                    and observed is None
+                    and not injected
+                ):
+                    raw_replace(replacement, created)
+                    if additional_entry is not None:
+                        additional_source, additional_name = additional_entry
+                        raw_replace(
+                            additional_source,
+                            parent / additional_name,
+                        )
+                    if parent_mode_after is not None:
+                        raw_chmod(parent, parent_mode_after)
+                    injected = True
+                return observed
+
+            scanner._scan_root = counted_scan_root
+            scanner._AnchoredInventory.observe_optional_regular = (
+                create_after_observation
+            )
+            try:
+                if expect_success:
+                    scan_guarded(root)
+                else:
+                    expect_rejected(root, failures, label)
+            finally:
+                scanner._AnchoredInventory.observe_optional_regular = (
+                    original_observe
+                )
+                scanner._scan_root = original_scan_root
+            return scan_attempts, injected
+
         safe_replace_race = clone_root(
             existing_leaves,
             temporary / "safe-status-replace-race",
@@ -1108,6 +1178,189 @@ def main() -> int:
         require(
             mutable_leaf_source_classification,
             "mutable leaf source errors crossed the retry boundary",
+            failures,
+        )
+
+        safe_parent_race = clone_root(
+            valid,
+            temporary / "safe-status-parent-race",
+        )
+        safe_parent_source = temporary / "safe-status-parent-source"
+        write_file(safe_parent_source, b'{"ready":true}\n', 0o600)
+        safe_parent_attempts, safe_parent_injected = (
+            exercise_post_observation_appearance(
+                safe_parent_race,
+                label="safe-status-parent-entry-change",
+                replacement=safe_parent_source,
+                expect_success=True,
+            )
+        )
+
+        unsafe_parent_race = clone_root(
+            valid,
+            temporary / "unsafe-status-parent-race",
+        )
+        unsafe_parent_source = temporary / "unsafe-status-parent-source"
+        write_file(unsafe_parent_source, b'{"ready":true}\n', 0o644)
+        unsafe_parent_attempts, unsafe_parent_injected = (
+            exercise_post_observation_appearance(
+                unsafe_parent_race,
+                label="unsafe-status-parent-entry-change",
+                replacement=unsafe_parent_source,
+                expect_success=False,
+            )
+        )
+        rejected_cases += 1
+
+        simultaneous_parent_race = clone_root(
+            valid,
+            temporary / "simultaneous-status-parent-race",
+        )
+        simultaneous_parent_source = (
+            temporary / "simultaneous-status-parent-source"
+        )
+        simultaneous_sibling_source = (
+            temporary / "simultaneous-status-sibling-source"
+        )
+        write_file(
+            simultaneous_parent_source,
+            b'{"ready":true}\n',
+            0o600,
+        )
+        write_file(
+            simultaneous_sibling_source,
+            b"ignored sibling\n",
+            0o600,
+        )
+        (
+            simultaneous_parent_attempts,
+            simultaneous_parent_injected,
+        ) = exercise_post_observation_appearance(
+            simultaneous_parent_race,
+            label="simultaneous-status-parent-entry-change",
+            replacement=simultaneous_parent_source,
+            expect_success=True,
+            additional_entry=(
+                simultaneous_sibling_source,
+                "unrelated.tmp",
+            ),
+        )
+
+        unrelated_parent_race = clone_root(
+            valid,
+            temporary / "unrelated-status-parent-race",
+        )
+        unrelated_parent_source = (
+            temporary / "unrelated-status-parent-source"
+        )
+        write_file(
+            unrelated_parent_source,
+            b'{"ready":true}\n',
+            0o600,
+        )
+        (
+            unrelated_parent_attempts,
+            unrelated_parent_injected,
+        ) = exercise_post_observation_appearance(
+            unrelated_parent_race,
+            label="unrelated-status-parent-entry-change",
+            replacement=unrelated_parent_source,
+            expect_success=False,
+            created_name="unrelated.tmp",
+        )
+        rejected_cases += 1
+
+        safe_state_parent_race = clone_root(
+            valid,
+            temporary / "safe-state-parent-race",
+        )
+        safe_state_parent_source = (
+            temporary / "safe-state-parent-source"
+        )
+        write_file(
+            safe_state_parent_source,
+            b'{"epochs":{}}\n',
+            0o600,
+        )
+        (
+            safe_state_parent_attempts,
+            safe_state_parent_injected,
+        ) = exercise_post_observation_appearance(
+            safe_state_parent_race,
+            label="safe-state-parent-entry-change",
+            replacement=safe_state_parent_source,
+            expect_success=True,
+            mutable_parent=STATE_DIRECTORY,
+            leaf_name="epochs.json",
+        )
+
+        unsafe_state_parent_race = clone_root(
+            valid,
+            temporary / "unsafe-state-parent-race",
+        )
+        unsafe_state_parent_source = (
+            temporary / "unsafe-state-parent-source"
+        )
+        write_file(
+            unsafe_state_parent_source,
+            b'{"epochs":{}}\n',
+            0o644,
+        )
+        (
+            unsafe_state_parent_attempts,
+            unsafe_state_parent_injected,
+        ) = exercise_post_observation_appearance(
+            unsafe_state_parent_race,
+            label="unsafe-state-parent-entry-change",
+            replacement=unsafe_state_parent_source,
+            expect_success=False,
+            mutable_parent=STATE_DIRECTORY,
+            leaf_name="epochs.json",
+        )
+        rejected_cases += 1
+
+        unsafe_parent_mode_race = clone_root(
+            valid,
+            temporary / "unsafe-status-parent-mode-race",
+        )
+        unsafe_parent_mode_source = (
+            temporary / "unsafe-status-parent-mode-source"
+        )
+        write_file(
+            unsafe_parent_mode_source,
+            b'{"ready":true}\n',
+            0o600,
+        )
+        (
+            unsafe_parent_mode_attempts,
+            unsafe_parent_mode_injected,
+        ) = exercise_post_observation_appearance(
+            unsafe_parent_mode_race,
+            label="unsafe-status-parent-mode-change",
+            replacement=unsafe_parent_mode_source,
+            expect_success=False,
+            parent_mode_after=0o755,
+        )
+        rejected_cases += 1
+        mutable_parent_race_classified = (
+            safe_parent_injected
+            and safe_parent_attempts == 2
+            and unsafe_parent_injected
+            and unsafe_parent_attempts == 1
+            and simultaneous_parent_injected
+            and simultaneous_parent_attempts == 2
+            and unrelated_parent_injected
+            and unrelated_parent_attempts == 1
+            and safe_state_parent_injected
+            and safe_state_parent_attempts == 2
+            and unsafe_state_parent_injected
+            and unsafe_state_parent_attempts == 1
+            and unsafe_parent_mode_injected
+            and unsafe_parent_mode_attempts == 1
+        )
+        require(
+            mutable_parent_race_classified,
+            "mutable leaf parent entry change crossed the retry boundary",
             failures,
         )
 
@@ -1584,6 +1837,9 @@ def main() -> int:
         "mutable_leaf_retry_bounded": mutable_leaf_retry_bounded,
         "mutable_leaf_source_classification": (
             mutable_leaf_source_classification
+        ),
+        "mutable_parent_race_classified": (
+            mutable_parent_race_classified
         ),
         "ok": not failures,
         "rejected_cases": rejected_cases,

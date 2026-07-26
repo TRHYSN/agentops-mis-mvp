@@ -125,6 +125,21 @@ def _fingerprint(metadata: os.stat_result) -> tuple[int, ...]:
     )
 
 
+def _directory_security_fingerprint(
+    metadata: os.stat_result,
+) -> tuple[int, ...]:
+    # Directory nlink is namespace shape, not a stable security attribute:
+    # APFS changes it when a regular child entry appears.
+    return (
+        metadata.st_dev,
+        metadata.st_ino,
+        stat.S_IFMT(metadata.st_mode),
+        stat.S_IMODE(metadata.st_mode),
+        metadata.st_uid,
+        metadata.st_gid,
+    )
+
+
 def _path_parts(path: str) -> tuple[str, ...]:
     if (
         not isinstance(path, str)
@@ -211,6 +226,9 @@ class _AnchoredInventory:
         self._directories: dict[tuple[str, ...], tuple[int, tuple[int, ...]]] = {
             (): (root_descriptor, _fingerprint(os.fstat(root_descriptor)))
         }
+        self._mutable_directories: dict[
+            tuple[str, ...], tuple[int, ...]
+        ] = {}
         self._files: dict[
             tuple[str, ...], tuple[int, tuple[int, ...], _ObservedFile]
         ] = {}
@@ -269,6 +287,36 @@ class _AnchoredInventory:
         parts = _path_parts(path)
         descriptor = self._open_directory(parts)
         return os.fstat(descriptor)
+
+    def track_mutable_leaf_parent(self, path: str) -> None:
+        if path not in {STATE_DIRECTORY, RUNTIME_DIRECTORY}:
+            raise _ScanInvalid
+        parts = _path_parts(path)
+        descriptor = self._open_directory(parts)
+        self._mutable_directories[parts] = (
+            _directory_security_fingerprint(os.fstat(descriptor))
+        )
+
+    def _raise_mutable_leaf_race(
+        self,
+        parts: tuple[str, ...],
+    ) -> None:
+        parent_parts = parts[:-1]
+        expected = self._mutable_directories.get(parent_parts)
+        if expected is None:
+            raise _ScanInvalid
+        held = os.fstat(self._open_directory(parent_parts))
+        reopened = self._reopen_directory(parent_parts)
+        try:
+            current = os.fstat(reopened)
+        finally:
+            os.close(reopened)
+        if (
+            _directory_security_fingerprint(held) != expected
+            or _directory_security_fingerprint(current) != expected
+        ):
+            raise _ScanInvalid
+        raise _MutableLeafRace
 
     def _open_directory(self, parts: tuple[str, ...]) -> int:
         if parts in self._directories:
@@ -428,7 +476,7 @@ class _AnchoredInventory:
                 (after.st_dev, after.st_ino),
             }
             if len(identities) != 1:
-                raise _MutableLeafRace
+                self._raise_mutable_leaf_race(parts)
             if not (
                 _fingerprint(before)
                 == _fingerprint(opened)
@@ -447,7 +495,7 @@ class _AnchoredInventory:
             descriptor = -1
             return opened
         except FileNotFoundError:
-            raise _MutableLeafRace from None
+            self._raise_mutable_leaf_race(parts)
         except OSError:
             raise _ScanInvalid from None
         finally:
@@ -505,6 +553,7 @@ class _AnchoredInventory:
         return observed
 
     def verify(self) -> None:
+        self._verify_mutable_namespace()
         for _parts, (descriptor, observed, _value) in self._files.items():
             if _fingerprint(os.fstat(descriptor)) != observed:
                 raise _ScanInvalid
@@ -519,7 +568,8 @@ class _AnchoredInventory:
             if _fingerprint(current) != observed:
                 raise _ScanInvalid
         for _parts, (descriptor, observed) in self._directories.items():
-            if _fingerprint(os.fstat(descriptor)) != observed:
+            current = os.fstat(descriptor)
+            if _fingerprint(current) != observed:
                 raise _ScanInvalid
         for parts, (observed, _value) in self._links.items():
             parent = self._reopen_directory(parts[:-1])
@@ -536,6 +586,54 @@ class _AnchoredInventory:
             if _fingerprint(current) != observed:
                 raise _ScanInvalid
         self._verify_namespace()
+
+    def _verify_mutable_namespace(self) -> None:
+        for parts, (_descriptor, observed, _value) in (
+            self._metadata_files.items()
+        ):
+            parent = self._reopen_directory(parts[:-1])
+            try:
+                current = os.stat(
+                    parts[-1],
+                    dir_fd=parent,
+                    follow_symlinks=False,
+                )
+            except FileNotFoundError:
+                self._raise_mutable_leaf_race(parts)
+            except OSError:
+                raise _ScanInvalid from None
+            finally:
+                os.close(parent)
+            service_uid, service_gid = self._metadata_file_owners[parts]
+            _validate_mutable_leaf(
+                current,
+                service_uid=service_uid,
+                service_gid=service_gid,
+            )
+            if (current.st_dev, current.st_ino) != (observed[0], observed[1]):
+                self._raise_mutable_leaf_race(parts)
+            if _fingerprint(current) != observed:
+                raise _ScanInvalid
+        for parts, (service_uid, service_gid) in self._mutable_absent.items():
+            parent = self._reopen_directory(parts[:-1])
+            try:
+                current = os.stat(
+                    parts[-1],
+                    dir_fd=parent,
+                    follow_symlinks=False,
+                )
+            except FileNotFoundError:
+                continue
+            except OSError:
+                raise _ScanInvalid from None
+            finally:
+                os.close(parent)
+            _validate_mutable_leaf(
+                current,
+                service_uid=service_uid,
+                service_gid=service_gid,
+            )
+            self._raise_mutable_leaf_race(parts)
 
     def _descriptor_count(self) -> int:
         return (
@@ -589,30 +687,6 @@ class _AnchoredInventory:
                 os.close(parent)
             if _fingerprint(current) != observed:
                 raise _ScanInvalid
-        for parts, (_descriptor, observed, _value) in self._metadata_files.items():
-            parent = self._reopen_directory(parts[:-1])
-            try:
-                current = os.stat(
-                    parts[-1],
-                    dir_fd=parent,
-                    follow_symlinks=False,
-                )
-            except FileNotFoundError:
-                raise _MutableLeafRace from None
-            except OSError:
-                raise _ScanInvalid from None
-            finally:
-                os.close(parent)
-            service_uid, service_gid = self._metadata_file_owners[parts]
-            _validate_mutable_leaf(
-                current,
-                service_uid=service_uid,
-                service_gid=service_gid,
-            )
-            if (current.st_dev, current.st_ino) != (observed[0], observed[1]):
-                raise _MutableLeafRace
-            if _fingerprint(current) != observed:
-                raise _ScanInvalid
         for parts in self._absent:
             parent = self._reopen_directory(parts[:-1])
             try:
@@ -623,27 +697,6 @@ class _AnchoredInventory:
                 raise _ScanInvalid from None
             else:
                 raise _ScanInvalid
-            finally:
-                os.close(parent)
-        for parts, (service_uid, service_gid) in self._mutable_absent.items():
-            parent = self._reopen_directory(parts[:-1])
-            try:
-                current = os.stat(
-                    parts[-1],
-                    dir_fd=parent,
-                    follow_symlinks=False,
-                )
-            except FileNotFoundError:
-                pass
-            except OSError:
-                raise _ScanInvalid from None
-            else:
-                _validate_mutable_leaf(
-                    current,
-                    service_uid=service_uid,
-                    service_gid=service_gid,
-                )
-                raise _MutableLeafRace
             finally:
                 os.close(parent)
 
@@ -1152,6 +1205,8 @@ def _scan_anchored(
             gid=account.gid,
             mode=0o700,
         )
+        inventory.track_mutable_leaf_parent(STATE_DIRECTORY)
+        inventory.track_mutable_leaf_parent(RUNTIME_DIRECTORY)
         if (
             state_metadata.st_dev,
             state_metadata.st_ino,
