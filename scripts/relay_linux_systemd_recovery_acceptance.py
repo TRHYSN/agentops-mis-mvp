@@ -95,6 +95,17 @@ PROCESS_DEATH_RECOVER_MODE = "--process-death-recover"
 PROCESS_DEATH_PIPE_MARKER = b"daemon_reload_returned\n"
 PROCESS_DEATH_MUTATION_RECORD = b"daemon_reload\n"
 PROCESS_DEATH_MUTATION_FILE = "daemon-reload-mutations.log"
+ENABLE_INTENT_PROCESS_DEATH_EXECUTE_MODE = (
+    "--enable-intent-process-death-execute"
+)
+ENABLE_INTENT_PROCESS_DEATH_RECOVER_MODE = (
+    "--enable-intent-process-death-recover"
+)
+ENABLE_INTENT_PROCESS_DEATH_PIPE_MARKER = (
+    b"enable_intent_persisted\n"
+)
+ENABLE_INTENT_PROCESS_DEATH_MUTATION_RECORD = b"enable\n"
+ENABLE_INTENT_PROCESS_DEATH_MUTATION_FILE = "enable-mutations.log"
 RECEIPT_PROCESS_DEATH_EXECUTE_MODE = "--receipt-process-death-execute"
 RECEIPT_PROCESS_DEATH_RECOVER_MODE = "--receipt-process-death-recover"
 RECEIPT_PROCESS_DEATH_PIPE_MARKER = b"rollback_receipt_published\n"
@@ -594,6 +605,15 @@ def _process_death_marker_path(journal_root: Path) -> Path:
     )
 
 
+def _enable_intent_process_death_marker_path(
+    journal_root: Path,
+) -> Path:
+    return (
+        _production_root_for_journal(journal_root)
+        / ENABLE_INTENT_PROCESS_DEATH_MUTATION_FILE
+    )
+
+
 def _process_death_paths(
     journal_argument: str,
     marker_argument: str,
@@ -766,6 +786,127 @@ def _process_death_mutation_count(
     except Exception:
         raise AcceptanceFailure(
             "process_death_mutation_marker_invalid"
+        ) from None
+    finally:
+        if descriptor >= 0:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+
+
+def _append_enable_intent_process_death_mutation(
+    marker_path: Path,
+) -> None:
+    descriptor = -1
+    try:
+        descriptor = os.open(
+            marker_path,
+            os.O_WRONLY
+            | os.O_CREAT
+            | os.O_APPEND
+            | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_CLOEXEC", 0),
+            0o600,
+        )
+        before = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(before.st_mode)
+            or stat.S_IMODE(before.st_mode) != 0o600
+            or before.st_uid != os.geteuid()
+            or before.st_gid != os.getegid()
+            or before.st_nlink != 1
+            or before.st_size != 0
+        ):
+            raise AcceptanceFailure(
+                "enable_intent_process_death_mutation_marker_invalid"
+            )
+        if (
+            os.write(
+                descriptor,
+                ENABLE_INTENT_PROCESS_DEATH_MUTATION_RECORD,
+            )
+            != len(ENABLE_INTENT_PROCESS_DEATH_MUTATION_RECORD)
+        ):
+            raise AcceptanceFailure(
+                "enable_intent_process_death_mutation_marker_write"
+            )
+        os.fsync(descriptor)
+        after = os.fstat(descriptor)
+        current = os.lstat(marker_path)
+        if (
+            _marker_identity(before) != _marker_identity(after)
+            or _marker_identity(after) != _marker_identity(current)
+            or after.st_size
+            != len(ENABLE_INTENT_PROCESS_DEATH_MUTATION_RECORD)
+            or current.st_size != after.st_size
+        ):
+            raise AcceptanceFailure(
+                "enable_intent_process_death_mutation_marker_invalid"
+            )
+    except AcceptanceFailure:
+        raise
+    except Exception:
+        raise AcceptanceFailure(
+            "enable_intent_process_death_mutation_marker_write"
+        ) from None
+    finally:
+        if descriptor >= 0:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+
+
+def _enable_intent_process_death_mutation_count(
+    marker_path: Path,
+    *,
+    allow_missing: bool = False,
+) -> int:
+    descriptor = -1
+    try:
+        descriptor = os.open(
+            marker_path,
+            os.O_RDONLY
+            | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_CLOEXEC", 0),
+        )
+        opened = os.fstat(descriptor)
+        expected_size = len(ENABLE_INTENT_PROCESS_DEATH_MUTATION_RECORD)
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or stat.S_IMODE(opened.st_mode) != 0o600
+            or opened.st_uid != os.geteuid()
+            or opened.st_gid != os.getegid()
+            or opened.st_nlink != 1
+            or opened.st_size != expected_size
+        ):
+            raise AcceptanceFailure(
+                "enable_intent_process_death_mutation_marker_invalid"
+            )
+        payload = os.read(descriptor, expected_size + 1)
+        after = os.fstat(descriptor)
+        current = os.lstat(marker_path)
+        if (
+            payload != ENABLE_INTENT_PROCESS_DEATH_MUTATION_RECORD
+            or _fingerprint(opened) != _fingerprint(after)
+            or _fingerprint(after) != _fingerprint(current)
+        ):
+            raise AcceptanceFailure(
+                "enable_intent_process_death_mutation_marker_invalid"
+            )
+        return 1
+    except FileNotFoundError:
+        if allow_missing:
+            return 0
+        raise AcceptanceFailure(
+            "enable_intent_process_death_mutation_marker_missing"
+        ) from None
+    except AcceptanceFailure:
+        raise
+    except Exception:
+        raise AcceptanceFailure(
+            "enable_intent_process_death_mutation_marker_invalid"
         ) from None
     finally:
         if descriptor >= 0:
@@ -1154,6 +1295,581 @@ def _run_process_death_gate(
     return {
         "checkpoint": "after_daemon_reload_before_observation",
         "child_exit_signal": "SIGKILL",
+        **expected,
+    }
+
+
+def _enable_intent_process_death_execute_child(
+    arguments: list[str],
+) -> int:
+    pipe_descriptor = -1
+    try:
+        if (
+            len(arguments) != 5
+            or os.environ.get(OPT_IN) != "1"
+            or not sys.platform.startswith("linux")
+            or os.geteuid() != 0
+            or not Path("/run/systemd/system").is_dir()
+            or SHA256_PATTERN.fullmatch(arguments[2]) is None
+            or SHA256_PATTERN.fullmatch(arguments[3]) is None
+        ):
+            return 1
+        journal_root, daemon_marker_path = _process_death_paths(
+            arguments[0],
+            arguments[1],
+        )
+        production_root = _production_root_for_journal(journal_root)
+        enable_marker_path = (
+            _enable_intent_process_death_marker_path(journal_root)
+        )
+        if (
+            _process_death_mutation_count(daemon_marker_path) != 1
+            or _enable_intent_process_death_mutation_count(
+                enable_marker_path,
+                allow_missing=True,
+            )
+            != 0
+        ):
+            return 1
+        pipe_descriptor = int(arguments[4])
+        pipe_metadata = os.fstat(pipe_descriptor)
+        if pipe_descriptor < 3 or not stat.S_ISFIFO(pipe_metadata.st_mode):
+            return 1
+        mutation_entered = False
+
+        def mutation_runner(
+            _systemctl: FileIdentity,
+            operation: str,
+        ) -> None:
+            nonlocal mutation_entered, pipe_descriptor
+            if operation != "enable" or mutation_entered:
+                raise AcceptanceFailure(
+                    "enable_intent_process_death_unexpected_mutation"
+                )
+            mutation_entered = True
+            if (
+                os.write(
+                    pipe_descriptor,
+                    ENABLE_INTENT_PROCESS_DEATH_PIPE_MARKER,
+                )
+                != len(ENABLE_INTENT_PROCESS_DEATH_PIPE_MARKER)
+            ):
+                raise AcceptanceFailure(
+                    "enable_intent_process_death_pipe_marker_write"
+                )
+            os.close(pipe_descriptor)
+            pipe_descriptor = -1
+            while True:
+                signal.pause()
+
+        with _open_locked_production_store(production_root) as store:
+            before = store._load_recovery_snapshot(arguments[2])
+            last = before.revisions[-1]
+            systemd = read_systemd_show(_process_death_scanner())
+            if (
+                len(before.revisions) != 3
+                or before.receipt is not None
+                or last.revision != 3
+                or last.phase != "observed"
+                or last.step_id != "daemon_reload"
+                or last.owns_enable
+                or last.owns_start
+                or systemd.unit_file_state != "disabled"
+                or systemd.active_state != "inactive"
+                or systemd.need_daemon_reload
+            ):
+                return 1
+            _run_confirmed_recovery_step_with(
+                arguments[2],
+                "resume",
+                arguments[3],
+                store=store,
+                scanner=_process_death_scanner,
+                systemd_reader=read_systemd_show,
+                mutation_runner=mutation_runner,
+            )
+        return 1
+    except Exception:
+        return 1
+    finally:
+        if pipe_descriptor >= 0:
+            try:
+                os.close(pipe_descriptor)
+            except OSError:
+                pass
+
+
+def _enable_intent_process_death_recover_child(
+    arguments: list[str],
+) -> int:
+    stage = "enable_intent_recover_child_preflight"
+    try:
+        if (
+            len(arguments) != 3
+            or os.environ.get(OPT_IN) != "1"
+            or not sys.platform.startswith("linux")
+            or os.geteuid() != 0
+            or not Path("/run/systemd/system").is_dir()
+            or SHA256_PATTERN.fullmatch(arguments[2]) is None
+        ):
+            raise AcceptanceFailure(stage)
+        journal_root, daemon_marker_path = _process_death_paths(
+            arguments[0],
+            arguments[1],
+        )
+        production_root = _production_root_for_journal(journal_root)
+        enable_marker_path = (
+            _enable_intent_process_death_marker_path(journal_root)
+        )
+        plan_sha256 = arguments[2]
+        if (
+            _process_death_mutation_count(daemon_marker_path) != 1
+            or _enable_intent_process_death_mutation_count(
+                enable_marker_path,
+                allow_missing=True,
+            )
+            != 0
+        ):
+            raise AcceptanceFailure(stage)
+
+        mutation_count = 0
+        stage = "enable_intent_recover_child_reopen"
+        with _open_locked_production_store(production_root) as store:
+            before = store._load_recovery_snapshot(plan_sha256)
+            last = before.revisions[-1]
+            before_systemd = read_systemd_show(
+                _process_death_scanner()
+            )
+            if (
+                len(before.revisions) != 4
+                or before.receipt is not None
+                or last.revision != 4
+                or last.phase != "intent"
+                or last.step_id != "enable"
+                or last.intent_id != "enable_requested"
+                or last.owns_enable
+                or last.owns_start
+                or before_systemd.unit_file_state != "disabled"
+                or before_systemd.active_state != "inactive"
+                or before_systemd.need_daemon_reload
+            ):
+                raise AcceptanceFailure(stage)
+
+            stage = "enable_intent_recover_child_preview"
+            decision = _preview_activation_recovery_with(
+                plan_sha256,
+                "resume",
+                snapshot_loader=store._load_recovery_snapshot,
+                scanner=_process_death_scanner,
+                systemd_reader=read_systemd_show,
+            )
+            if (
+                decision.get("action_id") != "resume"
+                or decision.get("operation_id") != "run_step"
+                or decision.get("reason_id") != "resume_ready"
+                or decision.get("step_id") != "enable"
+            ):
+                raise AcceptanceFailure(stage)
+
+            def mutation_runner(
+                systemctl: FileIdentity,
+                operation: str,
+            ) -> None:
+                nonlocal mutation_count
+                if operation != "enable" or mutation_count != 0:
+                    raise AcceptanceFailure(
+                        "enable_intent_recovery_mutation_replayed"
+                    )
+                _run_bound_systemd_mutation(systemctl, operation)
+                _append_enable_intent_process_death_mutation(
+                    enable_marker_path
+                )
+                mutation_count = 1
+
+            stage = "enable_intent_recover_child_execute"
+            counting_store = _CountingRecoveryStore(store)
+            result = _run_confirmed_recovery_step_with(
+                plan_sha256,
+                "resume",
+                str(decision["decision_sha256"]),
+                store=counting_store,
+                scanner=_process_death_scanner,
+                systemd_reader=read_systemd_show,
+                mutation_runner=mutation_runner,
+            )
+            after = store._load_recovery_snapshot(plan_sha256)
+            after_last = after.revisions[-1]
+            if (
+                result.get("ok") is not True
+                or result.get("intent_reused") is not True
+                or result.get("latest_revision") != 5
+                or mutation_count != 1
+                or counting_store.revision_writes != 1
+                or counting_store.receipt_writes != 0
+                or len(after.revisions) != 5
+                or after.receipt is not None
+                or after_last.revision != 5
+                or after_last.phase != "observed"
+                or after_last.step_id != "enable"
+                or after_last.intent_id != "enable_requested"
+                or after_last.owns_enable is not True
+                or after_last.owns_start
+            ):
+                raise AcceptanceFailure(stage)
+
+        stage = "enable_intent_recover_child_reopen_after"
+        with _open_locked_production_store(production_root) as store:
+            reopened = store._load_recovery_snapshot(plan_sha256)
+            reopened_last = reopened.revisions[-1]
+            systemd = read_systemd_show(_process_death_scanner())
+            next_decision = _preview_activation_recovery_with(
+                plan_sha256,
+                "resume",
+                snapshot_loader=store._load_recovery_snapshot,
+                scanner=_process_death_scanner,
+                systemd_reader=read_systemd_show,
+            )
+            if (
+                len(reopened.revisions) != 5
+                or reopened.receipt is not None
+                or reopened_last.revision != 5
+                or reopened_last.phase != "observed"
+                or reopened_last.step_id != "enable"
+                or reopened_last.owns_enable is not True
+                or reopened_last.owns_start
+                or systemd.unit_file_state != "enabled"
+                or systemd.active_state != "inactive"
+                or systemd.need_daemon_reload
+                or next_decision.get("action_id") != "resume"
+                or next_decision.get("operation_id") != "run_step"
+                or next_decision.get("reason_id") != "resume_ready"
+                or next_decision.get("step_id") != "start"
+            ):
+                raise AcceptanceFailure(stage)
+
+        if (
+            _enable_intent_process_death_mutation_count(
+                enable_marker_path
+            )
+            != 1
+        ):
+            raise AcceptanceFailure(
+                "enable_intent_recovery_mutation_count"
+            )
+        print(
+            json.dumps(
+                {
+                    "intent_reused": True,
+                    "journal_reopened": True,
+                    "latest_revision": 5,
+                    "lifecycle_lock_reacquired": True,
+                    "mutation_count_after_recovery": 1,
+                    "mutation_count_before_recovery": 0,
+                    "mutation_replayed": False,
+                    "next_step": "start",
+                    "ok": True,
+                    "owns_enable": True,
+                    "owns_start": False,
+                    "recovery_action": "resume",
+                    "recovery_operation": "run_step",
+                    "recovery_revision_write_count": 1,
+                    "recovery_step": "enable",
+                    "systemd_state": "enabled_inactive",
+                },
+                separators=(",", ":"),
+                sort_keys=True,
+            )
+        )
+        return 0
+    except Exception:
+        print(
+            json.dumps(
+                {
+                    "failure_id": (
+                        "enable_intent_process_death_recovery_failed"
+                    ),
+                    "ok": False,
+                    "stage": stage,
+                },
+                separators=(",", ":"),
+                sort_keys=True,
+            )
+        )
+        return 1
+
+
+def _run_enable_intent_process_death_gate(
+    journal_root: Path,
+    plan_sha256: str,
+    confirmed_decision_sha256: str,
+) -> dict[str, object]:
+    daemon_marker_path = _process_death_marker_path(journal_root)
+    enable_marker_path = (
+        _enable_intent_process_death_marker_path(journal_root)
+    )
+    production_root = _production_root_for_journal(journal_root)
+    if (
+        _process_death_mutation_count(daemon_marker_path) != 1
+        or _enable_intent_process_death_mutation_count(
+            enable_marker_path,
+            allow_missing=True,
+        )
+        != 0
+    ):
+        raise AcceptanceFailure(
+            "enable_intent_process_death_mutation_precondition"
+        )
+
+    read_descriptor = -1
+    write_descriptor = -1
+    child: subprocess.Popen[bytes] | None = None
+    try:
+        read_descriptor, write_descriptor = os.pipe()
+        child = subprocess.Popen(
+            (
+                sys.executable,
+                str(Path(__file__).resolve()),
+                ENABLE_INTENT_PROCESS_DEATH_EXECUTE_MODE,
+                str(journal_root),
+                str(daemon_marker_path),
+                plan_sha256,
+                confirmed_decision_sha256,
+                str(write_descriptor),
+            ),
+            shell=False,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            cwd="/",
+            env=_process_death_environment(),
+            close_fds=True,
+            pass_fds=(write_descriptor,),
+            start_new_session=True,
+        )
+        os.close(write_descriptor)
+        write_descriptor = -1
+        ready, _writable, _exceptional = select.select(
+            (read_descriptor,),
+            (),
+            (),
+            PROCESS_DEATH_CHILD_TIMEOUT_SECONDS,
+        )
+        if not ready:
+            raise AcceptanceFailure(
+                "enable_intent_process_death_marker_timeout"
+            )
+        marker = os.read(
+            read_descriptor,
+            len(ENABLE_INTENT_PROCESS_DEATH_PIPE_MARKER) + 1,
+        )
+        if (
+            marker != ENABLE_INTENT_PROCESS_DEATH_PIPE_MARKER
+            or child.poll() is not None
+        ):
+            raise AcceptanceFailure(
+                "enable_intent_process_death_marker_invalid"
+            )
+        if (
+            _enable_intent_process_death_mutation_count(
+                enable_marker_path,
+                allow_missing=True,
+            )
+            != 0
+        ):
+            raise AcceptanceFailure(
+                "enable_intent_process_death_mutation_before_recovery"
+            )
+        checkpoint_systemd = read_systemd_show(
+            _process_death_scanner()
+        )
+        if (
+            checkpoint_systemd.unit_file_state != "disabled"
+            or checkpoint_systemd.active_state != "inactive"
+            or checkpoint_systemd.need_daemon_reload
+        ):
+            raise AcceptanceFailure(
+                "enable_intent_process_death_systemd_checkpoint"
+            )
+        try:
+            with _open_locked_production_store(production_root):
+                pass
+        except RelayActivationJournalError as exc:
+            if exc.error_id != "activation_journal_busy":
+                raise AcceptanceFailure(
+                    "enable_intent_process_death_lock_invalid"
+                ) from None
+        else:
+            raise AcceptanceFailure(
+                "enable_intent_process_death_lock_not_held"
+            )
+        child.kill()
+        return_code = child.wait(
+            timeout=PROCESS_DEATH_CHILD_TIMEOUT_SECONDS
+        )
+        if return_code != -signal.SIGKILL:
+            raise AcceptanceFailure(
+                "enable_intent_process_death_sigkill_unproven"
+            )
+    except AcceptanceFailure:
+        raise
+    except Exception:
+        raise AcceptanceFailure(
+            "enable_intent_process_death_execution_failed"
+        ) from None
+    finally:
+        for descriptor in (write_descriptor, read_descriptor):
+            if descriptor >= 0:
+                try:
+                    os.close(descriptor)
+                except OSError:
+                    pass
+        if child is not None and child.poll() is None:
+            try:
+                child.kill()
+                child.wait(
+                    timeout=PROCESS_DEATH_CHILD_TIMEOUT_SECONDS
+                )
+            except Exception:
+                pass
+
+    with _open_locked_production_store(
+        production_root
+    ) as checkpoint_store:
+        checkpoint = checkpoint_store._load_recovery_snapshot(
+            plan_sha256
+        )
+        last = checkpoint.revisions[-1]
+        if (
+            len(checkpoint.revisions) != 4
+            or checkpoint.receipt is not None
+            or last.revision != 4
+            or last.phase != "intent"
+            or last.step_id != "enable"
+            or last.intent_id != "enable_requested"
+            or last.owns_enable
+            or last.owns_start
+        ):
+            raise AcceptanceFailure(
+                "enable_intent_process_death_checkpoint_invalid"
+            )
+    if (
+        _enable_intent_process_death_mutation_count(
+            enable_marker_path,
+            allow_missing=True,
+        )
+        != 0
+    ):
+        raise AcceptanceFailure(
+            "enable_intent_process_death_mutation_before_recovery"
+        )
+
+    try:
+        recovered = subprocess.run(
+            (
+                sys.executable,
+                str(Path(__file__).resolve()),
+                ENABLE_INTENT_PROCESS_DEATH_RECOVER_MODE,
+                str(journal_root),
+                str(daemon_marker_path),
+                plan_sha256,
+            ),
+            check=False,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            cwd="/",
+            env=_process_death_environment(),
+            timeout=PROCESS_DEATH_CHILD_TIMEOUT_SECONDS,
+        )
+    except Exception:
+        raise AcceptanceFailure(
+            "enable_intent_process_death_recovery_child_failed"
+        ) from None
+    if (
+        recovered.returncode != 0
+        or not recovered.stdout
+        or len(recovered.stdout) > MAX_PROCESS_DEATH_RESULT_BYTES
+        or b"\x00" in recovered.stdout
+        or b"\r" in recovered.stdout
+    ):
+        raise AcceptanceFailure(
+            "enable_intent_process_death_recovery_child_failed"
+        )
+    try:
+        recovery_result = json.loads(recovered.stdout.decode("ascii"))
+    except Exception:
+        raise AcceptanceFailure(
+            "enable_intent_process_death_recovery_result_invalid"
+        ) from None
+    expected = {
+        "intent_reused": True,
+        "journal_reopened": True,
+        "latest_revision": 5,
+        "lifecycle_lock_reacquired": True,
+        "mutation_count_after_recovery": 1,
+        "mutation_count_before_recovery": 0,
+        "mutation_replayed": False,
+        "next_step": "start",
+        "ok": True,
+        "owns_enable": True,
+        "owns_start": False,
+        "recovery_action": "resume",
+        "recovery_operation": "run_step",
+        "recovery_revision_write_count": 1,
+        "recovery_step": "enable",
+        "systemd_state": "enabled_inactive",
+    }
+    if recovery_result != expected:
+        raise AcceptanceFailure(
+            "enable_intent_process_death_recovery_result_invalid"
+        )
+    if (
+        _enable_intent_process_death_mutation_count(
+            enable_marker_path
+        )
+        != 1
+    ):
+        raise AcceptanceFailure(
+            "enable_intent_process_death_mutation_replayed"
+        )
+
+    with _open_locked_production_store(production_root) as final_store:
+        final_snapshot = final_store._load_recovery_snapshot(
+            plan_sha256
+        )
+        final_last = final_snapshot.revisions[-1]
+        final_systemd = read_systemd_show(_process_death_scanner())
+        next_decision = _preview_activation_recovery_with(
+            plan_sha256,
+            "resume",
+            snapshot_loader=final_store._load_recovery_snapshot,
+            scanner=_process_death_scanner,
+            systemd_reader=read_systemd_show,
+        )
+        if (
+            len(final_snapshot.revisions) != 5
+            or final_snapshot.receipt is not None
+            or final_last.revision != 5
+            or final_last.phase != "observed"
+            or final_last.step_id != "enable"
+            or final_last.owns_enable is not True
+            or final_last.owns_start
+            or final_systemd.unit_file_state != "enabled"
+            or final_systemd.active_state != "inactive"
+            or final_systemd.need_daemon_reload
+            or next_decision.get("action_id") != "resume"
+            or next_decision.get("operation_id") != "run_step"
+            or next_decision.get("reason_id") != "resume_ready"
+            or next_decision.get("step_id") != "start"
+        ):
+            raise AcceptanceFailure(
+                "enable_intent_process_death_final_invalid"
+            )
+    return {
+        "checkpoint": "after_enable_intent_before_mutation",
+        "checkpoint_latest_revision": 4,
+        "child_exit_signal": "SIGKILL",
+        "lifecycle_lock_held_at_checkpoint": True,
         **expected,
     }
 
@@ -1677,6 +2393,7 @@ def _run() -> dict[str, object]:
     rollback_steps: list[str] = []
     final_state = ""
     process_death_result: dict[str, object] = {}
+    enable_intent_process_death_result: dict[str, object] = {}
     receipt_process_death_result: dict[str, object] = {}
     try:
         systemctl = _systemctl_identity()
@@ -1787,6 +2504,25 @@ def _run() -> dict[str, object]:
                         "verify",
                     }:
                         raise AcceptanceFailure
+                    if step_id == "enable":
+                        if enable_intent_process_death_result:
+                            raise AcceptanceFailure(
+                                "enable_intent_process_death_reentered"
+                            )
+                        store.close()
+                        stage = "forward_enable_intent_process_death"
+                        enable_intent_process_death_result = (
+                            _run_enable_intent_process_death_gate(
+                                journal_root,
+                                plan.plan_sha256,
+                                str(decision["decision_sha256"]),
+                            )
+                        )
+                        forward_steps.append("enable")
+                        store = stores.enter_context(
+                            _open_fixture_store(journal_root)
+                        )
+                        continue
                     stage = f"forward_{step_id}"
                     forward_steps.append(step_id)
                     _run_confirmed_recovery_step_with(
@@ -1988,6 +2724,9 @@ def _run() -> dict[str, object]:
             "ok": True,
             "operation": "relay_linux_systemd_recovery_acceptance",
             "process_death": process_death_result,
+            "enable_intent_process_death": (
+                enable_intent_process_death_result
+            ),
             "receipt_process_death": receipt_process_death_result,
             "rollback_steps": rollback_steps,
             "stage": stage,
@@ -2011,6 +2750,14 @@ def main() -> int:
             return _process_death_execute_child(sys.argv[2:])
         if sys.argv[1] == PROCESS_DEATH_RECOVER_MODE:
             return _process_death_recover_child(sys.argv[2:])
+        if sys.argv[1] == ENABLE_INTENT_PROCESS_DEATH_EXECUTE_MODE:
+            return _enable_intent_process_death_execute_child(
+                sys.argv[2:]
+            )
+        if sys.argv[1] == ENABLE_INTENT_PROCESS_DEATH_RECOVER_MODE:
+            return _enable_intent_process_death_recover_child(
+                sys.argv[2:]
+            )
         if sys.argv[1] == RECEIPT_PROCESS_DEATH_EXECUTE_MODE:
             return _receipt_process_death_execute_child(sys.argv[2:])
         if sys.argv[1] == RECEIPT_PROCESS_DEATH_RECOVER_MODE:

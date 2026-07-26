@@ -11,13 +11,15 @@ It installs one temporary `agentops-mis-relay.service` whose only process is
 The workflow job is `Relay recovery on real Linux systemd` in
 `.github/workflows/ci.yml`.
 
-The same job now includes two real process-death gates. The first is at the
-confirmed `daemon_reload` boundary. The second is after the rollback receipt
-has been durably published but before the terminal revision is published.
-Neither gate simulates an exception: the parent starts an independent child,
-waits for a fixed pipe marker, confirms that the child is still alive, sends
-`SIGKILL`, and starts a new process to reopen and recover the same durable
-fixture journal.
+The same job now includes three real process-death gates. The first is at the
+confirmed `daemon_reload` boundary. The second is after durable
+`enable_requested` intent and the stable pre-mutation scan, but before
+`systemctl enable` starts. The third is after the rollback receipt has been
+durably published but before the terminal revision is published. None
+simulates an exception: the parent starts an independent child, waits for a
+fixed pipe marker, confirms that the child is still alive, sends `SIGKILL`,
+and starts a new process to reopen and recover the same durable fixture
+journal.
 
 ## Safety Guard
 
@@ -57,12 +59,17 @@ It exercises:
 6. strict target-mutation marker count `1` before and after recovery;
 7. a next recovery decision of `run_step + enable`, never another
    `daemon_reload`;
-8. confirmed forward enable and start;
-9. forward verification without a mutation;
-10. confirmed rollback stop and disable;
-11. exact restored-state rollback verification;
-12. rollback receipt and terminal revision; and
-13. idempotent `service_state_rolled_back` completion.
+8. a second real process death after durable `enable_requested` revision 4
+   and the stable pre-mutation scan, while the production lifecycle lock is
+   held and before the enable mutation starts;
+9. fresh-process lock reacquisition, intent reuse, exactly one real enable
+   mutation, and exactly one observed revision 5;
+10. confirmed forward start;
+11. forward verification without a mutation;
+12. confirmed rollback stop and disable;
+13. exact restored-state rollback verification;
+14. rollback receipt and terminal revision; and
+15. idempotent `service_state_rolled_back` completion.
 
 Every executor invocation still advances only one confirmed decision. The next
 step requires a new stable preview and decision hash.
@@ -72,6 +79,24 @@ It counts only the confirmed transaction's target `daemon_reload`; setup and
 cleanup reloads are outside that marker. The pipe marker is emitted by the
 first post-mutation scanner call, so receiving it proves that the production
 mutation adapter returned while observation publication remains unreachable.
+
+The enable-intent gate uses a separate bounded mutation sidecar. The execution
+child opens the production-shaped journal through the lifecycle-lock opener.
+The one-shot mutation runner validates exact operation `enable`, emits
+`enable_intent_persisted`, and blocks without invoking systemd. Reaching that
+boundary proves the executor already published and reloaded revision 4
+`enable_requested` and completed its stable pre-mutation scan. The parent
+proves the child is alive, the lifecycle lock is busy, systemd remains
+disabled and inactive, and the enable mutation count is zero before sending
+`SIGKILL`.
+
+A fresh recovery process reacquires the lifecycle lock, previews exactly
+`resume + run_step + enable + resume_ready`, reuses the existing intent,
+invokes the real bound `systemctl enable` once, and appends exactly one
+observed revision 5 with `owns_enable=true` and `owns_start=false`. It then
+reopens the locked journal, verifies systemd is enabled and inactive, and
+previews `resume + run_step + start + resume_ready`. The separate enable
+mutation sidecar must remain exactly one.
 
 The rollback receipt gate begins only after an observed `verify` revision
 records `rollback_verified`, with both ownership flags false. The temporary
@@ -135,6 +160,28 @@ Expected bounded result:
   "network_used": false,
   "ok": true,
   "operation": "relay_linux_systemd_recovery_acceptance",
+  "enable_intent_process_death": {
+    "checkpoint": "after_enable_intent_before_mutation",
+    "checkpoint_latest_revision": 4,
+    "child_exit_signal": "SIGKILL",
+    "intent_reused": true,
+    "journal_reopened": true,
+    "latest_revision": 5,
+    "lifecycle_lock_held_at_checkpoint": true,
+    "lifecycle_lock_reacquired": true,
+    "mutation_count_after_recovery": 1,
+    "mutation_count_before_recovery": 0,
+    "mutation_replayed": false,
+    "next_step": "start",
+    "ok": true,
+    "owns_enable": true,
+    "owns_start": false,
+    "recovery_action": "resume",
+    "recovery_operation": "run_step",
+    "recovery_revision_write_count": 1,
+    "recovery_step": "enable",
+    "systemd_state": "enabled_inactive"
+  },
   "process_death": {
     "checkpoint": "after_daemon_reload_before_observation",
     "child_exit_signal": "SIGKILL",
@@ -194,10 +241,13 @@ full production installation acceptance:
 - the production installed-tree scanner is not run against a provisioned
   service account, Relay binary, configuration, TLS material, or route key;
 - process interruption is proven only for the forward `daemon_reload`
-  mutation-returned/observation-not-published window and the rollback
-  receipt-published/terminal-not-published window, not every intent,
-  in-flight mutation, observation, partial publication, receipt, or terminal
-  boundary; and
+  mutation-returned/observation-not-published window, the forward
+  `enable_requested`-persisted/mutation-not-started window, and the rollback
+  receipt-published/terminal-not-published window;
+- it does not prove an in-flight `systemctl enable`, the
+  enable-mutation-returned/observation-not-published ambiguity, `start` or
+  other steps, partial journal/receipt publication, or installed-tree
+  interruption; and
 - no CLI, API, browser caller, public Relay, DNS, or physical second-device
   acceptance is enabled by this slice.
 
@@ -205,6 +255,7 @@ The separate production installation, scanner, and journal-opener baseline is
 recorded in `RELAY_LINUX_PRODUCTION_INSTALL_ACCEPTANCE.md`, and
 `RELAY_LINUX_PRODUCTION_SYSTEMD_ACCEPTANCE.md` combines both baselines with the
 packaged Relay process and controller-store reopen boundaries. Actual process
-death at the remaining intent, in-flight mutation, observation, partial
-publication, and ownership-ambiguous windows remains open. These two gates are
-not sufficient to expose the guarded operator CLI.
+death at the remaining in-flight mutation, post-mutation observation, other
+step, partial publication, and ownership-ambiguous windows remains open. These
+three gates are not sufficient to expose the guarded operator CLI or claim
+public/operator readiness.
