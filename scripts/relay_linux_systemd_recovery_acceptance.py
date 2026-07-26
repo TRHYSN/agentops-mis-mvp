@@ -816,11 +816,9 @@ def _append_enable_intent_process_death_mutation(
         descriptor = os.open(
             marker_path,
             os.O_WRONLY
-            | os.O_CREAT
             | os.O_APPEND
             | getattr(os, "O_NOFOLLOW", 0)
             | getattr(os, "O_CLOEXEC", 0),
-            0o600,
         )
         before = os.fstat(descriptor)
         if (
