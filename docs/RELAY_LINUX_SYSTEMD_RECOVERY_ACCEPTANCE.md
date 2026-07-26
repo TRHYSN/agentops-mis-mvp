@@ -11,10 +11,12 @@ It installs one temporary `agentops-mis-relay.service` whose only process is
 The workflow job is `Relay recovery on real Linux systemd` in
 `.github/workflows/ci.yml`.
 
-The same job now includes one real process-death gate at the confirmed
-`daemon_reload` boundary. It does not simulate an exception: the parent starts
-an independent execution child, waits for a fixed pipe marker, sends
-`SIGKILL`, and starts a second process to reopen and recover the same durable
+The same job now includes two real process-death gates. The first is at the
+confirmed `daemon_reload` boundary. The second is after the rollback receipt
+has been durably published but before the terminal revision is published.
+Neither gate simulates an exception: the parent starts an independent child,
+waits for a fixed pipe marker, confirms that the child is still alive, sends
+`SIGKILL`, and starts a new process to reopen and recover the same durable
 fixture journal.
 
 ## Safety Guard
@@ -71,6 +73,35 @@ cleanup reloads are outside that marker. The pipe marker is emitted by the
 first post-mutation scanner call, so receiving it proves that the production
 mutation adapter returned while observation publication remains unreachable.
 
+The rollback receipt gate begins only after an observed `verify` revision
+records `rollback_verified`, with both ownership flags false. Its checkpoint
+wrapper delegates to the production journal implementation used by the
+fixture opener. Only after its real `publish_receipt()` method returns does
+the wrapper emit
+`rollback_receipt_published` through the anonymous pipe and block. Therefore
+the receipt file publication, file sync, hard-link publication, parent
+directory sync, temporary-file unlink, and final directory sync have
+completed, while the controller's `_load_after` call and terminal revision
+publication remain unreachable.
+
+After `SIGKILL`, the parent proves that exactly one canonical receipt exists
+and that the latest revision is still the observed rollback verification. A
+new recovery process then:
+
+1. reopens the descriptor-bound journal namespace;
+2. previews exactly
+   `terminalize + publish_terminal_revision + terminal + receipt_ready`;
+3. recomputes a decision hash for that recovered state;
+4. appends exactly one terminal revision without rewriting the receipt or
+   invoking a systemd mutation;
+5. reopens the journal again and previews exactly
+   `complete + none + terminal + journal_complete`; and
+6. confirms that completion performs zero writes and leaves systemd inactive
+   and disabled.
+
+This gate does not use a timing sleep. Receipt content, paths, and raw systemd
+output are never projected into the acceptance result.
+
 ## Verification
 
 The Linux-only command is:
@@ -112,6 +143,21 @@ Expected bounded result:
     "observation_operation": "record_observation",
     "ok": true
   },
+  "receipt_process_death": {
+    "checkpoint": "after_rollback_receipt_before_terminal",
+    "child_exit_signal": "SIGKILL",
+    "completion_write_count": 0,
+    "decision_recomputed": true,
+    "final_state": "service_state_rolled_back",
+    "journal_reopened": true,
+    "ok": true,
+    "receipt_count": 1,
+    "receipt_rewritten": false,
+    "receipt_sha256_unchanged": true,
+    "systemd_mutation_performed": false,
+    "terminal_revision_appended": true,
+    "terminal_write_count": 1
+  },
   "rollback_steps": [
     "rollback_stop",
     "rollback_disable",
@@ -141,8 +187,10 @@ full production installation acceptance:
 - the production installed-tree scanner is not run against a provisioned
   service account, Relay binary, configuration, TLS material, or route key;
 - process interruption is proven only for the forward `daemon_reload`
-  mutation-returned/observation-not-published window, not every intent,
-  mutation, observation, receipt, or terminal boundary; and
+  mutation-returned/observation-not-published window and the rollback
+  receipt-published/terminal-not-published window, not every intent,
+  in-flight mutation, observation, partial publication, receipt, or terminal
+  boundary; and
 - no CLI, API, browser caller, public Relay, DNS, or physical second-device
   acceptance is enabled by this slice.
 
@@ -150,5 +198,6 @@ The separate production installation, scanner, and journal-opener baseline is
 recorded in `RELAY_LINUX_PRODUCTION_INSTALL_ACCEPTANCE.md`, and
 `RELAY_LINUX_PRODUCTION_SYSTEMD_ACCEPTANCE.md` combines both baselines with the
 packaged Relay process and controller-store reopen boundaries. Actual process
-death at the remaining mutation and receipt/terminal windows remains open.
-This one gate is not sufficient to expose the guarded operator CLI.
+death at the remaining intent, in-flight mutation, observation, partial
+publication, and ownership-ambiguous windows remains open. These two gates are
+not sufficient to expose the guarded operator CLI.
