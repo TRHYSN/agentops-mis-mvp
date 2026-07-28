@@ -156,11 +156,37 @@ the clean release receipt.
   reviewed project memory, knowledge evidence, plan, and approvals.
 - No idempotent first-class Project Delta object joining candidate artifact,
   memory, audit, Git evidence, and human review.
+- No first-class customer deliverable object for a longer structured answer.
+  The current ledger intentionally keeps only a bounded output summary, so a
+  long answer can be truncated even when the governed Run succeeds.
 - The control page is observational; task dispatch and approval remain in
   their existing MIS surfaces.
 
 ## Exact Clean-Commit Runtime Receipt
 
-Pending the implementation commit. This section must name the exact commit,
-Run, Task, Agent Plan, Plan Evidence Manifest, and bounded ledger counts without
-copying raw prompt/response or credentials.
+The real read-only Codex task ran against exact clean implementation commit
+`fbcfea1ab9dbda63d5e2bef1edbb6c8b55f8cb2f`.
+
+- Run: `run_gw_c38225e9b545` (`completed`)
+- Task: `tsk_b51e6f88762b` (`completed`)
+- Agent: `agt_codex_bridge_exact_fbcfea1`
+- Agent Plan: `plan_c558d330c8d5c4de` (`verified`)
+- Plan Evidence Manifest: `pem_1ddd66d1fe1958bb` (`verified`)
+- Worker Runtime Event: `rte_58b6abba73a3`
+- Candidate Memory:
+  `mem_gw_agt_codex_bridge_exact_fbcfea1_tsk_b51e6f88762b_a029e6bd9d13`
+- Evidence closure: one Tool Call, one Evaluation, one Artifact, one Audit
+  record, one Runtime Event, one candidate Memory, and zero approvals because
+  the task remained read-only.
+
+Runtime observation recorded four valid Codex JSONL events
+(`thread.started`, `turn.started`, `item.completed`, and `turn.completed`) with
+zero protocol errors and zero prohibited tool events. The runtime was
+ephemeral, strict-configured, read-only, and had web search, apps, browser,
+computer use, shell, plugins, goals, image generation, and multi-agent
+capabilities disabled. Raw events, raw prompt, raw response, credentials, and
+tokens were omitted.
+
+The task requested three risk/action pairs. The bounded ledger summary was
+truncated during the third pair, which is why the structured customer
+deliverable remains a known product gap rather than being presented as solved.
