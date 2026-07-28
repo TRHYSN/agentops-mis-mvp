@@ -865,7 +865,14 @@ def worker_external_write_intent(task: dict, args, capability: dict) -> bool:
         str(task.get("target_resource") or ""),
         str(task.get("external_action_type") or ""),
     ]).lower()
-    return any(keyword.lower() in combined for keyword in EXTERNAL_WRITE_INTENT_KEYWORDS)
+    for keyword in EXTERNAL_WRITE_INTENT_KEYWORDS:
+        normalized = keyword.lower()
+        if normalized.isascii():
+            if re.search(rf"(?<![a-z0-9_]){re.escape(normalized)}(?![a-z0-9_])", combined):
+                return True
+        elif normalized in combined:
+            return True
+    return False
 
 
 def codex_workspace_write_requested(args) -> bool:
