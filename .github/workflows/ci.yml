@@ -374,6 +374,7 @@ jobs:
           timeout 120s python3 scripts/live_worker_loop_demo_slice_smoke.py
           timeout 120s python3 scripts/pixel_office_template_foundation_smoke.py
           timeout 120s python3 scripts/external_connector_runtime_inventory_smoke.py
+          timeout 120s python3 scripts/codex_plugin_contract_smoke.py
           timeout 120s python3 scripts/secret_scan_smoke.py
           timeout 120s python3 scripts/license_provenance_smoke.py
           timeout 120s python3 scripts/public_claims_release_gate_smoke.py

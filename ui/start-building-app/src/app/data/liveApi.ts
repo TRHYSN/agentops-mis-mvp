@@ -1263,6 +1263,17 @@ export interface WorkerAdapterReadinessItem {
   commercial_readiness?: string;
   requires_confirm_run?: boolean;
   workspace_write_ready?: boolean;
+  client_plugin?: {
+    package_name?: string | null;
+    package_version?: string | null;
+    packaged?: boolean;
+    skill_available?: boolean;
+    marketplace_available?: boolean;
+    mcp_tools_available?: boolean;
+    connection_mode?: string;
+    raw_path_omitted?: boolean;
+    token_omitted?: boolean;
+  };
   target_resource?: string | null;
   checks?: Record<string, unknown>;
   recommended_action?: string;
@@ -9456,6 +9467,9 @@ export async function loadWorkerAdapterReadiness(): Promise<WorkerAdapterReadine
       commercial_readiness: item.commercial_readiness ? String(item.commercial_readiness) : undefined,
       requires_confirm_run: boolValue(item.requires_confirm_run),
       workspace_write_ready: boolValue(item.workspace_write_ready),
+      client_plugin: typeof item.client_plugin === "object" && item.client_plugin !== null
+        ? item.client_plugin as WorkerAdapterReadinessItem["client_plugin"]
+        : undefined,
       target_resource: item.target_resource ? String(item.target_resource) : null,
       checks: typeof item.checks === "object" && item.checks !== null ? item.checks as Record<string, unknown> : {},
       recommended_action: item.recommended_action ? String(item.recommended_action) : undefined,

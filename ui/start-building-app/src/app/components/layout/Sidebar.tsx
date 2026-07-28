@@ -5,7 +5,6 @@ import {
   Home, CheckSquare, Bot, ShieldCheck, Brain, BarChart2, Package,
   Activity, List, Wrench, Plug, Database, ClipboardList, Map,
   ChevronDown, ChevronRight, Zap, TerminalSquare, ClipboardCheck, MonitorCheck, UserRound,
-  Code2,
 } from "lucide-react";
 import { pick, usePreferences } from "../../context/PreferencesContext";
 import { useHumanAuth } from "../../context/HumanAuthContext";
@@ -42,7 +41,6 @@ const navGroups: NavGroup[] = [
     titleKey: "adminConsole",
     items: [
       { labelKey: "controlTower",  path: "/admin",                    icon: <Activity size={15} /> },
-      { labelKey: "codexConnection", path: "/admin/codex",            icon: <Code2 size={15} /> },
       { labelKey: "agentRegistry", path: "/workspace/agents",         icon: <Bot size={15} /> },
       { labelKey: "runLedger",     path: "/admin/runs",               icon: <List size={15} /> },
       { labelKey: "evaluationRoom",path: "/admin/evaluations",        icon: <BarChart2 size={15} /> },
@@ -76,7 +74,6 @@ export function Sidebar({ locked = false }: { locked?: boolean }) {
       account: "Account and access",
       templates: "Templates",
       controlTower: "Control Tower",
-      codexConnection: "Codex Connection",
       agentRegistry: "Agent Registry",
       runLedger: "Run Ledger",
       evaluationRoom: "Evaluation Room",
@@ -104,7 +101,6 @@ export function Sidebar({ locked = false }: { locked?: boolean }) {
       account: "账户与访问",
       templates: "模板",
       controlTower: "控制塔",
-      codexConnection: "Codex 接入",
       agentRegistry: "代理注册表",
       runLedger: "运行账本",
       evaluationRoom: "评估室",
@@ -127,7 +123,7 @@ export function Sidebar({ locked = false }: { locked?: boolean }) {
 
   return (
     <aside
-      className={`${locked ? "hidden lg:flex" : "flex"} flex-col w-56 shrink-0 h-full border-r`}
+      className={`${locked ? "hidden lg:flex" : "hidden md:flex"} flex-col w-56 shrink-0 h-full border-r`}
       style={{
         background: "var(--mis-surface)",
         borderColor: "var(--mis-border)",

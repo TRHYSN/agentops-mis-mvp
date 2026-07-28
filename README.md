@@ -643,7 +643,8 @@ python3 scripts/local_open_source_experiment_base_smoke.py
 
 ### Codex 作为受治理 AI 员工
 
-`/admin/codex` 是 Codex 的只读连接与证据页。它读取
+`/admin/connectors/codex` 是连接器清单中的 Codex 双向连接与证据页。旧的
+`/admin/codex` 会兼容跳转到这里。它读取
 `/api/workers/adapter-readiness`、Connector Registry、Worker Fleet 和 Run
 Ledger 的真实数据，不启动 Codex，也不展示凭据或本机 binary 路径。
 
@@ -666,7 +667,11 @@ Codex 默认运行在 ephemeral、strict、read-only 模式；workspace-write �
 人类审批、官方 Codex bundle attestation、受限路径和托管 detached
 worktree。它不会自动 commit、merge、push、deploy 或发布。
 
-当前还没有一键安装、device-code 登录或产品化 Codex MCP enrollment。
+仓库同时提供 `plugins/agentops-mis` Codex 插件。它让 Codex 通过现有
+AgentOps CLI/API 领取任务、获取受限上下文并回写 Run、Tool、Evaluation、
+Artifact 与 Audit；不会把 Token 写进插件，也不允许 Agent 自批。安装与
+验证见 `docs/CODEX_PLUGIN_INSTALL_RUNBOOK.md`。原生 AgentOps MIS MCP、
+device-code 登录和一键设备 enrollment 仍未实现。
 现状、客户接入目标和 authority boundary 见
 `docs/CODEX_MIS_PRODUCT_BRIDGE_SPEC.md`。
 
@@ -758,7 +763,8 @@ python3 scripts/agent_worker.py --adapter mock --poll-interval 5 --max-tasks 0 -
 浏览器派发：
 
 - `/workspace/agents` 现在有 “本地 Worker 循环 / Local Worker Loop” 面板。
-- `/admin/codex` 展示真实 Codex Connector/Readiness、只读 Run、审批和
+- `/admin/connectors/codex` 展示真实 Codex Connector/Readiness、双向
+  Plugin/Skill 链路、实例、只读 Run、审批和
   workspace-write attestation，不用其他 adapter 或 mock 数据替代。
 - `/workspace/agents` 现在也有 “客户任务派发 / Customer Task Dispatch” 面板：用户填写一个正常业务任务，选择 mock/Hermes/OpenClaw adapter，系统通过 `POST /api/workflows/customer-worker-task` 创建任务、执行 worker，并显示 task/run/artifact/evidence/plan-evidence 链接。
 - 它可以从页面触发一次 `mock`、`Hermes` 或 `OpenClaw` worker run。

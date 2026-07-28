@@ -109,6 +109,13 @@ def validate_readiness(payload: dict) -> None:
     require(codex_checks.get("raw_binary_path_omitted") is True, f"Codex path omission proof missing: {codex}")
     require("binary_path" not in codex_checks, f"Codex checks leaked binary path: {codex}")
     require("/Applications/ChatGPT.app" not in json.dumps(codex, ensure_ascii=False), f"Codex readiness leaked raw application path: {codex}")
+    codex_plugin = codex.get("client_plugin") or {}
+    require(codex_plugin.get("package_name") == "agentops-mis", f"Codex client plugin package missing: {codex}")
+    require(codex_plugin.get("packaged") is True, f"Codex client plugin not packaged: {codex}")
+    require(codex_plugin.get("skill_available") is True, f"Codex client skill missing: {codex}")
+    require(codex_plugin.get("marketplace_available") is True, f"Codex marketplace entry missing: {codex}")
+    require(codex_plugin.get("mcp_tools_available") is False, f"Codex MCP tools must not be claimed yet: {codex}")
+    require(codex_plugin.get("raw_path_omitted") is True, f"Codex plugin path omission proof missing: {codex}")
     codex_governance = ((codex.get("capability_manifest") or {}).get("governance") or {})
     require(codex_governance.get("requires_prepared_action_for_external_write") is True, f"Codex workspace-write governance missing: {codex}")
     codex_commands = (codex.get("remediation") or {}).get("commands") or []

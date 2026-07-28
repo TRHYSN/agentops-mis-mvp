@@ -1,0 +1,19 @@
+#!/bin/sh
+set -eu
+
+if [ -n "${AGENTOPS_BIN:-}" ] && [ -x "${AGENTOPS_BIN}" ]; then
+  exec "${AGENTOPS_BIN}" "$@"
+fi
+
+if command -v agentops >/dev/null 2>&1; then
+  exec agentops "$@"
+fi
+
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+REPO_CLI="${SCRIPT_DIR}/../../../scripts/agentops"
+if [ -x "${REPO_CLI}" ]; then
+  exec "${REPO_CLI}" "$@"
+fi
+
+printf '%s\n' '{"ok":false,"error":"agentops_cli_unavailable","token_omitted":true}' >&2
+exit 127

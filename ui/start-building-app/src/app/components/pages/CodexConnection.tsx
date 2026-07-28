@@ -2,19 +2,24 @@ import { useMemo } from "react";
 import { Link } from "react-router";
 import {
   Activity,
+  ArrowLeft,
   ArrowUpRight,
   Bot,
   CheckCircle2,
   CircleSlash2,
+  ClipboardList,
   Code2,
+  Database,
   GitBranch,
   LockKeyhole,
   Network,
+  PackageCheck,
+  Plug,
   RefreshCw,
-  Server,
   ShieldCheck,
   TerminalSquare,
 } from "lucide-react";
+import { ConnectorTopology } from "../connectors/ConnectorTopology";
 import { StatusBadge } from "../shared/StatusBadge";
 import {
   loadAgents,
@@ -110,8 +115,9 @@ export function CodexConnection() {
 
   const copy = pick(locale, {
     en: {
-      title: "Codex Connection",
-      subtitle: "A read-only control surface for Codex workers and approval-gated workspace writes.",
+      backToConnectors: "Back to connectors",
+      title: "Codex Connector",
+      subtitle: "Bidirectional control between AgentOps MIS and Codex, with tasks, approvals and evidence kept in the MIS ledger.",
       refresh: "Refresh live data",
       loading: "Reading current AgentOps MIS state...",
       unavailableBanner: "The AgentOps MIS backend is unavailable. No connection or readiness is inferred.",
@@ -127,24 +133,52 @@ export function CodexConnection() {
       noEvidence: "no evidence",
       capabilityBoundary: "Capability boundary",
       capabilityBoundaryHint: "Implemented paths and current observations are deliberately separated.",
+      inboundPath: "MIS → Codex execution path",
+      inboundPathHint: "A governed MIS task reaches a scoped Codex worker; bounded run evidence returns to the authoritative ledger.",
+      outboundPath: "Codex → MIS client path",
+      outboundPathHint: "The installed AgentOps MIS plugin gives Codex a safe CLI/API workflow for pulling work and writing evidence back.",
+      taskPlanNode: "Task + Agent Plan",
+      taskPlanNodeDetail: "Human intent, acceptance criteria and immutable plan",
+      connectorNode: "Codex connector",
+      connectorNodeDetail: "Trust policy and adapter boundary",
+      workerInstanceNode: "Worker instance",
+      workerInstanceNodeDetail: "Scoped identity, heartbeat and runtime lane",
+      codexRuntimeNode: "Codex runtime",
+      codexRuntimeNodeDetail: "Real local or enrolled execution runtime",
+      ledgerNode: "Run + evidence ledger",
+      ledgerNodeDetail: "Tool, evaluation, artifact and audit readback",
+      pluginNode: "MIS plugin / Skill",
+      pluginNodeDetail: "Codex-side governed workflow package",
+      cliApiNode: "AgentOps CLI / API",
+      cliApiNodeDetail: "Authenticated bounded context and writeback",
+      taskContextNode: "Task context",
+      taskContextNodeDetail: "Pull, claim and bounded knowledge packet",
+      approvalNode: "Approval wall",
+      approvalNodeDetail: "Prepared action must be approved before sensitive writes",
+      reviewNode: "Ledger + review",
+      reviewNodeDetail: "Run evidence remains visible to human operators",
       readOnlyWorker: "Read-only Codex worker",
       readOnlyWorkerBody: "Can pull governed tasks, run Codex without workspace mutation, and write bounded ledger evidence.",
       workspaceWrite: "Governed workspace-write",
       workspaceWriteBody: "Uses an approved Agent Plan and exact PreparedAction in a managed detached worktree. Commit, merge, push and deploy are outside this authorization.",
-      mcp: "Codex MCP connection",
-      mcpBody: "No product MCP enrollment or browser control path is implemented in this version.",
-      oneClickInstall: "One-click Codex install",
-      oneClickInstallBody: "No installer or automatic Codex enrollment is implemented. The current operator path is repository-local CLI.",
+      plugin: "AgentOps MIS plugin / Skill",
+      pluginBody: "A Codex-installable package now drives the existing AgentOps CLI/API workflow. It never embeds credentials or lets an agent approve itself.",
+      mcp: "Native MCP tools",
+      mcpBody: "Native AgentOps MIS MCP tools are not implemented yet; the product plugin uses the real CLI/API contract.",
       implemented: "Implemented",
       approvalGated: "Approval-gated",
       notImplemented: "Not implemented",
       executionEvidence: "execution evidence",
       noExecutionEvidence: "No execution evidence observed",
       cliOnly: "CLI only",
+      pluginPackaged: "Plugin packaged",
+      pluginMissing: "Plugin unavailable",
+      mcpPending: "MCP pending",
       observedState: "Observed Codex state",
       observedStateHint: "Rows come from the current Agent, Worker Fleet and Run Ledger APIs.",
       noCodexWorkers: "No Codex agent or fleet lane was returned.",
       worker: "Worker",
+      latestRun: "Latest run",
       source: "Source",
       runtime: "Runtime",
       lastSeen: "Last seen",
@@ -200,8 +234,9 @@ export function CodexConnection() {
       connectorRegistry: "Connector registry",
     },
     zh: {
-      title: "Codex 接入",
-      subtitle: "用于查看 Codex Worker 与审批式 workspace-write 的只读控制面板。",
+      backToConnectors: "返回连接器",
+      title: "Codex 连接器",
+      subtitle: "AgentOps MIS 与 Codex 的双向控制入口；任务、审批与运行证据始终回到 MIS 权威账本。",
       refresh: "刷新真实数据",
       loading: "正在读取当前 AgentOps MIS 状态...",
       unavailableBanner: "AgentOps MIS 后端不可用。页面不会据此推断已连接或已就绪。",
@@ -217,24 +252,52 @@ export function CodexConnection() {
       noEvidence: "无证据",
       capabilityBoundary: "能力边界",
       capabilityBoundaryHint: "“代码已实现”和“当前实际观测”在这里严格分开。",
+      inboundPath: "MIS → Codex 执行链路",
+      inboundPathHint: "MIS 受治理任务进入受限 Codex Worker；运行证据沿反向链路回到权威账本。",
+      outboundPath: "Codex → MIS 客户端链路",
+      outboundPathHint: "安装 AgentOps MIS 插件后，Codex 可通过安全 CLI/API 流程领取任务并回写证据。",
+      taskPlanNode: "任务 + Agent Plan",
+      taskPlanNodeDetail: "人的目标、验收标准与不可变计划",
+      connectorNode: "Codex 连接器",
+      connectorNodeDetail: "信任策略与适配器边界",
+      workerInstanceNode: "Worker 实例",
+      workerInstanceNodeDetail: "受限身份、心跳与运行 lane",
+      codexRuntimeNode: "Codex 运行时",
+      codexRuntimeNodeDetail: "本机或已注册远程真实运行时",
+      ledgerNode: "Run + 证据账本",
+      ledgerNodeDetail: "工具、评估、产物与审计回读",
+      pluginNode: "MIS 插件 / Skill",
+      pluginNodeDetail: "Codex 侧受治理工作流包",
+      cliApiNode: "AgentOps CLI / API",
+      cliApiNodeDetail: "鉴权后的受限上下文与回写通道",
+      taskContextNode: "任务上下文",
+      taskContextNodeDetail: "拉取、领取和受限知识包",
+      approvalNode: "审批墙",
+      approvalNodeDetail: "敏感写入前必须批准精确 prepared action",
+      reviewNode: "账本 + 人工复核",
+      reviewNodeDetail: "Run 证据持续对操作员可见",
       readOnlyWorker: "只读 Codex Worker",
       readOnlyWorkerBody: "可以领取受治理任务、以只读方式运行 Codex，并向 MIS 写入受限账本证据。",
       workspaceWrite: "受审批 workspace-write",
       workspaceWriteBody: "必须绑定已批准 Agent Plan 和精确 PreparedAction，只能在托管的 detached worktree 内写入。Commit、merge、push 和 deploy 不在本次授权内。",
-      mcp: "Codex MCP 接入",
-      mcpBody: "当前版本没有产品化的 MCP enrollment 或浏览器控制路径。",
-      oneClickInstall: "一键安装 Codex",
-      oneClickInstallBody: "当前没有安装器或自动 enrollment；操作入口仍是仓库内 CLI。",
+      plugin: "AgentOps MIS 插件 / Skill",
+      pluginBody: "现已提供可安装到 Codex 的产品插件，并复用真实 AgentOps CLI/API 流程；插件不内置凭据，也不允许 Agent 自批。",
+      mcp: "原生 MCP 工具",
+      mcpBody: "AgentOps MIS 原生 MCP 工具尚未实现；当前产品插件走真实 CLI/API 合同。",
       implemented: "已实现",
       approvalGated: "受审批控制",
       notImplemented: "未实现",
       executionEvidence: "条执行证据",
       noExecutionEvidence: "未观测到执行证据",
       cliOnly: "仅 CLI",
+      pluginPackaged: "插件已打包",
+      pluginMissing: "插件不可用",
+      mcpPending: "MCP 待实现",
       observedState: "Codex 实际状态",
       observedStateHint: "数据来自当前 Agents、Worker Fleet 与 Run Ledger API。",
       noCodexWorkers: "当前 API 没有返回 Codex Agent 或 Fleet lane。",
       worker: "Worker",
+      latestRun: "最近 Run",
       source: "来源",
       runtime: "运行时",
       lastSeen: "最近观测",
@@ -384,24 +447,24 @@ export function CodexConnection() {
         : copy.noExecutionEvidence,
     },
     {
+      id: "plugin",
+      icon: <PackageCheck size={17} />,
+      title: copy.plugin,
+      body: copy.pluginBody,
+      contractStatus: derived.codexReadiness?.client_plugin?.packaged ? "implemented" : "unavailable",
+      contractLabel: derived.codexReadiness?.client_plugin?.packaged ? copy.implemented : copy.notImplemented,
+      evidenceStatus: derived.codexReadiness?.client_plugin?.skill_available ? "pass" : "unavailable",
+      evidenceLabel: derived.codexReadiness?.client_plugin?.skill_available ? copy.pluginPackaged : copy.pluginMissing,
+    },
+    {
       id: "mcp",
       icon: <Network size={17} />,
       title: copy.mcp,
       body: copy.mcpBody,
       contractStatus: "unavailable",
       contractLabel: copy.notImplemented,
-      evidenceStatus: "unavailable",
-      evidenceLabel: copy.noEvidence,
-    },
-    {
-      id: "installer",
-      icon: <Server size={17} />,
-      title: copy.oneClickInstall,
-      body: copy.oneClickInstallBody,
-      contractStatus: "unavailable",
-      contractLabel: copy.notImplemented,
-      evidenceStatus: "unknown",
-      evidenceLabel: copy.cliOnly,
+      evidenceStatus: "planned",
+      evidenceLabel: copy.mcpPending,
     },
   ];
   const codexChecks = derived.codexReadiness?.checks || {};
@@ -423,11 +486,117 @@ export function CodexConnection() {
     { label: copy.confirmRun, value: derived.codexReadiness?.requires_confirm_run },
     { label: copy.rawPathOmitted, value: codexChecks.raw_binary_path_omitted },
   ];
+  const connector = derived.connectors[0];
+  const primaryWorker = derived.workers[0];
+  const primaryLane = derived.fleetLanes[0];
+  const latestRun = derived.runs[0];
+  const clientPlugin = derived.codexReadiness?.client_plugin;
+  const runtimeVersion = typeof codexChecks.version_summary === "string" && codexChecks.version_summary
+    ? codexChecks.version_summary
+    : "codex";
+  const inboundNodes = [
+    {
+      id: "task-plan",
+      label: copy.taskPlanNode,
+      value: latestRun?.task_id ? compactId(latestRun.task_id) : "governed task",
+      detail: copy.taskPlanNodeDetail,
+      status: latestRun ? "ready" : "unknown",
+      icon: <ClipboardList size={15} />,
+    },
+    {
+      id: "connector",
+      label: copy.connectorNode,
+      value: connector?.connector_id || derived.codexReadiness?.connector_id || "rtc_codex_local",
+      detail: copy.connectorNodeDetail,
+      status: connector?.status || derived.codexReadiness?.readiness || "unavailable",
+      icon: <Plug size={15} />,
+    },
+    {
+      id: "worker",
+      label: copy.workerInstanceNode,
+      value: primaryWorker?.name || primaryLane?.agent_name || primaryLane?.lane_id || "—",
+      detail: copy.workerInstanceNodeDetail,
+      status: primaryLane?.status || primaryWorker?.status || "unavailable",
+      icon: <Bot size={15} />,
+      to: "/workspace/workers",
+    },
+    {
+      id: "runtime",
+      label: copy.codexRuntimeNode,
+      value: runtimeVersion,
+      detail: copy.codexRuntimeNodeDetail,
+      status: codexChecks.binary_executable === true ? "pass" : derived.codexReadiness?.readiness || "unavailable",
+      icon: <TerminalSquare size={15} />,
+    },
+    {
+      id: "ledger",
+      label: copy.ledgerNode,
+      value: latestRun ? compactId(latestRun.run_id) : "—",
+      detail: copy.ledgerNodeDetail,
+      status: latestRun?.status || "unknown",
+      icon: <Database size={15} />,
+      to: latestRun ? `/admin/runs/${encodeURIComponent(latestRun.run_id)}` : "/admin/runs",
+    },
+  ];
+  const outboundNodes = [
+    {
+      id: "plugin",
+      label: copy.pluginNode,
+      value: clientPlugin?.package_name
+        ? `${clientPlugin.package_name}@${clientPlugin.package_version || "0.1.0"}`
+        : "agentops-mis",
+      detail: copy.pluginNodeDetail,
+      status: clientPlugin?.skill_available ? "pass" : "unavailable",
+      icon: <PackageCheck size={15} />,
+    },
+    {
+      id: "cli-api",
+      label: copy.cliApiNode,
+      value: clientPlugin?.connection_mode || "agentops_cli_api",
+      detail: copy.cliApiNodeDetail,
+      status: clientPlugin?.packaged ? "ready" : "unknown",
+      icon: <Code2 size={15} />,
+    },
+    {
+      id: "task-context",
+      label: copy.taskContextNode,
+      value: latestRun?.task_id ? compactId(latestRun.task_id) : "bounded packet",
+      detail: copy.taskContextNodeDetail,
+      status: clientPlugin?.skill_available ? "ready" : "unknown",
+      icon: <ClipboardList size={15} />,
+    },
+    {
+      id: "approval",
+      label: copy.approvalNode,
+      value: derived.pendingApprovals.length ? String(derived.pendingApprovals.length) : "0",
+      detail: copy.approvalNodeDetail,
+      status: derived.pendingApprovals.length ? "approval_required" : "pass",
+      icon: <ShieldCheck size={15} />,
+      to: "/workspace/approvals",
+    },
+    {
+      id: "review",
+      label: copy.reviewNode,
+      value: latestRun ? compactId(latestRun.run_id) : "—",
+      detail: copy.reviewNodeDetail,
+      status: latestRun ? "ready" : "unknown",
+      icon: <Database size={15} />,
+      to: "/admin/runs",
+    },
+  ];
 
   return (
     <div className="w-full space-y-5">
       <header className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
         <div className="min-w-0">
+          <Link
+            to="/admin/connectors"
+            className="mb-2 inline-flex items-center gap-1 text-[11px]"
+            style={{ color: "var(--mis-muted)" }}
+          >
+            <ArrowLeft size={12} />
+            {copy.backToConnectors}
+          </Link>
           <div className="flex flex-wrap items-center gap-2">
             <h1 className="text-lg font-semibold" style={{ color: "var(--mis-text)" }}>{copy.title}</h1>
             <StatusBadge status={overallState} />
@@ -480,6 +649,23 @@ export function CodexConnection() {
           {overallState === "unavailable" ? copy.unavailableBanner : copy.degradedBanner}
         </div>
       )}
+
+      <div
+        data-testid="codex-bidirectional-topology"
+        className="space-y-5 border-y py-4"
+        style={{ borderColor: "var(--mis-border)" }}
+      >
+        <ConnectorTopology
+          label={copy.inboundPath}
+          description={copy.inboundPathHint}
+          nodes={inboundNodes}
+        />
+        <ConnectorTopology
+          label={copy.outboundPath}
+          description={copy.outboundPathHint}
+          nodes={outboundNodes}
+        />
+      </div>
 
       <section className="grid grid-cols-2 gap-2 lg:grid-cols-4">
         {[
@@ -538,17 +724,27 @@ export function CodexConnection() {
             <h2 className="text-sm font-semibold" style={{ color: "var(--mis-text)" }}>{copy.observedState}</h2>
             <p className="mt-0.5 text-[11px]" style={{ color: "var(--mis-muted)" }}>{copy.observedStateHint}</p>
           </div>
-          <div className="overflow-hidden rounded" style={{ border: "1px solid var(--mis-border)" }}>
+          <div className="overflow-x-auto rounded" style={{ border: "1px solid var(--mis-border)" }}>
             {derived.workers.length === 0 && derived.fleetLanes.length === 0 ? (
               <div className="p-4 text-xs" style={{ color: "var(--mis-muted)", background: "var(--mis-surface)" }}>
                 {copy.noCodexWorkers}
               </div>
             ) : (
-              <div className="divide-y" style={{ background: "var(--mis-surface)", borderColor: "var(--mis-border)" }}>
+              <div className="min-w-[660px] divide-y" style={{ background: "var(--mis-surface)", borderColor: "var(--mis-border)" }}>
+                <div
+                  className="grid grid-cols-[minmax(0,1.25fr)_90px_minmax(120px,0.9fr)_minmax(120px,0.8fr)] gap-3 px-3 py-2 text-[10px] font-medium"
+                  style={{ color: "var(--mis-muted)" }}
+                >
+                  <span>{copy.worker}</span>
+                  <span>{copy.status}</span>
+                  <span className="text-right">{copy.runtime}</span>
+                  <span className="text-right">{copy.latestRun}</span>
+                </div>
                 {derived.workers.map((worker) => {
                   const lane = derived.fleetLanes.find((item) => item.agent_id === worker.agent_id);
+                  const workerRun = derived.runs.find((run) => run.agent_id === worker.agent_id);
                   return (
-                    <div key={worker.agent_id} className="grid grid-cols-[minmax(0,1.4fr)_minmax(90px,0.6fr)_minmax(110px,0.8fr)] gap-3 p-3 text-[11px]">
+                    <div key={worker.agent_id} className="grid grid-cols-[minmax(0,1.25fr)_90px_minmax(120px,0.9fr)_minmax(120px,0.8fr)] items-center gap-3 p-3 text-[11px]">
                       <div className="min-w-0">
                         <div className="truncate font-semibold" style={{ color: "var(--mis-text)" }}>{worker.name}</div>
                         <div className="truncate font-mono text-[10px]" style={{ color: "var(--mis-muted)" }}>{worker.agent_id}</div>
@@ -562,21 +758,57 @@ export function CodexConnection() {
                           {lane ? formatDate(lane.last_seen_at, locale) : "/api/agents"}
                         </div>
                       </div>
+                      <div className="min-w-0 text-right">
+                        {workerRun ? (
+                          <Link
+                            to={`/admin/runs/${encodeURIComponent(workerRun.run_id)}`}
+                            className="inline-flex max-w-full items-center gap-1 font-mono text-[10px]"
+                            style={{ color: "var(--mis-cyan)" }}
+                            title={workerRun.run_id}
+                          >
+                            <span className="truncate">{compactId(workerRun.run_id)}</span>
+                            <ArrowUpRight size={10} className="shrink-0" />
+                          </Link>
+                        ) : (
+                          <span style={{ color: "var(--mis-muted)" }}>—</span>
+                        )}
+                      </div>
                     </div>
                   );
                 })}
                 {derived.fleetLanes
                   .filter((lane) => !derived.workers.some((worker) => worker.agent_id === lane.agent_id))
-                  .map((lane) => (
-                    <div key={lane.lane_id} className="grid grid-cols-[minmax(0,1.4fr)_minmax(90px,0.6fr)_minmax(110px,0.8fr)] gap-3 p-3 text-[11px]">
-                      <div className="min-w-0">
-                        <div className="truncate font-semibold" style={{ color: "var(--mis-text)" }}>{lane.agent_name || lane.agent_id || lane.lane_id}</div>
-                        <div className="truncate font-mono text-[10px]" style={{ color: "var(--mis-muted)" }}>{lane.lane_type}</div>
+                  .map((lane) => {
+                    const laneRun = derived.runs.find((run) => run.agent_id === lane.agent_id);
+                    return (
+                      <div key={lane.lane_id} className="grid grid-cols-[minmax(0,1.25fr)_90px_minmax(120px,0.9fr)_minmax(120px,0.8fr)] items-center gap-3 p-3 text-[11px]">
+                        <div className="min-w-0">
+                          <div className="truncate font-semibold" style={{ color: "var(--mis-text)" }}>{lane.agent_name || lane.agent_id || lane.lane_id}</div>
+                          <div className="truncate font-mono text-[10px]" style={{ color: "var(--mis-muted)" }}>{lane.lane_type}</div>
+                        </div>
+                        <div><StatusBadge status={lane.status} /></div>
+                        <div className="min-w-0 text-right" style={{ color: "var(--mis-dim)" }}>
+                          <div className="truncate">{lane.runtime_type || lane.adapter || "codex"}</div>
+                          <div className="truncate text-[10px]" style={{ color: "var(--mis-muted)" }}>{formatDate(lane.last_seen_at, locale)}</div>
+                        </div>
+                        <div className="min-w-0 text-right">
+                          {laneRun ? (
+                            <Link
+                              to={`/admin/runs/${encodeURIComponent(laneRun.run_id)}`}
+                              className="inline-flex max-w-full items-center gap-1 font-mono text-[10px]"
+                              style={{ color: "var(--mis-cyan)" }}
+                              title={laneRun.run_id}
+                            >
+                              <span className="truncate">{compactId(laneRun.run_id)}</span>
+                              <ArrowUpRight size={10} className="shrink-0" />
+                            </Link>
+                          ) : (
+                            <span style={{ color: "var(--mis-muted)" }}>—</span>
+                          )}
+                        </div>
                       </div>
-                      <div><StatusBadge status={lane.status} /></div>
-                      <div className="truncate text-right" style={{ color: "var(--mis-dim)" }}>{formatDate(lane.last_seen_at, locale)}</div>
-                    </div>
-                  ))}
+                    );
+                  })}
               </div>
             )}
           </div>
