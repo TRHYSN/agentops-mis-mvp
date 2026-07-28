@@ -5,6 +5,7 @@ import { PixelOffice } from "./components/pages/PixelOffice";
 import { MyTasks } from "./components/pages/MyTasks";
 import { AIEmployees } from "./components/pages/AIEmployees";
 import { WorkerConsole } from "./components/pages/WorkerConsole";
+import { CodexConnection } from "./components/pages/CodexConnection";
 import { CustomerDispatchDesk } from "./components/pages/CustomerDispatchDesk";
 import { ApprovalsInbox } from "./components/pages/ApprovalsInbox";
 import { MemoryLibrary } from "./components/pages/MemoryLibrary";
@@ -46,6 +47,7 @@ export default function App() {
               <Route path="/workspace/account" element={<AccountSecurity />} />
               <Route path="/workspace/customer-projects/:projectId/report" element={<CustomerProjectReport />} />
               <Route path="/admin" element={<ControlTower />} />
+              <Route path="/admin/codex" element={<CodexConnection />} />
               <Route path="/admin/evaluations" element={<EvaluationRoom />} />
               <Route path="/admin/agents/:id" element={<AgentDetail />} />
               <Route path="/admin/tasks/:id" element={<TaskDetail />} />

@@ -1239,18 +1239,19 @@ export interface WorkerFleetPayload {
 }
 
 export type WorkerAdapterName = "mock" | "hermes" | "openclaw";
+export type WorkerReadinessAdapterName = WorkerAdapterName | "codex";
 
 export interface WorkerAdapterReadinessSummary {
-  ready_adapters?: WorkerAdapterName[];
-  live_ready_adapters?: WorkerAdapterName[];
-  review_required_adapters?: WorkerAdapterName[];
-  blocked_adapters?: WorkerAdapterName[];
-  unavailable_adapters?: WorkerAdapterName[];
-  recommended_adapter?: WorkerAdapterName;
+  ready_adapters?: WorkerReadinessAdapterName[];
+  live_ready_adapters?: WorkerReadinessAdapterName[];
+  review_required_adapters?: WorkerReadinessAdapterName[];
+  blocked_adapters?: WorkerReadinessAdapterName[];
+  unavailable_adapters?: WorkerReadinessAdapterName[];
+  recommended_adapter?: WorkerReadinessAdapterName;
 }
 
 export interface WorkerAdapterReadinessItem {
-  adapter: WorkerAdapterName;
+  adapter: WorkerReadinessAdapterName;
   ok: boolean;
   readiness: "ready" | "review_required" | "blocked" | "unavailable" | string;
   connector_id?: string | null;
@@ -1261,6 +1262,7 @@ export interface WorkerAdapterReadinessItem {
   risk_floor?: string;
   commercial_readiness?: string;
   requires_confirm_run?: boolean;
+  workspace_write_ready?: boolean;
   target_resource?: string | null;
   checks?: Record<string, unknown>;
   recommended_action?: string;
@@ -1291,7 +1293,7 @@ export interface WorkerAdapterReadinessPayload {
   provider: string;
   status: "ready" | "degraded" | "blocked" | string;
   summary: WorkerAdapterReadinessSummary;
-  adapters: Record<WorkerAdapterName, WorkerAdapterReadinessItem>;
+  adapters: Record<WorkerReadinessAdapterName, WorkerAdapterReadinessItem>;
   contract?: string;
   live_execution_performed: boolean;
   token_omitted?: boolean;
@@ -9436,7 +9438,7 @@ export async function loadOperatorHealth(limit = 12, loopId = ""): Promise<Opera
 export async function loadWorkerAdapterReadiness(): Promise<WorkerAdapterReadinessPayload> {
   const raw = await apiJson<Record<string, unknown>>("/workers/adapter-readiness");
   const adaptersRaw = typeof raw.adapters === "object" && raw.adapters !== null ? raw.adapters as Record<string, unknown> : {};
-  const normalizeAdapter = (name: WorkerAdapterName): WorkerAdapterReadinessItem => {
+  const normalizeAdapter = (name: WorkerReadinessAdapterName): WorkerAdapterReadinessItem => {
     const item = typeof adaptersRaw[name] === "object" && adaptersRaw[name] !== null ? adaptersRaw[name] as Record<string, unknown> : {};
     const remediationRaw = typeof item.remediation === "object" && item.remediation !== null ? item.remediation as Record<string, unknown> : {};
     const remediationSafetyRaw = typeof remediationRaw.safety === "object" && remediationRaw.safety !== null ? remediationRaw.safety as Record<string, unknown> : {};
@@ -9453,6 +9455,7 @@ export async function loadWorkerAdapterReadiness(): Promise<WorkerAdapterReadine
       risk_floor: item.risk_floor ? String(item.risk_floor) : undefined,
       commercial_readiness: item.commercial_readiness ? String(item.commercial_readiness) : undefined,
       requires_confirm_run: boolValue(item.requires_confirm_run),
+      workspace_write_ready: boolValue(item.workspace_write_ready),
       target_resource: item.target_resource ? String(item.target_resource) : null,
       checks: typeof item.checks === "object" && item.checks !== null ? item.checks as Record<string, unknown> : {},
       recommended_action: item.recommended_action ? String(item.recommended_action) : undefined,
@@ -9485,6 +9488,7 @@ export async function loadWorkerAdapterReadiness(): Promise<WorkerAdapterReadine
     summary: typeof raw.summary === "object" && raw.summary !== null ? raw.summary as WorkerAdapterReadinessSummary : {},
     adapters: {
       mock: normalizeAdapter("mock"),
+      codex: normalizeAdapter("codex"),
       hermes: normalizeAdapter("hermes"),
       openclaw: normalizeAdapter("openclaw"),
     },

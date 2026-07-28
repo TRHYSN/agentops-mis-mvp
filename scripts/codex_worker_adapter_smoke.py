@@ -19,6 +19,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from agentops_mis_cli.codex_runtime import codex_preflight, execute_codex_read_only
+from agentops_mis_cli.worker import adapter_capability_profile, worker_external_write_intent
 from scripts.remote_agent_token_worker_smoke import runtime_attestation
 
 
@@ -128,6 +129,32 @@ def require(condition: bool, message: str) -> None:
 
 
 def main() -> int:
+    codex_args = SimpleNamespace(adapter="codex", confirm_run=True)
+    codex_capability = adapter_capability_profile("codex")
+    require(
+        worker_external_write_intent(
+            {
+                "title": "Read-only review",
+                "description": "Do not modify files or use the network.",
+                "acceptance_criteria": "Return a concise analysis.",
+            },
+            codex_args,
+            codex_capability,
+        ) is False,
+        "The Dify keyword must not match the word 'modify'.",
+    )
+    require(
+        worker_external_write_intent(
+            {
+                "title": "Publish knowledge base",
+                "description": "Upload the approved content to Dify.",
+                "acceptance_criteria": "The external dataset is updated.",
+            },
+            codex_args,
+            codex_capability,
+        ) is True,
+        "Explicit Dify upload intent must require a prepared action.",
+    )
     with tempfile.TemporaryDirectory(prefix="agentops-codex-worker-") as tmp:
         temp = Path(tmp)
         fake_bin = temp / "codex-fixture"

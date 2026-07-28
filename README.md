@@ -641,6 +641,35 @@ python3 scripts/local_open_source_experiment_base_smoke.py
 
 `agentops-worker` 是可安装的 worker daemon 命令。它通过 Agent Gateway API 拉取普通 MIS 任务，认领后调用 adapter，并把 run/tool/eval/artifact/audit、`agent_plan` 和 `plan_evidence_manifest` 写回 MIS。`scripts/agent_worker.py` 仍保留为 repo-local 兼容 wrapper，供本地 UI/smoke 继续使用。
 
+### Codex 作为受治理 AI 员工
+
+`/admin/codex` 是 Codex 的只读连接与证据页。它读取
+`/api/workers/adapter-readiness`、Connector Registry、Worker Fleet 和 Run
+Ledger 的真实数据，不启动 Codex，也不展示凭据或本机 binary 路径。
+
+本机 loopback 首先做只读预检，再显式确认一次任务：
+
+```bash
+agentops worker preflight --adapter codex
+agentops workflow run-task \
+  --adapter codex \
+  --confirm-run \
+  --worker-agent-id <codex_agent_id> \
+  --title "<task title>" \
+  --description "<task description>"
+```
+
+本机 loopback 不应添加 `--use-session`。远程或另一台电脑上的 Codex
+必须先完成 scoped enrollment，再用 `--use-session` 换取短期 session。
+Codex 默认运行在 ephemeral、strict、read-only 模式；workspace-write 是
+另一条高风险路径，必须经过已验证 Agent Plan、精确 PreparedAction、
+人类审批、官方 Codex bundle attestation、受限路径和托管 detached
+worktree。它不会自动 commit、merge、push、deploy 或发布。
+
+当前还没有一键安装、device-code 登录或产品化 Codex MCP enrollment。
+现状、客户接入目标和 authority boundary 见
+`docs/CODEX_MIS_PRODUCT_BRIDGE_SPEC.md`。
+
 Hermes/OpenClaw 监督 loop 也可以作为 MIS workflow 运行：
 
 ```bash
@@ -729,6 +758,8 @@ python3 scripts/agent_worker.py --adapter mock --poll-interval 5 --max-tasks 0 -
 浏览器派发：
 
 - `/workspace/agents` 现在有 “本地 Worker 循环 / Local Worker Loop” 面板。
+- `/admin/codex` 展示真实 Codex Connector/Readiness、只读 Run、审批和
+  workspace-write attestation，不用其他 adapter 或 mock 数据替代。
 - `/workspace/agents` 现在也有 “客户任务派发 / Customer Task Dispatch” 面板：用户填写一个正常业务任务，选择 mock/Hermes/OpenClaw adapter，系统通过 `POST /api/workflows/customer-worker-task` 创建任务、执行 worker，并显示 task/run/artifact/evidence/plan-evidence 链接。
 - 它可以从页面触发一次 `mock`、`Hermes` 或 `OpenClaw` worker run。
 - 它也可以启动/停止本地 mock / Hermes / OpenClaw daemon，让 worker 持续拉取普通 MIS 任务。

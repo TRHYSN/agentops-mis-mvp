@@ -175,6 +175,7 @@ from agentops_mis_core.workflow_jobs import (
 from agentops_mis_cli.advance_loop_policy import advance_loop_command_policy, advance_loop_policy_summary
 from agentops_mis_cli import host as private_host_cli
 from agentops_mis_cli import relay_control, relay_restart
+from agentops_mis_cli.codex_runtime import codex_binary_attestation
 from agentops_mis_cli.redaction import redact_full_text as shared_redact_full_text
 from agentops_mis_cli.redaction import redact_text as shared_redact_text
 from agentops_mis_runtime.capabilities import (
@@ -10339,10 +10340,10 @@ def agent_gateway_run_start_loop_supervision_readback(
     ]
     blockers = [str(entry) for entry in (item.get("blockers") or []) if entry]
     if runtime_type == "codex":
-        status = "ready_to_confirm" if summary.get("current_code_ok") is True and not any(str((row or {}).get("status")) == "blocked" for row in items if isinstance(row, dict)) else str(supervision.get("status") or "attention")
+        status = "ready_to_confirm" if summary.get("current_code_ok") is True else "blocked"
         can_confirm = summary.get("current_code_ok") is True
         server_shell = False
-        ok = bool(can_confirm and status not in {"blocked", "attention", "preview_only", "unavailable"})
+        ok = bool(can_confirm)
     else:
         status = str(item.get("status") or supervision.get("status") or "unavailable")
         can_confirm = item.get("can_confirm_bounded_loop") is True
@@ -17793,6 +17794,7 @@ def worker_adapter_readiness(conn, refresh: bool = True) -> dict:
         refresh_runtime_connectors(conn)
     hermes = hermes_status()
     openclaw = openclaw_status()
+    codex_attestation = codex_binary_attestation(os.environ.get("CODEX_BIN", ""), timeout=5)
 
     def worker_connection_policy() -> dict:
         adapter_max_attempts = max(int(os.environ.get("AGENTOPS_ADAPTER_MAX_ATTEMPTS", "1") or 1), 1)
@@ -17846,7 +17848,7 @@ def worker_adapter_readiness(conn, refresh: bool = True) -> dict:
             "operator_checks": {
                 "readiness": "agentops worker readiness",
                 "status": "agentops worker status",
-                "preflight": "agentops worker preflight --adapter <mock|hermes|openclaw>",
+                "preflight": "agentops worker preflight --adapter <mock|codex|hermes|openclaw>",
                 "session_refresh_smoke": "python3 scripts/worker_session_refresh_smoke.py --base-url http://127.0.0.1:8787",
                 "adapter_retry_smoke": "python3 scripts/worker_adapter_retry_smoke.py --base-url http://127.0.0.1:8787",
             },
@@ -17870,6 +17872,22 @@ def worker_adapter_readiness(conn, refresh: bool = True) -> dict:
                 {"phase": "verify", "command": "agentops worker status", "mutating": False, "confirm_required": False},
             ]
             missing = []
+        elif adapter == "codex":
+            commands = [
+                {"phase": "inspect", "command": "agentops worker readiness", "mutating": False, "confirm_required": False},
+                {"phase": "preflight", "command": preflight, "mutating": False, "confirm_required": False},
+                {"phase": "run_read_only", "command": "agentops workflow run-task --adapter codex --confirm-run --worker-agent-id <codex_agent_id> --title '<task title>' --description '<task description>'", "mutating": True, "confirm_required": True},
+                {"phase": "run_remote_scoped", "command": "agentops workflow run-task --adapter codex --confirm-run --use-session --worker-agent-id <codex_agent_id> --title '<task title>' --description '<task description>'", "mutating": True, "confirm_required": True},
+                {"phase": "prepare_workspace_write", "command": "agentops workflow codex-workspace-write --title '<approved change>' --description '<bounded task>' --source-repo <clean_repo> --allow-path <path> --confirm-run", "mutating": True, "confirm_required": True},
+                {"phase": "verify", "command": "agentops worker status", "mutating": False, "confirm_required": False},
+            ]
+            missing = [
+                label for label, ok in [
+                    ("codex_binary_executable", checks.get("binary_executable")),
+                    ("codex_version", checks.get("version_ok")),
+                ]
+                if ok is False
+            ]
         elif adapter == "hermes":
             commands = [
                 {"phase": "inspect", "command": "agentops worker readiness", "mutating": False, "confirm_required": False},
@@ -17921,7 +17939,7 @@ def worker_adapter_readiness(conn, refresh: bool = True) -> dict:
             "last_error": redact_text(last_error, 240) if last_error else None,
             "target_resource": redact_text(target_resource, 240) if target_resource else None,
             "commands": commands,
-            "contract": "copy-only local remediation guidance; commands are not executed by readiness and live Hermes/OpenClaw paths still require --confirm-run and prepared-action gates",
+            "contract": "copy-only local remediation guidance; commands are not executed by readiness and live Codex/Hermes/OpenClaw paths still require --confirm-run and prepared-action gates",
             "safety": {
                 "read_only": True,
                 "ledger_mutated": False,
@@ -17982,6 +18000,45 @@ def worker_adapter_readiness(conn, refresh: bool = True) -> dict:
         "checks": mock_checks,
         "recommended_action": mock_recommended_action,
         "remediation": adapter_remediation("mock", mock_readiness, mock_checks, mock_recommended_action, "local://agentops/mock-worker"),
+        "token_omitted": True,
+    }
+
+    codex_trust = trust_for("codex")
+    codex_available = bool(codex_attestation.get("binary_executable")) and bool(codex_attestation.get("version_ok"))
+    codex_readiness, codex_ok = readiness_from_checks(codex_available, codex_trust)
+    codex_checks = {
+        "binary_executable": bool(codex_attestation.get("binary_executable")),
+        "version_ok": bool(codex_attestation.get("version_ok")),
+        "version_summary": (
+            redact_text(codex_attestation.get("version_summary"), 160)
+            if codex_attestation.get("version_ok")
+            else "version_check_failed"
+        ),
+        "official_chatgpt_bundle": bool(codex_attestation.get("official_chatgpt_bundle")),
+        "workspace_write_attested": bool(codex_attestation.get("attested")),
+        "raw_binary_path_omitted": True,
+        "live_execution_performed": False,
+    }
+    codex_recommended_action = "agentops worker preflight --adapter codex" if not codex_available else "agentops workflow run-task --adapter codex --confirm-run"
+    codex_last_error = None if codex_available else "Codex CLI is unavailable or did not pass its version check."
+    adapters["codex"] = {
+        "adapter": "codex",
+        "ok": codex_ok,
+        "readiness": codex_readiness,
+        "connector_id": codex_trust.get("connector_id"),
+        "trust_status": codex_trust.get("trust_status"),
+        "observation_level": codex_trust.get("observation_level"),
+        "capability_policy_hash": codex_trust.get("capability_policy_hash"),
+        "capability_manifest": codex_trust.get("capability_manifest"),
+        "risk_floor": (codex_trust.get("capability_manifest") or {}).get("risk_floor"),
+        "commercial_readiness": (codex_trust.get("capability_manifest") or {}).get("commercial_readiness"),
+        "requires_confirm_run": True,
+        "workspace_write_ready": bool(codex_attestation.get("attested")) and codex_trust.get("trust_status") == "trusted",
+        "target_resource": "local://codex/read-only",
+        "checks": codex_checks,
+        "recommended_action": codex_recommended_action,
+        "last_error": codex_last_error,
+        "remediation": adapter_remediation("codex", codex_readiness, codex_checks, codex_recommended_action, "local://codex/read-only", codex_last_error),
         "token_omitted": True,
     }
 
@@ -18074,7 +18131,7 @@ def worker_adapter_readiness(conn, refresh: bool = True) -> dict:
             "recommended_adapter": recommended_adapter,
         },
         "adapters": adapters,
-        "contract": "read-only adapter readiness with runtime capability manifests; use Agent Gateway CLI/API for execution, confirm live Hermes/OpenClaw runs explicitly, and route high-risk external writes through prepared actions",
+        "contract": "read-only adapter readiness with runtime capability manifests; use Agent Gateway CLI/API for execution, confirm live Codex/Hermes/OpenClaw runs explicitly, and route Codex workspace writes or other high-risk external writes through prepared actions",
         "capability_policy": {
             "manifest_schema": "runtime-capability-manifest-v1",
             "shared_commercial_restriction": "adapters with ledger_summary_only observation remain restricted until runtime tool events are ingested or external writes are routed through prepared actions",

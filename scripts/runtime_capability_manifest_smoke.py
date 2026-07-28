@@ -17,6 +17,7 @@ CLI = ROOT / "scripts" / "agentops"
 
 REQUIRED_CONNECTORS = {
     "rtc_agent_gateway_local",
+    "rtc_codex_local",
     "rtc_openclaw_local",
     "rtc_hermes_default_gateway",
     "rtc_agnesfallback_cli",
@@ -126,6 +127,13 @@ def validate_connectors(connectors: list[dict], failures: list[str], source: str
             require(manifest.get("observation_level") == "ledger_summary_only", f"{source} {cid} must disclose summary-only observation", failures)
             require(governance.get("requires_confirm_run") is True, f"{source} {cid} live runtime must require confirmation", failures)
             require(governance.get("requires_prepared_action_for_external_write") is True, f"{source} {cid} external write governance missing", failures)
+        if cid == "rtc_codex_local":
+            require(manifest.get("risk_floor") == "medium", f"{source} {cid} risk floor must be medium", failures)
+            require(manifest.get("observation_level") == "structured_runtime_events", f"{source} {cid} structured observation missing", failures)
+            require(manifest.get("commercial_readiness") == "read_only_governed_worker", f"{source} {cid} read-only product boundary missing", failures)
+            require(governance.get("requires_confirm_run") is True, f"{source} {cid} must require confirmed execution", failures)
+            require(governance.get("requires_prepared_action_for_external_write") is True, f"{source} {cid} workspace-write governance missing", failures)
+            require(row.get("binary_path") in {None, ""}, f"{source} {cid} must omit local binary path", failures)
         if cid.startswith("rtc_agnesfallback"):
             require(manifest.get("observation_level") == "fixed_probe_summary_only", f"{source} {cid} fixed-probe boundary missing", failures)
 

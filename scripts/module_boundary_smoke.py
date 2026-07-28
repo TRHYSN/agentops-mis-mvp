@@ -730,6 +730,7 @@ def main() -> int:
     require(manifest.get("schema_version") == SCHEMA_VERSION, "manifest schema mismatch", failures)
     require(manifest.get("boundaries", {}).get("workdir") == str(ROOT), "repo_root boundary was not injected", failures)
     require(runtime_connector_for_adapter("openclaw") == "rtc_openclaw_local", "adapter mapping failed", failures)
+    require(runtime_connector_for_adapter("codex") == "rtc_codex_local", "Codex adapter mapping failed", failures)
     public = runtime_connector_public_row({
         "runtime_connector_id": "rtc_openclaw_local",
         "capability_manifest_json": json.dumps(manifest, ensure_ascii=False, sort_keys=True),
@@ -739,7 +740,7 @@ def main() -> int:
     require(public.get("token_omitted") is True and public.get("raw_prompt_omitted") is True, "public row omission proof missing", failures)
     connector_rows = runtime_connector_rows()
     connector_ids = {row.get("runtime_connector_id") for row in connector_rows}
-    require({"rtc_agent_gateway_local", "rtc_openclaw_local", "rtc_hermes_default_gateway", "rtc_agnesfallback_cli", "rtc_agnesfallback_openai_api"}.issubset(connector_ids), f"runtime connector rows missing expected IDs: {sorted(connector_ids)}", failures)
+    require({"rtc_agent_gateway_local", "rtc_codex_local", "rtc_openclaw_local", "rtc_hermes_default_gateway", "rtc_agnesfallback_cli", "rtc_agnesfallback_openai_api"}.issubset(connector_ids), f"runtime connector rows missing expected IDs: {sorted(connector_ids)}", failures)
     require(all(row.get("capability_manifest_json") and row.get("capability_policy_hash") for row in connector_rows), "runtime connector rows missing manifest/hash", failures)
     refreshed_rows = runtime_connector_refresh_rows({
         "default_gateway": {

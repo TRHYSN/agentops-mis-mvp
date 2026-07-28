@@ -23,6 +23,8 @@ def stable_hash(value: Any) -> str:
 def runtime_connector_adapter(connector_id: str, provider: str) -> str:
     if connector_id == "rtc_agent_gateway_local" or provider == "agent-gateway":
         return "agent_gateway"
+    if connector_id == "rtc_codex_local" or provider == "codex":
+        return "codex"
     if connector_id == "rtc_hermes_default_gateway" or provider == "hermes":
         return "hermes"
     if connector_id == "rtc_openclaw_local" or provider == "openclaw":
@@ -106,6 +108,34 @@ def runtime_connector_capability_manifest(
                 "trust_status_source": "runtime_connectors.trust_status",
                 "live_execution_blocked_when_trust_status_blocked": True,
                 "shared_commercial_policy": "allowed_for_tests_only",
+            },
+        },
+        "codex": {
+            "observation_level": "structured_runtime_events",
+            "risk_floor": "medium",
+            "commercial_readiness": "read_only_governed_worker",
+            "capabilities": {
+                "filesystem": "read_only_default; managed_worktree_only_after_approval",
+                "shell": "disabled_in_read_only",
+                "network": "disabled",
+                "git": "read_only_default; bounded_diff_in_managed_worktree_after_approval",
+                "external_write": "workspace_write_prepared_action_only",
+                "confirmation": "confirm_run_required; workspace_write_requires_separate_confirmation",
+                "trust_policy": "runtime_connector_trust_registry",
+                "secrets": "allowlisted_child_env_without_agentops_credentials",
+                "tool_event_ingestion": "structured_codex_jsonl_summary",
+            },
+            "boundaries": {
+                "workdir": root,
+                "network": "disabled_by_worker_policy",
+                "external_side_effects": "prepared_action_and_execution_lease_required",
+            },
+            "governance": {
+                "requires_confirm_run": True,
+                "requires_prepared_action_for_external_write": True,
+                "trust_status_source": "runtime_connectors.trust_status",
+                "live_execution_blocked_when_trust_status_blocked": True,
+                "shared_commercial_policy": "read_only_allowed; workspace_write_requires_attested_official_bundle_and_human_approval",
             },
         },
         "hermes": {
@@ -200,6 +230,8 @@ def runtime_connector_capability_manifest(
 
 
 def runtime_connector_for_adapter(adapter: str) -> str | None:
+    if adapter == "codex":
+        return "rtc_codex_local"
     if adapter == "hermes":
         return "rtc_hermes_default_gateway"
     if adapter == "openclaw":
