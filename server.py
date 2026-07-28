@@ -14680,6 +14680,26 @@ def worker_adapter_readiness(conn, refresh: bool = True) -> dict:
     hermes = hermes_status()
     openclaw = openclaw_status()
     codex_attestation = codex_binary_attestation(os.environ.get("CODEX_BIN", ""), timeout=5)
+    codex_plugin_manifest_path = ROOT / "plugins" / "agentops-mis" / ".codex-plugin" / "plugin.json"
+    codex_plugin_skill_path = ROOT / "plugins" / "agentops-mis" / "skills" / "agentops-mis" / "SKILL.md"
+    codex_plugin_marketplace_path = ROOT / ".agents" / "plugins" / "marketplace.json"
+    codex_plugin_manifest = {}
+    if codex_plugin_manifest_path.is_file():
+        try:
+            codex_plugin_manifest = json.loads(codex_plugin_manifest_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            codex_plugin_manifest = {}
+    codex_client_plugin = {
+        "package_name": redact_text(codex_plugin_manifest.get("name"), 80) or None,
+        "package_version": redact_text(codex_plugin_manifest.get("version"), 40) or None,
+        "packaged": bool(codex_plugin_manifest.get("name") == "agentops-mis"),
+        "skill_available": codex_plugin_skill_path.is_file(),
+        "marketplace_available": codex_plugin_marketplace_path.is_file(),
+        "mcp_tools_available": False,
+        "connection_mode": "agentops_cli_api",
+        "raw_path_omitted": True,
+        "token_omitted": True,
+    }
 
     def worker_connection_policy() -> dict:
         adapter_max_attempts = max(int(os.environ.get("AGENTOPS_ADAPTER_MAX_ATTEMPTS", "1") or 1), 1)
@@ -14900,6 +14920,9 @@ def worker_adapter_readiness(conn, refresh: bool = True) -> dict:
         ),
         "official_chatgpt_bundle": bool(codex_attestation.get("official_chatgpt_bundle")),
         "workspace_write_attested": bool(codex_attestation.get("attested")),
+        "client_plugin_packaged": codex_client_plugin.get("packaged") is True,
+        "client_skill_available": codex_client_plugin.get("skill_available") is True,
+        "client_mcp_tools_available": False,
         "raw_binary_path_omitted": True,
         "live_execution_performed": False,
     }
@@ -14918,6 +14941,7 @@ def worker_adapter_readiness(conn, refresh: bool = True) -> dict:
         "commercial_readiness": (codex_trust.get("capability_manifest") or {}).get("commercial_readiness"),
         "requires_confirm_run": True,
         "workspace_write_ready": bool(codex_attestation.get("attested")) and codex_trust.get("trust_status") == "trusted",
+        "client_plugin": codex_client_plugin,
         "target_resource": "local://codex/read-only",
         "checks": codex_checks,
         "recommended_action": codex_recommended_action,

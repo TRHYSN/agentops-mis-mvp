@@ -68,7 +68,8 @@ security gates.
 | Codex read-only worker | CURRENT | `agentops-worker --adapter codex` runs the official non-interactive Codex CLI in an ephemeral, strict, read-only sandbox and records bounded MIS evidence. |
 | Codex connector/readiness | CURRENT | `rtc_codex_local` supplies a Codex capability/trust row, while worker adapter readiness exposes `adapters.codex` with safe binary/version attestation, trust, read-only readiness, workspace-write attestation, and raw binary-path omission. |
 | Codex workspace-write | CURRENT | A separate high-risk workflow uses a human-approved Agent Plan, exact PreparedAction, attested Codex binary, managed detached Git worktree, allowed paths, independent diff checks, execution lease, and evidence closure. Commit, merge, push, deploy, and publication remain outside that authorization. |
-| Codex browser surface | CURRENT | `/admin/codex` is a read-only, fail-closed observation page for Codex workers, runs, approvals, fleet state, and connector evidence. |
+| Codex browser surface | CURRENT | `/admin/connectors/codex` is the canonical read-only, fail-closed connector detail for Codex workers, runs, approvals, fleet state, plugin state, and connector evidence. `/admin/codex` remains a compatibility redirect. |
+| Codex client plugin / Skill | CURRENT | `plugins/agentops-mis` is a Codex-installable product plugin. Its Skill drives the existing scoped AgentOps CLI/API contract for task pull/claim, bounded context, approval requests, and ledger writeback; it contains no credential and cannot self-approve. |
 | Product MCP bridge | GAP | No Codex-specific MCP enrollment server or supported MCP tool bundle exists. |
 | One-click customer connection | GAP | No signed installer, device/browser login, OS-keychain credential handoff, or connection wizard exists. |
 | Dedicated Context Packet | GAP | The required ingredients exist, but there is no single `context-packet` API/CLI contract binding task, Git state, reviewed project memory, knowledge evidence, approvals, and output requirements. |
@@ -610,12 +611,14 @@ shown as such.
 
 ### Current Surface
 
-`/admin/codex` is CURRENT and read-only. It independently reads current Agents,
+`/admin/connectors/codex` is CURRENT and read-only. It independently reads current Agents,
 Runs, Tool Calls, Approvals, Worker Status, Worker Fleet, and Connector sources.
 Unavailable sources fail closed rather than being replaced with mock data. The
 page reads only `adapters.codex` for Codex readiness and does not substitute
-mock, Hermes, or OpenClaw state. Product MCP, one-click installation, and the
-connection lifecycle remain explicitly unavailable/not implemented.
+mock, Hermes, or OpenClaw state. The page presents both governed directions:
+MIS task to Codex Worker to ledger, and Codex plugin/Skill to AgentOps CLI/API
+to approval and ledger review. Product MCP, one-click device enrollment, and
+the connection lifecycle remain explicitly unavailable/not implemented.
 
 ### Target Connection Panel
 
@@ -710,7 +713,7 @@ for, or added as a prerequisite to, Codex readiness.
 
 ### Slice 5 - Product Control Panel
 
-- Extend the existing `/admin/codex` truth surface with guided connection,
+- Extend the existing `/admin/connectors/codex` truth surface with guided connection,
   grant/revoke, preflight receipt, Context Packet preview, and linked evidence
   readback.
 - Keep host/runtime execution outside browser process authority.

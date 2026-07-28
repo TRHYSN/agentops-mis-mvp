@@ -42,7 +42,7 @@ export default function App() {
             <Route path="/workspace/reports" element={<Reports />} />
             <Route path="/workspace/customer-projects/:projectId/report" element={<CustomerProjectReport />} />
             <Route path="/admin" element={<ControlTower />} />
-            <Route path="/admin/codex" element={<CodexConnection />} />
+            <Route path="/admin/codex" element={<Navigate to="/admin/connectors/codex" replace />} />
             <Route path="/admin/evaluations" element={<EvaluationRoom />} />
             <Route path="/admin/agents/:id" element={<AgentDetail />} />
             <Route path="/admin/tasks/:id" element={<TaskDetail />} />
@@ -50,6 +50,7 @@ export default function App() {
             <Route path="/admin/runs/:id" element={<RunDetail />} />
             <Route path="/admin/toolcalls" element={<ToolCallLedger />} />
             <Route path="/admin/connectors" element={<RuntimeConnectors />} />
+            <Route path="/admin/connectors/codex" element={<CodexConnection />} />
             <Route path="/admin/bases/notion" element={<NotionBase />} />
             <Route path="/admin/templates" element={<TemplateSwitching />} />
             <Route path="/admin/audit" element={<AuditCenter />} />

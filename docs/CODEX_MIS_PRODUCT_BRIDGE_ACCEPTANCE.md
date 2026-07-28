@@ -8,7 +8,9 @@ This acceptance covers the first customer-visible bridge slice:
 - Codex remains a governed execution runtime.
 - Local loopback and remote enrolled-worker commands are kept distinct.
 - Operators can inspect live Codex readiness and ledger evidence at
-  `/admin/codex`.
+  `/admin/connectors/codex`; `/admin/codex` is a compatibility redirect.
+- Codex can install the `agentops-mis` plugin and use its Skill as the governed
+  client-side entry to the existing AgentOps CLI/API contract.
 - No installer, device-code login, product MCP bridge, or automatic enrollment
   is claimed in this slice.
 
@@ -27,8 +29,11 @@ created.
   - local loopback omits `--use-session`;
   - remote enrolled workers use `--use-session`.
 - Kept read-only Codex execution separate from approval-gated workspace-write.
-- Added `/admin/codex` as a read-only, fail-closed control surface backed by
-  live MIS APIs.
+- Added `/admin/connectors/codex` as a read-only, fail-closed connector detail
+  backed by live MIS APIs, with separate MIS-to-Codex and Codex-to-MIS paths.
+- Added the installable `plugins/agentops-mis` Codex plugin and Skill. The
+  package includes no credential, does not write SQLite directly, forbids
+  self-approval, and uses the real CLI/API commands.
 - Fixed Codex run-start supervision so unrelated Hermes/OpenClaw readiness does
   not block a ready Codex runtime.
 - Fixed external-write intent classification so `modify` does not accidentally
@@ -57,6 +62,7 @@ python3 scripts/module_boundary_smoke.py
 python3 scripts/run_start_loop_supervision_gate_smoke.py
 python3 scripts/codex_worker_adapter_smoke.py
 python3 scripts/codex_mis_product_bridge_contract_smoke.py
+python3 scripts/codex_plugin_contract_smoke.py
 python3 scripts/worker_adapter_readiness_smoke.py \
   --base-url http://127.0.0.1:18787
 python3 scripts/runtime_capability_manifest_smoke.py \
@@ -75,6 +81,8 @@ Result:
 - Codex deterministic worker fixture passed with evidence-chain and
   secret-omission checks.
 - Product bridge contract smoke passed `156` checks.
+- Codex plugin contract smoke passed `89/89` checks without reading the
+  environment, database, credentials, or network.
 - Live readiness and capability-manifest API smokes passed against the isolated
   local server.
 - Vite production build passed; the existing large-chunk warning remains
@@ -85,7 +93,8 @@ Result:
 
 ## Browser Acceptance
 
-Observed at `http://127.0.0.1:19003/admin/codex` against the isolated backend:
+Observed at `http://127.0.0.1:19003/admin/connectors/codex` against the isolated
+backend:
 
 - the route rendered with the Chinese locale;
 - all eight live data sources reported their actual state;
@@ -96,6 +105,12 @@ Observed at `http://127.0.0.1:19003/admin/codex` against the isolated backend:
 - browser console returned no warnings or errors;
 - the page had no horizontal overflow at a `1280px` viewport; and
 - missing MCP/one-click-install capability was labeled `not implemented`.
+- the canonical page rendered through the Connector inventory, while the old
+  `/admin/codex` route redirected to it;
+- both topology lanes rendered with live connector, plugin, Worker and Run
+  state; and
+- a `390px` responsive check had no horizontal document overflow and hid the
+  fixed desktop sidebar so the operating map remained readable.
 
 The page does not issue credentials, start a Worker, approve an action, or infer
 remote-machine state.
@@ -141,15 +156,57 @@ the clean release receipt.
 - [x] Local loopback onboarding does not require a child session.
 - [x] Remote onboarding guidance retains short-lived session use.
 - [x] The browser surface uses live APIs and fails closed.
+- [x] Codex is grouped under Connectors rather than duplicated as a top-level
+  admin destination.
+- [x] The Codex plugin installs through the local Codex marketplace and its
+  Skill exposes the bidirectional CLI/API workflow.
+- [x] Product MCP remains explicitly unavailable and is not inferred from the
+  plugin.
 - [x] Real Codex execution reached Run, Runtime Event, Tool Call, Evaluation,
   Artifact, Audit, Plan Evidence, and candidate Memory during development.
 - [x] No DB, token, `.env`, raw prompt/response, cache, `dist`, or
   `node_modules` is part of the intended change.
 - [ ] Record a real run against the exact clean implementation commit.
 
+## Bidirectional Plugin Dogfood
+
+The product plugin was validated and installed locally with the Codex desktop
+CLI:
+
+```text
+agentops-mis@agentops-mis  installed, enabled  0.1.0
+```
+
+Its wrapper successfully read `agentops status` from the current isolated
+server. Live adapter readiness returned:
+
+- connector `rtc_codex_local`: `ready`;
+- package `agentops-mis@0.1.0`: packaged;
+- Skill and marketplace: available;
+- connection mode: `agentops_cli_api`;
+- native MCP tools: unavailable;
+- raw path and token: omitted.
+
+A separate real read-only Codex Worker task then completed through the normal
+MIS dispatch path:
+
+- Run: `run_gw_45f3d6d6ec34`
+- Task: `tsk_1db88b42332e`
+- Agent: `agt_codex_connector_ui`
+- Agent Plan: `plan_ffc75d0d39f4971f` (verified)
+- Plan Evidence: `pem_b9f4e0259c6a5df3` (verified)
+- Runtime Event: `rte_61c604a623a4`
+- Evidence: one Tool Call, one Evaluation, one Artifact, one Audit, and one
+  candidate Memory
+- Boundary: read-only, raw prompt/response omitted, token omitted
+
+This receipt uses an isolated `/tmp` database and a dirty development checkout.
+It is product dogfood evidence, not the clean release receipt.
+
 ## Known Product Gaps
 
-- No signed customer installer or one-click connection wizard.
+- No signed customer installer, device-code enrollment, or one-click
+  connection wizard. The local Codex plugin install is current.
 - No browser/device-code enrollment and no OS-keychain handoff.
 - No Codex-specific product MCP server or supported MCP tool bundle.
 - No single first-class Context Packet API that binds task, Git state,

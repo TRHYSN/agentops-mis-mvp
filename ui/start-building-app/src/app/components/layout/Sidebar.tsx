@@ -5,7 +5,6 @@ import {
   Home, CheckSquare, Bot, ShieldCheck, Brain, BarChart2, Package,
   Activity, List, Wrench, Plug, Database, ClipboardList, Map,
   ChevronDown, ChevronRight, Zap, TerminalSquare, ClipboardCheck,
-  Code2,
 } from "lucide-react";
 import { pick, usePreferences } from "../../context/PreferencesContext";
 
@@ -40,7 +39,6 @@ const navGroups: NavGroup[] = [
     titleKey: "adminConsole",
     items: [
       { labelKey: "controlTower",  path: "/admin",                    icon: <Activity size={15} /> },
-      { labelKey: "codexConnection", path: "/admin/codex",            icon: <Code2 size={15} /> },
       { labelKey: "agentRegistry", path: "/workspace/agents",         icon: <Bot size={15} /> },
       { labelKey: "runLedger",     path: "/admin/runs",               icon: <List size={15} /> },
       { labelKey: "evaluationRoom",path: "/admin/evaluations",        icon: <BarChart2 size={15} /> },
@@ -71,7 +69,6 @@ export function Sidebar() {
       reports: "Reports",
       templates: "Templates",
       controlTower: "Control Tower",
-      codexConnection: "Codex Connection",
       agentRegistry: "Agent Registry",
       runLedger: "Run Ledger",
       evaluationRoom: "Evaluation Room",
@@ -95,7 +92,6 @@ export function Sidebar() {
       reports: "报告",
       templates: "模板",
       controlTower: "控制塔",
-      codexConnection: "Codex 接入",
       agentRegistry: "代理注册表",
       runLedger: "运行账本",
       evaluationRoom: "评估室",
@@ -113,7 +109,7 @@ export function Sidebar() {
 
   return (
     <aside
-      className="flex flex-col w-56 shrink-0 h-full border-r"
+      className="hidden md:flex flex-col w-56 shrink-0 h-full border-r"
       style={{
         background: "var(--mis-surface)",
         borderColor: "var(--mis-border)",
