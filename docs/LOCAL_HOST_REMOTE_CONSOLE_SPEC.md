@@ -1,7 +1,7 @@
 # AgentOps MIS Local Host + Remote Console Product Spec
 
 Status: implementation baseline; browser-only transport amendment accepted
-Target: v1.6 local private host  
+Target: v1.6 local private host
 Scope: single-owner or trusted small-team deployment
 
 Transport amendment (2026-07-17): ordinary Console users must not install,

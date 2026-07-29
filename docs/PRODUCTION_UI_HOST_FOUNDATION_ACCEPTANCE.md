@@ -81,4 +81,3 @@ Results:
 Freeze the human/machine route classification, add a distinct human session
 credential and bootstrap-owner flow, then enforce authenticated reads and
 role/CSRF checks before private-network publication is enabled.
-
