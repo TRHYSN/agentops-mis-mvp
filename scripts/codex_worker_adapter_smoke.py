@@ -37,7 +37,7 @@ if "--version" in sys.argv:
     print("codex-cli deterministic-fixture")
     raise SystemExit(0)
 
-required = ["exec", "--json", "--ephemeral", "--ignore-user-config", "--strict-config", "--sandbox", "read-only", "-C", "-"]
+required = ["exec", "--json", "--ephemeral", "--ignore-user-config", "--strict-config", "--skip-git-repo-check", "--sandbox", "read-only", "-C", "-"]
 if any(value not in sys.argv for value in required):
     print("missing bounded Codex flags", file=sys.stderr)
     raise SystemExit(2)
@@ -100,6 +100,25 @@ print("not-json")
 print(json.dumps({"type": "turn.started"}))
 print(json.dumps({"type": "item.completed", "item": {"id": "msg_1", "type": "agent_message", "text": "Must fail closed."}}))
 print(json.dumps({"type": "turn.completed", "usage": {"output_tokens": 3}}))
+'''
+
+FAKE_CODEX_RECOVERED = r'''#!/usr/bin/env python3
+import json
+import sys
+if "--version" in sys.argv:
+    print("codex-cli recovered-fixture")
+    raise SystemExit(0)
+sys.stdin.read()
+events = [
+    {"type": "thread.started", "thread_id": "thr_recovered"},
+    {"type": "turn.started"},
+    {"type": "error", "message": "Reconnecting after a transient transport interruption."},
+    {"type": "item.completed", "item": {"id": "err_1", "type": "error", "message": "Transient transport interruption recovered."}},
+    {"type": "item.completed", "item": {"id": "msg_1", "type": "agent_message", "text": "Codex fixture completed after a recovered transport interruption."}},
+    {"type": "turn.completed", "usage": {"output_tokens": 7}},
+]
+for event in events:
+    print(json.dumps(event, separators=(",", ":")))
 '''
 
 
@@ -166,6 +185,9 @@ def main() -> int:
         malformed_bin = temp / "codex-malformed-fixture"
         malformed_bin.write_text(FAKE_CODEX_MALFORMED, encoding="utf-8")
         malformed_bin.chmod(0o700)
+        recovered_bin = temp / "codex-recovered-fixture"
+        recovered_bin.write_text(FAKE_CODEX_RECOVERED, encoding="utf-8")
+        recovered_bin.chmod(0o700)
         preflight = codex_preflight(binary_path=str(fake_bin), cwd=ROOT, timeout=5)
         require(preflight.get("ok") is True, f"Codex preflight failed: {preflight}")
         fixture_attestation = runtime_attestation(SimpleNamespace(adapter="codex", codex_bin=str(fake_bin), confirm_run=True))
@@ -195,6 +217,21 @@ def main() -> int:
         )
         require(malformed.ok is False, "malformed Codex JSONL unexpectedly passed")
         require(malformed.error_type == "CodexProtocolViolation", f"wrong malformed-event failure: {malformed}")
+        recovered = execute_codex_read_only(
+            binary_path=str(recovered_bin),
+            prompt="AgentOps MIS recovered-event fixture",
+            cwd=ROOT,
+            timeout=10,
+        )
+        require(recovered.ok is True, f"recovered Codex event stream unexpectedly failed: {recovered}")
+        require(
+            (recovered.observation or {}).get("runtime_error_recovered") is True,
+            f"recovered runtime event was not retained as evidence: {recovered}",
+        )
+        require(
+            (recovered.observation or {}).get("runtime_error_event_count") == 1,
+            f"recovered runtime event count missing: {recovered}",
+        )
         port = free_port()
         base_url = f"http://127.0.0.1:{port}"
         env = os.environ.copy()
