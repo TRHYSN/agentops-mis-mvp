@@ -200,6 +200,7 @@ def main() -> int:
                 "fleet": "/api/agent-gateway/host-workers/fleet",
                 "readiness": "/api/agent-gateway/host-workers/adapter-readiness",
                 "stuck": "/api/agent-gateway/host-workers/stuck-tasks?threshold_sec=30&limit=5",
+                "runtime_connectors": "/api/agent-gateway/host-runtime-connectors",
             }
             route_evidence = {}
             for name, path in routes.items():
@@ -217,19 +218,43 @@ def main() -> int:
                 require((payload.get("auth") or {}).get("host_machine_only") is True, f"Host machine route {name} omitted host-only proof", failures)
                 require((payload.get("safety") or {}).get("read_only") is True, f"Host machine route {name} omitted read-only proof", failures)
                 require((payload.get("safety") or {}).get("ledger_mutated") is False, f"Host machine route {name} claimed ledger mutation", failures)
+                if name == "runtime_connectors":
+                    connectors = payload.get("connectors") or []
+                    require(bool(connectors), "Host runtime connector route returned no connectors", failures)
+                    require(
+                        all(
+                            "base_url" not in connector
+                            and "binary_path" not in connector
+                            and "trust_note" not in connector
+                            and "last_error" not in connector
+                            and connector.get("raw_base_url_omitted") is True
+                            and connector.get("raw_binary_path_omitted") is True
+                            for connector in connectors
+                        ),
+                        "Host runtime connector route leaked private connector fields",
+                        failures,
+                    )
             evidence["machine_routes"] = route_evidence
 
             for label, token in (("agent_token", agent_token), ("agent_session", session_token)):
-                status, payload, raw = http_json(base_url, routes["status"], token=token)
-                captured.append(raw)
-                evidence[label] = {"status": status, "error": payload.get("error")}
-                require(status == 403 and payload.get("error") == "host_machine_credential_required", f"{label} read Host-wide telemetry", failures)
+                denied_routes = {}
+                for route_name, route_path in routes.items():
+                    status, payload, raw = http_json(base_url, route_path, token=token)
+                    captured.append(raw)
+                    denied_routes[route_name] = {"status": status, "error": payload.get("error")}
+                    require(
+                        status == 403 and payload.get("error") == "host_machine_credential_required",
+                        f"{label} read Host-wide {route_name} telemetry",
+                        failures,
+                    )
+                evidence[label] = denied_routes
 
             for label, command in (
                 ("status", ["worker", "status"]),
                 ("fleet", ["worker", "fleet"]),
                 ("readiness", ["worker", "readiness"]),
                 ("stuck", ["worker", "stuck", "--threshold-sec", "30", "--limit", "5"]),
+                ("runtime_connectors", ["runtime", "connectors"]),
             ):
                 proc = run_cli(base_url, command, tmp_path / "cli-config.json")
                 captured.extend([proc.stdout, proc.stderr])
@@ -242,8 +267,9 @@ def main() -> int:
                     "provider": cli_payload.get("provider"),
                     "auth_mode": (cli_payload.get("auth") or {}).get("mode"),
                 }
-                require(proc.returncode == 0, f"agentops worker {label} failed: rc={proc.returncode}", failures)
-                require(cli_payload.get("provider") == "agentops-worker", f"agentops worker {label} returned wrong provider", failures)
+                expected_provider = "agentops-runtime" if label == "runtime_connectors" else "agentops-worker"
+                require(proc.returncode == 0, f"agentops {label} failed: rc={proc.returncode}", failures)
+                require(cli_payload.get("provider") == expected_provider, f"agentops {label} returned wrong provider", failures)
 
             after = database_snapshot(db_path, token_id, session_id)
             evidence["after_counts"] = after["counts"]

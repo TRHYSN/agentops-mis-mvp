@@ -1395,6 +1395,13 @@ token/prompt/response omission fields. Capability manifests must declare:
 - secrets
 - runtime/tool-event ingestion
 
+In Private Host mode the CLI uses
+`GET /api/agent-gateway/host-runtime-connectors`. The route requires the Host
+machine credential, does not refresh or execute a runtime, and omits raw base
+URLs, binary paths, trust notes, and last-error text. The browser continues to
+use `GET /api/runtime-connectors` with a Human Session. Bound Agent enrollment
+and Session tokens cannot read this Host-wide registry.
+
 Use this command when an operator or remote agent needs to understand what a
 runtime is allowed to do before choosing a route or requesting approval.
 
@@ -1603,6 +1610,7 @@ GET  /api/agent-gateway/status
 GET  /api/agent-gateway/host-workers/status
 GET  /api/agent-gateway/host-workers/fleet
 GET  /api/agent-gateway/host-workers/adapter-readiness
+GET  /api/agent-gateway/host-runtime-connectors
 GET  /api/agent-gateway/host-workers/stuck-tasks
 POST /api/agent-gateway/enrollment/create
 POST /api/agent-gateway/enrollment/request

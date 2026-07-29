@@ -125,8 +125,20 @@ GET /api/workers/status
 GET /api/agent-gateway/host-workers/status
 GET /api/agent-gateway/host-workers/fleet
 GET /api/agent-gateway/host-workers/adapter-readiness
+GET /api/agent-gateway/host-runtime-connectors
 GET /api/agent-gateway/host-workers/stuck-tasks
 ```
+
+Private Host machine reads require the Host API key. Agent enrollment and
+short-lived Agent Session tokens cannot inspect Host-wide worker or connector
+topology. `host-runtime-connectors` is read-only, performs no runtime refresh,
+and omits raw base URLs, binary paths, trust notes, and last-error text.
+
+Human Session reads of the Operator action plan, loop audit, handoff, and
+command center use the current ledger/readiness snapshot without running live
+Hermes/OpenClaw start checks. Machine-authenticated CLI/API calls retain the
+full supervision view. This keeps browser navigation responsive and prevents a
+page load from becoming an implicit runtime probe.
 
 `GET /api/workers/adapter-readiness` is a read-only route-selection endpoint
 for the browser operator console and uses Human Session authentication in

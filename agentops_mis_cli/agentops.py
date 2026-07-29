@@ -4378,10 +4378,13 @@ def cmd_run_heartbeat(args, client: AgentOpsClient) -> dict:
 
 
 def cmd_runtime_connectors(args, client: AgentOpsClient) -> dict:
+    payload = client.get("/api/agent-gateway/host-runtime-connectors")
     return {
         "provider": "agentops-runtime",
         "operation": "runtime_connectors",
-        "connectors": client.get("/api/runtime-connectors"),
+        "connectors": payload.get("connectors") or [],
+        "auth": payload.get("auth") or {},
+        "safety": payload.get("safety") or {},
         "contract": "read-only runtime connector manifest and trust registry view; use worker readiness for route selection and prepared actions for high-risk live side effects",
         "live_execution_performed": False,
         "token_omitted": True,

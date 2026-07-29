@@ -1109,10 +1109,19 @@ def main() -> int:
             ]
             scoped_read_results = []
             for route in scoped_read_routes:
-                scoped_status, _headers, scoped_payload = request_json(
-                    browser,
-                    base_url + route,
-                )
+                try:
+                    scoped_status, _headers, scoped_payload = request_json(
+                        browser,
+                        base_url + route,
+                    )
+                except TimeoutError:
+                    failures.append(f"human scoped read timed out: {route}")
+                    scoped_read_results.append({
+                        "route": route.split("?", 1)[0],
+                        "status": "timeout",
+                        "cross_workspace_refs_hidden": False,
+                    })
+                    break
                 leak_surface = scoped_payload
                 if route.startswith("/api/knowledge/search"):
                     # The API safely echoes the caller-supplied query; authority applies to results.

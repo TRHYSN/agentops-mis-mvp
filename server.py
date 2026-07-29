@@ -4319,6 +4319,37 @@ def host_worker_machine_read_payload(payload: dict, auth_ctx: dict, operation: s
     return result
 
 
+def host_runtime_connector_machine_row(row) -> dict:
+    public = runtime_connector_public_row(row)
+    allowed = {
+        "runtime_connector_id",
+        "provider",
+        "connector_type",
+        "profile_name",
+        "status",
+        "allow_real_run",
+        "require_confirm_run",
+        "trust_status",
+        "trust_updated_at",
+        "observation_level",
+        "capability_manifest",
+        "capability_policy_hash",
+        "last_health_at",
+        "created_at",
+        "updated_at",
+        "token_omitted",
+        "raw_prompt_omitted",
+        "raw_response_omitted",
+    }
+    return {
+        **{key: value for key, value in public.items() if key in allowed},
+        "raw_base_url_omitted": True,
+        "raw_binary_path_omitted": True,
+        "trust_note_omitted": True,
+        "last_error_omitted": True,
+    }
+
+
 def local_ui_write_auth_error(headers) -> tuple[dict, int] | None:
     if not production_security_requested():
         return None
@@ -25399,7 +25430,14 @@ def operator_evidence_report(conn: sqlite3.Connection, headers, qs=None, auth_ct
     }
 
 
-def operator_action_plan(conn: sqlite3.Connection, headers, qs=None, auth_ctx=None) -> dict:
+def operator_action_plan(
+    conn: sqlite3.Connection,
+    headers,
+    qs=None,
+    auth_ctx=None,
+    *,
+    include_loop_supervision: bool = True,
+) -> dict:
     qs = qs or {}
     limit = min(max(int((qs.get("limit") or ["12"])[0]), 1), 30)
     effective_headers = headers
@@ -25622,14 +25660,24 @@ def operator_action_plan(conn: sqlite3.Connection, headers, qs=None, auth_ctx=No
             "token_omitted": True,
         })
 
-    loop_supervision = operator_loop_supervision(
-        conn,
-        effective_headers,
-        {
-            "limit": [str(min(max(limit, 2), 8))],
-            "adapter": ["hermes", "openclaw"],
-            "handoff_mode": ["lightweight"],
-        },
+    loop_supervision = (
+        operator_loop_supervision(
+            conn,
+            effective_headers,
+            {
+                "limit": [str(min(max(limit, 2), 8))],
+                "adapter": ["hermes", "openclaw"],
+                "handoff_mode": ["lightweight"],
+            },
+        )
+        if include_loop_supervision
+        else {
+            "status": "not_evaluated",
+            "items": [],
+            "summary": {"live_supervision_omitted": True},
+            "live_execution_performed": False,
+            "token_omitted": True,
+        }
     )
     for item in (loop_supervision.get("items") or [])[:2]:
         if not isinstance(item, dict):
@@ -26683,7 +26731,14 @@ def operator_action_plan(conn: sqlite3.Connection, headers, qs=None, auth_ctx=No
     }
 
 
-def operator_loop_audit(conn: sqlite3.Connection, headers, qs=None, auth_ctx=None) -> dict:
+def operator_loop_audit(
+    conn: sqlite3.Connection,
+    headers,
+    qs=None,
+    auth_ctx=None,
+    *,
+    action_plan_snapshot: dict | None = None,
+) -> dict:
     qs = qs or {}
     limit = min(max(int((qs.get("limit") or ["12"])[0]), 1), 30)
     effective_headers = headers
@@ -26701,11 +26756,12 @@ def operator_loop_audit(conn: sqlite3.Connection, headers, qs=None, auth_ctx=Non
         or "local-demo"
     )
     loop_id = redact_text((qs.get("loop_id") or [""])[0], 120)
-    action_plan = operator_action_plan(
+    action_plan = action_plan_snapshot or operator_action_plan(
         conn,
         effective_headers,
         {"limit": [str(limit)]},
         auth_ctx,
+        include_loop_supervision=(auth_ctx or {}).get("mode") != "human_session",
     )
     summary = action_plan.get("summary") or {}
     task_intake = action_plan.get("task_intake") or {}
@@ -27509,7 +27565,14 @@ def operator_loop_control(conn: sqlite3.Connection, headers, qs=None, auth_ctx=N
     }
 
 
-def operator_handoff(conn: sqlite3.Connection, headers, qs=None, auth_ctx=None) -> dict:
+def operator_handoff(
+    conn: sqlite3.Connection,
+    headers,
+    qs=None,
+    auth_ctx=None,
+    *,
+    health_snapshot: bool = False,
+) -> dict:
     qs = qs or {}
     limit = bounded_int((qs.get("limit") or ["12"])[0], 12, 1, 30)
     loop_id = redact_text((qs.get("loop_id") or [""])[0], 120)
@@ -27521,13 +27584,23 @@ def operator_handoff(conn: sqlite3.Connection, headers, qs=None, auth_ctx=None) 
         effective_headers["X-AgentOps-Workspace-Id"] = auth_ctx.get("workspace_id") or "local-demo"
         if agent_gateway_is_bound_auth(auth_ctx):
             effective_headers["X-AgentOps-Agent-Id"] = auth_ctx.get("agent_id") or ""
+    action_plan = operator_action_plan(
+        conn,
+        effective_headers,
+        {"limit": [str(limit)]},
+        auth_ctx,
+        include_loop_supervision=(
+            not health_snapshot
+            and (auth_ctx or {}).get("mode") != "human_session"
+        ),
+    )
     loop_audit = operator_loop_audit(
         conn,
         effective_headers,
         {"limit": [str(limit)], "loop_id": [loop_id]} if loop_id else {"limit": [str(limit)]},
         auth_ctx,
+        action_plan_snapshot=action_plan,
     )
-    action_plan = operator_action_plan(conn, effective_headers, {"limit": [str(limit)]}, auth_ctx)
     evidence_report_qs = {"limit": [str(min(limit, 8))]}
     evidence_report_command_parts = ["agentops", "operator", "evidence-report"]
     if evidence_run_id:
@@ -28591,7 +28664,12 @@ def operator_loop_self_check(conn: sqlite3.Connection, headers, qs=None, auth_ct
         effective_headers["X-AgentOps-Workspace-Id"] = auth_ctx.get("workspace_id") or "local-demo"
         if agent_gateway_is_bound_auth(auth_ctx):
             effective_headers["X-AgentOps-Agent-Id"] = auth_ctx.get("agent_id") or ""
-    handoff = operator_handoff(conn, effective_headers, {"limit": [str(limit)], "loop_id": [loop_id]} if loop_id else {"limit": [str(limit)]}, auth_ctx)
+    handoff = operator_handoff(
+        conn,
+        effective_headers,
+        {"limit": [str(limit)], "loop_id": [loop_id]} if loop_id else {"limit": [str(limit)]},
+        auth_ctx,
+    )
     work_order = handoff.get("work_order") or {}
     advance_loop = work_order.get("advance_loop") or {}
     control_summary = handoff.get("control_summary") or operator_loop_control_summary_from_handoff(
@@ -28827,12 +28905,23 @@ def operator_health(conn: sqlite3.Connection, headers, qs=None, auth_ctx=None) -
         or "local-demo"
     )
 
-    handoff = operator_handoff(conn, effective_headers, {"limit": [str(limit)], "loop_id": [loop_id]} if loop_id else {"limit": [str(limit)]}, auth_ctx)
-    local = local_readiness(conn, effective_headers, workspace_id=workspace_id)
+    handoff = operator_handoff(
+        conn,
+        effective_headers,
+        {"limit": [str(limit)], "loop_id": [loop_id]} if loop_id else {"limit": [str(limit)]},
+        auth_ctx,
+        health_snapshot=True,
+    )
+    local = local_readiness(
+        conn,
+        effective_headers,
+        refresh_runtime=False,
+        workspace_id=workspace_id,
+    )
     security = security_production_readiness(conn, effective_headers)
     security_gates = security.get("gates") or []
     local_write_guard_gate = next((gate for gate in security_gates if gate.get("id") == "local_ui_write_guard"), {})
-    worker = worker_status(conn, workspace_id=workspace_id)
+    worker = worker_status(conn, refresh_runtime=False, workspace_id=workspace_id)
     review = human_review_queue(
         conn,
         limit,
@@ -31811,10 +31900,20 @@ def operator_command_center(conn: sqlite3.Connection, headers, qs=None, auth_ctx
             effective_headers["X-AgentOps-Agent-Id"] = auth_ctx.get("agent_id")
     workspace_id = normalize_workspace_id(effective_headers.get("X-AgentOps-Workspace-Id") or "local-demo")
 
-    action_plan = operator_action_plan(conn, effective_headers, {"limit": [str(limit)]}, auth_ctx)
+    action_plan = operator_action_plan(
+        conn,
+        effective_headers,
+        {"limit": [str(limit)]},
+        auth_ctx,
+        include_loop_supervision=(auth_ctx or {}).get("mode") != "human_session",
+    )
     action_plan_summary = action_plan.get("summary") or {}
     action_plan_actions = action_plan.get("actions") or []
-    worker = worker_status(conn, workspace_id=workspace_id)
+    worker = worker_status(
+        conn,
+        refresh_runtime=(auth_ctx or {}).get("mode") != "human_session",
+        workspace_id=workspace_id,
+    )
     worker_health = worker.get("fleet_health") or {}
     review = human_review_queue(
         conn,
@@ -33969,6 +34068,7 @@ class Handler(BaseHTTPRequestHandler):
                 "/api/agent-gateway/host-workers/fleet",
                 "/api/agent-gateway/host-workers/adapter-readiness",
                 "/api/agent-gateway/host-workers/stuck-tasks",
+                "/api/agent-gateway/host-runtime-connectors",
             }:
                 auth_ctx, auth_error, auth_status = host_machine_auth_context(conn, self.headers)
                 if auth_error:
@@ -33990,6 +34090,17 @@ class Handler(BaseHTTPRequestHandler):
                 elif path == "/api/agent-gateway/host-workers/adapter-readiness":
                     payload = worker_adapter_readiness(conn, refresh=False)
                     operation = "host_worker_adapter_readiness"
+                elif path == "/api/agent-gateway/host-runtime-connectors":
+                    rows = conn.execute(
+                        "SELECT * FROM runtime_connectors ORDER BY provider, connector_type, profile_name"
+                    ).fetchall()
+                    payload = {
+                        "provider": "agentops-worker",
+                        "connectors": [host_runtime_connector_machine_row(row) for row in rows],
+                        "connector_count": len(rows),
+                        "refresh_performed": False,
+                    }
+                    operation = "host_runtime_connectors"
                 else:
                     threshold = int((qs.get("threshold_sec") or ["900"])[0])
                     limit = int((qs.get("limit") or ["25"])[0])
@@ -34042,7 +34153,13 @@ class Handler(BaseHTTPRequestHandler):
                     "operator_action_plan",
                     qs,
                     self.headers,
-                    lambda: operator_action_plan(conn, self.headers, qs, auth_ctx),
+                    lambda: operator_action_plan(
+                        conn,
+                        self.headers,
+                        qs,
+                        auth_ctx,
+                        include_loop_supervision=auth_ctx.get("mode") != "human_session",
+                    ),
                     auth_ctx,
                 )
                 conn.rollback()
