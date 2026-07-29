@@ -54,6 +54,14 @@ and loop-audit aggregation path. In the isolated test fixture,
 `/api/operator/health` decreased from roughly eight seconds to roughly one
 second.
 
+### External-write intent word boundaries
+
+Exact-head dogfood found that the ordinary English word `modifying` contained
+the connector name `dify` as a substring and was therefore classified as an
+external write. ASCII connector and action terms now require word boundaries,
+while common action inflections such as `uploading`, `sending`, and `sent`
+remain fail-closed. Chinese action terms retain substring matching.
+
 ## Verification
 
 Commands used:
@@ -67,6 +75,9 @@ python3 -m py_compile \
 
 python3 scripts/human_browser_auth_smoke.py
 python3 scripts/private_host_worker_machine_read_smoke.py
+python3 scripts/customer_worker_external_write_gate_smoke.py
+python3 scripts/worker_external_write_preflight_gate_smoke.py
+python3 scripts/codex_worker_adapter_smoke.py
 python3 scripts/operator_health_smoke.py
 python3 scripts/operator_handoff_smoke.py
 python3 scripts/operator_loop_supervision_smoke.py
@@ -94,6 +105,33 @@ Verified results:
   existing large-chunk warning remains non-blocking.
 - Python compilation and `git diff --check` passed.
 
+## Real Codex Dogfood
+
+A real read-only Codex task completed against clean integration commit
+`d617c0af18c93fad2335c16dd0316a3359340b18` using an isolated SQLite database
+and loopback server:
+
+- Run: `run_gw_93b57d77dbf9` (`completed`)
+- Task: `tsk_b892f4a1916c` (`completed`)
+- Agent Plan: `plan_69b29e9d5df1e0da` (verified)
+- Plan Evidence Manifest: `pem_51219f5290b0d717` (verified)
+- Worker Runtime Event: `rte_361ef0adbb94`
+- Evidence: one Tool Call, one Evaluation, one Artifact, bounded Audit records,
+  and one candidate Memory
+- Runtime protocol: four valid Codex JSONL events, zero parse errors, and zero
+  prohibited events
+- Runtime boundary: ephemeral strict read-only sandbox, web and interactive
+  tools disabled, raw prompt/response/events and credentials omitted
+
+The first wording attempt stopped before model execution and created an
+Approval Wall record because of the `modifying`/`dify` substring collision.
+The approval was not bypassed or self-approved. The second unambiguous
+read-only task completed, and the classifier regression is covered by the
+follow-up word-boundary tests above.
+
+The temporary server was stopped, generated sample-export drift was restored,
+and the temporary database was removed after bounded evidence readback.
+
 ## Acceptance Checklist
 
 - [x] Private Host human authentication remains the browser authority.
@@ -104,10 +142,12 @@ Verified results:
 - [x] Private connector paths and endpoint details are omitted.
 - [x] Human aggregate pages do not implicitly probe live runtimes.
 - [x] Machine-authenticated supervision remains available.
+- [x] A real Codex read-only task completed through the integrated Gateway.
+- [x] Agent Plan and Plan Evidence were verified for the real run.
+- [x] External-write connector names do not match inside ordinary ASCII words.
 - [x] No database, token, `.env`, raw prompt/response, cache, `dist`,
   `node_modules`, or generated export is intended for commit.
 - [ ] Run exact-head CI after the branch is pushed.
-- [ ] Record a clean exact-head real Codex run in an isolated database.
 - [ ] Promote a non-Canonical Notion handoff only after owner authorization.
 - [ ] Merge only after owner authorization and exact-head green checks.
 

@@ -77,6 +77,14 @@ def main() -> int:
                 "Chinese tight negation chain",
             ),
             (
+                False,
+                {},
+                "Read-only integration review",
+                "Return evidence without modifying files or using external tools.",
+                "Summarize the connector status notionally.",
+                "ASCII connector names require word boundaries",
+            ),
+            (
                 True,
                 {},
                 "Customer delivery",
@@ -91,6 +99,14 @@ def main() -> int:
                 "将批准版本发送并上传到客户门户。",
                 "记录外部写入回执。",
                 "Chinese send and upload intent",
+            ),
+            (
+                True,
+                {},
+                "Dify dataset delivery",
+                "Upload the approved document to Dify datasets.",
+                "Record the webhook receipt after sending.",
+                "ASCII connector and inflected action intent",
             ),
             (
                 True,

@@ -108,6 +108,15 @@ EXTERNAL_WRITE_NEGATION_BREAK_RE = re.compile(
     r"(?:\b(?:but|however|then|instead|except)\b|但是|但|不过|然而|然后|随后|(?<!不)再|改为|而是|除外)",
     re.IGNORECASE,
 )
+EXTERNAL_WRITE_ASCII_KEYWORD_PATTERNS = {
+    "publish": r"publish(?:es|ed|ing)?",
+    "upload": r"upload(?:s|ed|ing)?",
+    "deploy": r"deploy(?:s|ed|ing)?",
+    "push": r"push(?:es|ed|ing)?",
+    "send": r"(?:send(?:s|ing)?|sent)",
+    "webhook": r"webhooks?",
+    "dataset": r"datasets?",
+}
 
 
 def stable_hash(value: Any) -> str:
@@ -129,21 +138,32 @@ def redact_text(text: Any, limit: int = 200) -> str:
     return value[:limit]
 
 
+def external_write_keyword_indexes(text: str, keyword: str):
+    if keyword.isascii():
+        body = EXTERNAL_WRITE_ASCII_KEYWORD_PATTERNS.get(keyword, re.escape(keyword))
+        pattern = re.compile(rf"(?<![a-z0-9_])(?:{body})(?![a-z0-9_])", re.IGNORECASE)
+        yield from (match.start() for match in pattern.finditer(text))
+        return
+
+    start = 0
+    while True:
+        index = text.find(keyword, start)
+        if index < 0:
+            return
+        yield index
+        start = index + len(keyword)
+
+
 def positive_external_write_intent(text: Any) -> bool:
     """Detect write intent while ignoring only explicitly negated occurrences."""
     lowered = str(text or "").lower()
     for keyword in EXTERNAL_WRITE_INTENT_KEYWORDS:
         needle = keyword.lower()
-        start = 0
-        while True:
-            index = lowered.find(needle, start)
-            if index < 0:
-                break
+        for index in external_write_keyword_indexes(lowered, needle):
             prefix = lowered[max(0, index - 80):index]
             negation = EXTERNAL_WRITE_NEGATION_RE.search(prefix) or EXTERNAL_WRITE_TIGHT_NEGATION_RE.search(prefix)
             if negation is None or EXTERNAL_WRITE_NEGATION_BREAK_RE.search(negation.group(0)):
                 return True
-            start = index + len(needle)
     return False
 
 

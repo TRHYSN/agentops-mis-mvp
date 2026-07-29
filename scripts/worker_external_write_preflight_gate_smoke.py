@@ -205,6 +205,19 @@ def main() -> int:
     require(
         not worker_external_write_intent(
             {
+                "title": "Read-only integration review",
+                "description": "Return evidence without modifying files or using external tools.",
+                "acceptance_criteria": "Summarize the connector status notionally.",
+            },
+            intent_args,
+            intent_capability,
+        ),
+        "connector-name substrings inside ordinary words must not create a prepared action",
+        failures,
+    )
+    require(
+        not worker_external_write_intent(
+            {
                 "title": "本地验收摘要",
                 "description": "不要上传或发布任何内容，仅限本地只读分析。",
                 "acceptance_criteria": "返回简短摘要。",
