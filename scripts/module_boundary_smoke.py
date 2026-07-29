@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+import datetime as dt
 import json
 import sqlite3
 import sys
@@ -122,6 +123,7 @@ from agentops_mis_core.operator_receipts import (
     operator_receipt_requires_control_readback,
 )
 from agentops_mis_core.worker_fleet import (
+    SERVICE_WORKER_EXECUTION_SCOPES,
     build_worker_remote_fleet_summary,
     build_worker_fleet_hygiene_plan,
     build_worker_fleet_view,
@@ -728,6 +730,7 @@ def main() -> int:
     require(manifest.get("schema_version") == SCHEMA_VERSION, "manifest schema mismatch", failures)
     require(manifest.get("boundaries", {}).get("workdir") == str(ROOT), "repo_root boundary was not injected", failures)
     require(runtime_connector_for_adapter("openclaw") == "rtc_openclaw_local", "adapter mapping failed", failures)
+    require(runtime_connector_for_adapter("codex") == "rtc_codex_local", "Codex adapter mapping failed", failures)
     public = runtime_connector_public_row({
         "runtime_connector_id": "rtc_openclaw_local",
         "capability_manifest_json": json.dumps(manifest, ensure_ascii=False, sort_keys=True),
@@ -737,7 +740,7 @@ def main() -> int:
     require(public.get("token_omitted") is True and public.get("raw_prompt_omitted") is True, "public row omission proof missing", failures)
     connector_rows = runtime_connector_rows()
     connector_ids = {row.get("runtime_connector_id") for row in connector_rows}
-    require({"rtc_agent_gateway_local", "rtc_openclaw_local", "rtc_hermes_default_gateway", "rtc_agnesfallback_cli", "rtc_agnesfallback_openai_api"}.issubset(connector_ids), f"runtime connector rows missing expected IDs: {sorted(connector_ids)}", failures)
+    require({"rtc_agent_gateway_local", "rtc_codex_local", "rtc_openclaw_local", "rtc_hermes_default_gateway", "rtc_agnesfallback_cli", "rtc_agnesfallback_openai_api"}.issubset(connector_ids), f"runtime connector rows missing expected IDs: {sorted(connector_ids)}", failures)
     require(all(row.get("capability_manifest_json") and row.get("capability_policy_hash") for row in connector_rows), "runtime connector rows missing manifest/hash", failures)
     refreshed_rows = runtime_connector_refresh_rows({
         "default_gateway": {
@@ -902,6 +905,12 @@ def main() -> int:
         None,
         {
             "requires_prepared_action_for_external_write": True,
+            "knowledge_context_consumed": True,
+            "knowledge_context_contract_version": "project-context-packet-v1",
+            "knowledge_context_packet_hash": "sha256:fixture",
+            "knowledge_context_block_count": 2,
+            "knowledge_context_block_hashes": ["sha256:block"],
+            "knowledge_context_approved_memory_ids": ["mem_smoke"],
             "knowledge_retrieval_task_context": {
                 "task_id": "tsk_smoke",
                 "query_source": "task_id",
@@ -1454,7 +1463,7 @@ def main() -> int:
         "workspace_id": "local-demo",
         "status": "active",
         "session_state": "active",
-        "scopes": ["tasks:read"],
+        "scopes": sorted(SERVICE_WORKER_EXECUTION_SCOPES),
     }
     public_remote = public_remote_worker(
         remote_enrollment,
@@ -1466,6 +1475,67 @@ def main() -> int:
         enrollments=[remote_enrollment],
         sessions=[remote_session],
         agents_by_id={"agt_worker_remote_smoke": {"name": "Remote Smoke Worker", "runtime_type": "mock", "status": "idle"}},
+        heartbeats_by_session={
+            "fixture_remote_session_ref": {
+                "last_heartbeat_at": "2026-06-22T00:00:20+00:00",
+                "status": "idle",
+            },
+        },
+        now_dt=dt.datetime(2026, 6, 22, 0, 0, 30, tzinfo=dt.timezone.utc),
+    )
+    service_only_summary = build_worker_remote_fleet_summary(
+        enrollments=[],
+        sessions=[{
+            "session_id": "fixture_service_session_ref",
+            "agent_id": "agt_worker_service_smoke",
+            "workspace_id": "local-demo",
+            "status": "active",
+            "session_state": "active",
+            "scopes": sorted(SERVICE_WORKER_EXECUTION_SCOPES),
+        }],
+        agents_by_id={
+            "agt_worker_service_smoke": {
+                "name": "Service Smoke Worker",
+                "runtime_type": "hermes",
+                "status": "idle",
+            },
+        },
+        heartbeats_by_session={
+            "fixture_service_session_ref": {
+                "last_heartbeat_at": "2026-06-22T00:00:20+00:00",
+                "status": "idle",
+            },
+        },
+        now_dt=dt.datetime(2026, 6, 22, 0, 0, 30, tzinfo=dt.timezone.utc),
+    )
+    service_status = build_worker_status_payload(
+        worker_agents=[{
+            "agent_id": "agt_worker_service_smoke",
+            "name": "Service Smoke Worker",
+            "runtime_type": "hermes",
+            "status": "idle",
+        }],
+        worker_runs=[],
+        worker_tasks=[],
+        worker_events=[],
+        daemons=[],
+        stuck_tasks=[],
+        remote_fleet=service_only_summary,
+        stuck_workflow_jobs=[],
+        adapter_readiness=adapter_readiness,
+    )
+    service_fleet = build_worker_fleet_view(
+        daemons=[],
+        remote_fleet=service_only_summary,
+        adapter_readiness=adapter_readiness["summary"],
+        stuck_tasks=[],
+        stuck_workflow_jobs=[],
+        worker_agents=[{
+            "agent_id": "agt_worker_service_smoke",
+            "name": "Service Smoke Worker",
+            "runtime_type": "hermes",
+            "status": "idle",
+        }],
     )
     require(status_payload.get("status") == "attention", "worker status payload did not reflect stale remote attention", failures)
     require(status_payload.get("fleet_health", {}).get("overall") == "blocked", "worker status payload missing blocked fleet health", failures)
@@ -1485,7 +1555,15 @@ def main() -> int:
     require(public_session.get("session_id_omitted") is True and public_session.get("session_ref") and public_session.get("parent_token_ref") and not public_session.get("session_id"), "remote session projection leaked session id", failures)
     remote_summary_serialized = json.dumps(remote_summary, ensure_ascii=False)
     require(remote_summary.get("status") == "ready" and remote_summary.get("active_sessions") == 1, "remote fleet summary failed active session aggregation", failures)
+    require(remote_summary.get("fresh_service_workers") == 1, "remote fleet summary missed fresh service worker", failures)
     require("fixture_remote_fleet_token_ref" not in remote_summary_serialized and "fixture_remote_session_ref" not in remote_summary_serialized, "remote fleet summary leaked raw token/session ids", failures)
+    require(service_status.get("running_workers") == 0, "service-only status must not claim a locally verified process", failures)
+    require(service_status.get("active_service_workers") == 1 and service_status.get("execution_capacity_workers") == 1, "service-only status missed heartbeat-confirmed execution capacity", failures)
+    require(service_status.get("status") == "running", "service-only status should report available execution capacity", failures)
+    require(service_fleet.get("summary", {}).get("active_service_workers") == 1, "service-only fleet missed active service worker", failures)
+    require(service_fleet.get("summary", {}).get("execution_capacity_workers") == 1, "service-only fleet missed execution capacity", failures)
+    require(service_fleet.get("summary", {}).get("lane_counts", {}).get("gateway_service_worker") == 1, "service-only fleet missed gateway service lane", failures)
+    require(service_fleet.get("lanes", [{}])[0].get("process_state_verified") is False, "service-only fleet must not claim process verification", failures)
     workflow_job_projection = workflow_job_public({
         "job_id": "wfjob_projection_smoke",
         "workspace_id": "local-demo",

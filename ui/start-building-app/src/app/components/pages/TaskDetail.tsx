@@ -1,5 +1,5 @@
 import { Link, useParams } from "react-router";
-import { CheckCircle, FileText, ShieldCheck, Users } from "lucide-react";
+import { CheckCircle, Download, FileText, ShieldCheck, Users } from "lucide-react";
 import { StatusBadge } from "../shared/StatusBadge";
 import { RiskBadge } from "../shared/RiskBadge";
 import { loadAgents, loadDashboard, loadTaskDetail, useLiveData } from "../../data/liveApi";
@@ -30,6 +30,7 @@ export function TaskDetail() {
   const taskCaseRuns = data.detail.evaluation_case_runs || [];
   const latestRun = taskRuns[taskRuns.length - 1];
   const pendingApprovals = taskApprovals.filter(ap => ap.decision === "pending");
+  const hasApprovedDelivery = taskApprovals.some(ap => ap.decision === "approved");
   const passedEvals = taskEvals.filter(ev => ev.pass_fail === "pass").length;
   const failedEvals = taskEvals.filter(ev => ev.pass_fail === "fail" || ev.pass_fail === "failed").length;
   const evidenceStatus = pendingApprovals.length > 0 ? "attention" : taskArtifacts.length > 0 && taskRuns.length > 0 ? "pass" : "planned";
@@ -70,6 +71,7 @@ export function TaskDetail() {
       approvals: "Approvals",
       deliverables: "Deliverables",
       noDeliverables: "No delivery artifacts recorded yet.",
+      downloadApproved: "Download approved artifact",
       relatedRuns: "Related Runs",
       noRuns: "No runs yet.",
       memory: "Memory Candidates",
@@ -117,6 +119,7 @@ export function TaskDetail() {
       approvals: "审批",
       deliverables: "交付物",
       noDeliverables: "暂未记录交付物。",
+      downloadApproved: "下载已批准交付物",
       relatedRuns: "相关运行",
       noRuns: "暂无运行记录。",
       memory: "记忆候选",
@@ -421,7 +424,22 @@ export function TaskDetail() {
                   <span className="text-[10px] rounded px-1.5 py-0.5" style={{ color: "var(--mis-cyan)", background: "rgba(34,211,238,0.10)" }}>{artifact.artifact_type}</span>
                 </div>
                 <p className="text-[11px] leading-relaxed mt-2" style={{ color: "var(--mis-dim)" }}>{artifact.summary}</p>
-                <div className="text-[10px] mt-2" style={{ color: "var(--mis-muted)" }}>{new Date(artifact.created_at).toLocaleString(locale === "zh" ? "zh-CN" : "en-US")}</div>
+                <div className="mt-2 flex items-center justify-between gap-2">
+                  <div className="text-[10px]" style={{ color: "var(--mis-muted)" }}>{new Date(artifact.created_at).toLocaleString(locale === "zh" ? "zh-CN" : "en-US")}</div>
+                  {hasApprovedDelivery && (
+                    <a
+                      data-testid="approved-artifact-download"
+                      href={`/mis-api/artifacts/${encodeURIComponent(artifact.artifact_id)}/download`}
+                      download
+                      title={copy.downloadApproved}
+                      aria-label={copy.downloadApproved}
+                      className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded"
+                      style={{ color: "var(--mis-cyan)", border: "1px solid rgba(34,211,238,0.24)", background: "rgba(34,211,238,0.08)" }}
+                    >
+                      <Download size={13} />
+                    </a>
+                  )}
+                </div>
               </div>
             ))}
           </div>

@@ -65,6 +65,14 @@ def main() -> int:
     require((runtime.get("concurrent_write_during_subprocess") or {}).get("ok") is True, f"concurrent write during subprocess failed: {runtime}", failures)
     require(runtime.get("written_runtime_events") == 1, f"runtime concurrent event missing: {runtime}", failures)
     require(static.get("transaction_statements") == [], f"explicit transaction statements found: {static}", failures)
+    allowed_transactions = static.get("allowed_transaction_statements") or []
+    require(
+        len(allowed_transactions) == 1
+        and allowed_transactions[0].get("function") == "sqlite_atomic_write"
+        and allowed_transactions[0].get("sql_prefix") == "BEGIN IMMEDIATE",
+        f"atomic write transaction contract changed: {static}",
+        failures,
+    )
 
     result = {
         "ok": not failures,
@@ -80,6 +88,7 @@ def main() -> int:
         "long_transaction_static": {
             "slow_call_count": static.get("slow_call_count"),
             "transaction_statements": static.get("transaction_statements"),
+            "allowed_transaction_statements": static.get("allowed_transaction_statements"),
         },
         "failures": failures,
         "token_omitted": True,

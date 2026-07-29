@@ -84,7 +84,7 @@ def wait_ready(base_url: str, proc: subprocess.Popen[str]) -> None:
         if proc.poll() is not None:
             raise RuntimeError(f"server exited early with code {proc.returncode}")
         try:
-            status, _payload, _raw = http_json("GET", base_url, "/api/local/readiness")
+            status, _payload, _raw = http_json("GET", base_url, "/health")
             if status == 200:
                 return
         except urllib.error.URLError as exc:

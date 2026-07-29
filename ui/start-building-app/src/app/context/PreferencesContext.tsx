@@ -19,8 +19,9 @@ const LOCALE_KEY = "agentops-mis-locale";
 function readTheme(): ThemeMode {
   const stored = localStorage.getItem(THEME_KEY);
   if (stored === "light" || stored === "enterprise") return "enterprise";
+  if (stored === "dark" || stored === "ops") return "ops";
   if (stored === "workforce") return "workforce";
-  return "ops";
+  return "enterprise";
 }
 
 function readLocale(): LocaleMode {

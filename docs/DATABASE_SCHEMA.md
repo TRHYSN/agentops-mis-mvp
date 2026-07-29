@@ -29,8 +29,18 @@ CREATE TABLE IF NOT EXISTS agents (
     FOREIGN KEY(owner_user_id) REFERENCES users(user_id)
 );
 
+CREATE TABLE IF NOT EXISTS workspace_agent_memberships (
+    workspace_id TEXT NOT NULL,
+    agent_id TEXT NOT NULL,
+    source TEXT NOT NULL DEFAULT 'human-created',
+    created_at TEXT NOT NULL,
+    PRIMARY KEY(workspace_id, agent_id),
+    FOREIGN KEY(agent_id) REFERENCES agents(agent_id)
+);
+
 CREATE TABLE IF NOT EXISTS tasks (
     task_id TEXT PRIMARY KEY,
+    workspace_id TEXT NOT NULL DEFAULT 'local-demo',
     title TEXT NOT NULL,
     description TEXT,
     requester_id TEXT,
@@ -50,6 +60,7 @@ CREATE TABLE IF NOT EXISTS tasks (
 
 CREATE TABLE IF NOT EXISTS runs (
     run_id TEXT PRIMARY KEY,
+    workspace_id TEXT NOT NULL DEFAULT 'local-demo',
     task_id TEXT NOT NULL,
     agent_id TEXT NOT NULL,
     runtime_type TEXT NOT NULL,
@@ -106,6 +117,9 @@ CREATE TABLE IF NOT EXISTS approvals (
     approver_user_id TEXT,
     decision TEXT NOT NULL CHECK(decision IN ('pending','approved','rejected','expired')),
     reason TEXT,
+    subject_type TEXT,
+    subject_id TEXT,
+    subject_hash TEXT,
     expires_at TEXT,
     created_at TEXT NOT NULL,
     decided_at TEXT,
@@ -265,6 +279,12 @@ CREATE INDEX IF NOT EXISTS idx_memories_status ON memories(review_status);
 CREATE INDEX IF NOT EXISTS idx_memories_scope ON memories(scope);
 CREATE INDEX IF NOT EXISTS idx_audit_entity ON audit_logs(entity_type, entity_id);
 ```
+
+Private Host 的 Human Session 不把全局 Agent 表直接当 workspace 权威。Human 创建的 Agent 由 `workspace_agent_memberships` 显式绑定；任务 owner/collaborator、Run、Agent Plan 和 Agent Gateway enrollment/Session 仍可提供派生投影。Plan-only 旧 Agent 必须在 Plan 所属 workspace 可见，同时不得泄漏到 `local-demo`。Audit 查询必须按 `(entity_type, entity_id)` 成对验证对象归属，不能只按 `entity_id` 做跨表并集。
+
+升级旧库时，迁移 `2026-07-22-workspace-agent-membership-authority` 只为没有任何显式 membership、且没有非 `local-demo` Task/Run/Agent Plan/Token/Session/Enrollment 权威证据的旧 Agent 补一条 `source='legacy-local-backfill'` 的本地 membership；迁移记录和主键共同保证幂等。Human 创建 Agent 时，Agent、membership 和 Audit 必须在同一 SQLite 事务中成功或整体回滚。
+
+`approvals.approval_id` 不能作为可复用的显示编号。Agent Plan Approval 还必须显式绑定 `subject_type='agent_plan'`、`subject_id=plan_id` 和 `subject_hash=plan_hash`；仅有相同 Task/Run/Agent 的普通 Approval 不能被复用。Agent Plan 和 Prepared Action 创建/决策必须比较不可变权威绑定；ID 已被另一对象占用时返回 `409 approval_id_conflict`，且不得留下 Plan、Approval、Tool Call、Prepared Action 或 Run/Task 状态更新的半截写入。Private Host Human Session 的真实 Account ID进入 Agent Plan 与 Audit，旧 `approver_user_id -> users` 字段保留兼容映射。
 
 ## v1.2.1 扩展表
 

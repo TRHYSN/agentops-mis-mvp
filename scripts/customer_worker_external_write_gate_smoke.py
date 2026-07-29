@@ -35,6 +35,194 @@ def leaked_secret(text: str) -> bool:
 
 def main() -> int:
     try:
+        classifier_cases = [
+            (
+                False,
+                {},
+                "本地只读验收",
+                "不得发布任何内容，也不使用外部连接器。",
+                "不要上传或发送数据，只返回本地摘要。",
+                "Chinese negated task",
+            ),
+            (
+                False,
+                {},
+                "Read-only acceptance",
+                "Do not publish, send, upload, or perform external writes.",
+                "Return a bounded local summary only.",
+                "English negated task",
+            ),
+            (
+                False,
+                {},
+                "Read-only acceptance",
+                "This task does not publish, send, upload, or deploy anything.",
+                "The worker should not perform an external write.",
+                "English third-person negated task",
+            ),
+            (
+                False,
+                {},
+                "Read-only acceptance",
+                "Without publishing or uploading, return a local summary.",
+                "No external write is allowed.",
+                "English tight negation chain",
+            ),
+            (
+                False,
+                {},
+                "本地只读验收",
+                "无需发布或上传，只返回本地摘要。",
+                "不进行外部写入。",
+                "Chinese tight negation chain",
+            ),
+            (
+                False,
+                {},
+                "Read-only integration review",
+                "Return evidence without modifying files or using external tools.",
+                "Summarize the connector status notionally.",
+                "ASCII connector names require word boundaries",
+            ),
+            (
+                True,
+                {},
+                "Customer delivery",
+                "Publish the approved report to the customer portal.",
+                "Record the delivery receipt.",
+                "English publish intent",
+            ),
+            (
+                True,
+                {},
+                "客户交付",
+                "将批准版本发送并上传到客户门户。",
+                "记录外部写入回执。",
+                "Chinese send and upload intent",
+            ),
+            (
+                True,
+                {},
+                "Dify dataset delivery",
+                "Upload the approved document to Dify datasets.",
+                "Record the webhook receipt after sending.",
+                "ASCII connector and inflected action intent",
+            ),
+            (
+                True,
+                {},
+                "Mixed instruction",
+                "Do not upload drafts, but publish the approved release.",
+                "Record the delivery receipt.",
+                "English later positive intent",
+            ),
+            (
+                True,
+                {},
+                "混合指令",
+                "不得上传草稿；随后发布批准版本。",
+                "记录交付回执。",
+                "Chinese later positive intent",
+            ),
+            (
+                True,
+                {},
+                "Unsafe English instruction",
+                "Without approval, publish the report.",
+                "Record the delivery receipt.",
+                "without approval does not negate publish",
+            ),
+            (
+                True,
+                {},
+                "不安全中文指令",
+                "无需审批即可发布报告。",
+                "记录交付回执。",
+                "无需审批 does not negate publish",
+            ),
+            (
+                True,
+                {"external_write_intent": False},
+                "Customer delivery",
+                "Upload the approved artifact.",
+                "Record the delivery receipt.",
+                "explicit false cannot suppress positive prose",
+            ),
+            (
+                True,
+                {
+                    "external_write_intent": False,
+                    "external_action_type": "customer.portal.publish",
+                },
+                "Local summary",
+                "Do not publish from task prose.",
+                "Return a summary.",
+                "structured external action remains fail closed",
+            ),
+            (
+                True,
+                {"external_write_intent": {"unexpected": True}},
+                "Local summary",
+                "Return a bounded local summary.",
+                "No connector action is requested.",
+                "malformed explicit intent fails closed",
+            ),
+            (
+                True,
+                {"target_resource": "http://localhost.evil.example/write"},
+                "Local summary",
+                "Return a bounded local summary.",
+                "No connector action is requested.",
+                "localhost suffix is not loopback",
+            ),
+            (
+                True,
+                {"target_resource": "http://127.0.0.1.evil.example/write"},
+                "Local summary",
+                "Return a bounded local summary.",
+                "No connector action is requested.",
+                "loopback-looking suffix is not loopback",
+            ),
+            (
+                False,
+                {"target_resource": "http://127.0.0.1:8787/local"},
+                "Local summary",
+                "Return a bounded local summary.",
+                "No connector action is requested.",
+                "exact IPv4 loopback remains local",
+            ),
+            (
+                False,
+                {"target_resource": "http://[::1]:8787/local"},
+                "Local summary",
+                "Return a bounded local summary.",
+                "No connector action is requested.",
+                "exact IPv6 loopback remains local",
+            ),
+        ]
+        for expected, body, title, description, acceptance, label in classifier_cases:
+            actual = server.customer_worker_external_write_intent(body, title, description, acceptance)
+            require(actual is expected, f"{label} classified as {actual}, expected {expected}")
+
+        require(
+            server.tool_call_has_external_side_effect_intent(
+                "local.read", "read", "http://localhost.evil.example/write", {}
+            ) is True,
+            "tool-call gate accepted a localhost-suffix external target",
+        )
+        require(
+            server.tool_call_has_external_side_effect_intent(
+                "local.read", "read", "http://127.0.0.1:8787/local", {}
+            ) is False,
+            "tool-call gate rejected an exact IPv4 loopback read",
+        )
+        require(
+            server.tool_call_has_external_side_effect_intent(
+                "local.read", "read", None, {"url": "http://127.0.0.1.evil.example/write"}
+            ) is True,
+            "tool-call gate accepted a loopback-looking explicit target",
+        )
+
         class FakeClient:
             workspace_id = "local-demo"
             agent_id = "agt_fake"

@@ -28,6 +28,7 @@ from urllib.parse import urlencode, urlparse
 from urllib.request import Request, urlopen
 
 from agentops_mis_cli.advance_loop_policy import advance_loop_command_policy, advance_loop_policy_summary
+from agentops_mis_cli.http_transport import credential_opener, credential_transport_url_allowed, safe_credential_error
 from agentops_mis_cli.redaction import redact_text
 from agentops_mis_core.operator_start_check import compact_start_check_local_run_path, operator_agent_loop_packet
 
@@ -84,9 +85,18 @@ def load_config() -> dict:
 
 
 def save_config(config: dict):
-    CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
-    CONFIG_PATH.write_text(json.dumps(config, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    CONFIG_PATH.chmod(stat.S_IRUSR | stat.S_IWUSR)
+    CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    temporary = CONFIG_PATH.with_name(f".{CONFIG_PATH.name}.{uuid.uuid4().hex}.tmp")
+    descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, stat.S_IRUSR | stat.S_IWUSR)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            handle.write(json.dumps(config, ensure_ascii=False, indent=2) + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, CONFIG_PATH)
+        CONFIG_PATH.chmod(stat.S_IRUSR | stat.S_IWUSR)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def resolved_context(args) -> dict:
@@ -101,14 +111,24 @@ def resolved_context(args) -> dict:
         request_timeout = max(1, int(request_timeout_raw))
     except (TypeError, ValueError):
         request_timeout = DEFAULT_REQUEST_TIMEOUT
+    base_url = (getattr(args, "base_url", None) or os.environ.get("AGENTOPS_BASE_URL") or config.get("base_url") or DEFAULT_BASE_URL).rstrip("/")
+    explicit_api_key = getattr(args, "api_key", None)
+    if explicit_api_key is None and "AGENTOPS_API_KEY" in os.environ:
+        explicit_api_key = os.environ.get("AGENTOPS_API_KEY", "")
+    configured_api_key = str(config.get("api_key") or "")
+    configured_key_origin = str(config.get("api_key_base_url") or config.get("base_url") or "").rstrip("/")
+    config_key_origin_mismatch = bool(configured_api_key and (not configured_key_origin or configured_key_origin != base_url))
+    api_key = explicit_api_key if explicit_api_key is not None else ("" if config_key_origin_mismatch else configured_api_key)
     context = {
-        "base_url": (getattr(args, "base_url", None) or os.environ.get("AGENTOPS_BASE_URL") or config.get("base_url") or DEFAULT_BASE_URL).rstrip("/"),
-        "api_key": getattr(args, "api_key", None) if getattr(args, "api_key", None) is not None else os.environ.get("AGENTOPS_API_KEY", config.get("api_key", "")),
+        "base_url": base_url,
+        "api_key": api_key,
         "workspace_id": getattr(args, "workspace_id", None) or os.environ.get("AGENTOPS_WORKSPACE_ID") or config.get("workspace_id") or DEFAULT_WORKSPACE_ID,
         "agent_id": getattr(args, "agent_id", None) or os.environ.get("AGENTOPS_AGENT_ID") or config.get("agent_id") or "",
         "request_timeout": request_timeout,
     }
     context["sources"] = context_sources(args, config)
+    if config_key_origin_mismatch and explicit_api_key is None:
+        context["sources"]["api_key"] = "blocked_origin_mismatch"
     return context
 
 
@@ -259,7 +279,7 @@ def local_demo_default_probe(target_base_url: str = "", timeout: float = 2.0) ->
         return result
     try:
         req = Request(probe_url + "/api/agent-gateway/status", headers={"Accept": "application/json"})
-        with urlopen(req, timeout=timeout) as res:
+        with credential_opener().open(req, timeout=timeout) as res:
             raw = res.read().decode("utf-8")
             payload = json.loads(raw) if raw else {}
             result.update({
@@ -270,7 +290,7 @@ def local_demo_default_probe(target_base_url: str = "", timeout: float = 2.0) ->
             })
         try:
             req = Request(probe_url + "/api/local/readiness", headers={"Accept": "application/json"})
-            with urlopen(req, timeout=timeout) as readiness_res:
+            with credential_opener().open(req, timeout=timeout) as readiness_res:
                 raw = readiness_res.read().decode("utf-8")
                 readiness = json.loads(raw) if raw else {}
                 runtime = readiness.get("running_instance") if isinstance(readiness.get("running_instance"), dict) else {}
@@ -361,12 +381,17 @@ class AgentOpsClient:
             if self.agent_id:
                 headers["X-AgentOps-Agent-Id"] = self.agent_id
             if api_key:
+                if not credential_transport_url_allowed(url):
+                    raise RuntimeError(
+                        "Credentialed Agent Gateway requests require HTTPS or a literal loopback HTTP target"
+                    )
                 headers["X-AgentOps-Api-Key"] = api_key
                 headers["Authorization"] = f"Bearer {api_key}"
             return Request(url, data=data, headers=headers, method=method)
 
+        opener = credential_opener()
         try:
-            with urlopen(make_request(self.api_key), timeout=self.request_timeout) as res:
+            with opener.open(make_request(self.api_key), timeout=self.request_timeout) as res:
                 raw = res.read().decode("utf-8")
                 parsed = json.loads(raw) if raw else {}
                 if (
@@ -374,7 +399,7 @@ class AgentOpsClient:
                     and self._can_retry_without_stale_config_token(json.dumps(parsed, ensure_ascii=False), 401)
                     and self._payload_has_stale_config_token_diagnostic(parsed)
                 ):
-                    with urlopen(make_request(""), timeout=self.request_timeout) as retry_res:
+                    with opener.open(make_request(""), timeout=self.request_timeout) as retry_res:
                         self.stale_config_token_ignored = True
                         retry_raw = retry_res.read().decode("utf-8")
                         return json.loads(retry_raw) if retry_raw else {}
@@ -382,15 +407,18 @@ class AgentOpsClient:
         except HTTPError as exc:
             detail = exc.read().decode("utf-8", errors="replace")
             if self._can_retry_without_stale_config_token(detail, exc.code):
-                with urlopen(make_request(""), timeout=self.request_timeout) as res:
+                with opener.open(make_request(""), timeout=self.request_timeout) as res:
                     self.stale_config_token_ignored = True
                     raw = res.read().decode("utf-8")
                     return json.loads(raw) if raw else {}
-            raise RuntimeError(f"{method} {path} failed: {exc.code} {redact_text(detail, 1200)}") from exc
+            raise RuntimeError(
+                f"{method} {path} failed: {exc.code} "
+                f"{safe_credential_error(detail, self.api_key, 1200)}"
+            ) from exc
         except TimeoutError as exc:
             raise RuntimeError(f"{method} {path} timed out after {self.request_timeout}s; {self.connection_hint()}") from exc
         except URLError as exc:
-            raise RuntimeError(f"Cannot reach {redact_text(url, 500)}: {redact_text(str(exc.reason), 500)}; {self.connection_hint()}") from exc
+            raise RuntimeError(f"Cannot reach {safe_credential_error(url, self.api_key, 500)}: {safe_credential_error(exc.reason, self.api_key, 500)}; {self.connection_hint()}") from exc
 
     def get(self, path: str, query: dict | None = None):
         return self.request("GET", path, query=query)
@@ -401,15 +429,25 @@ class AgentOpsClient:
 
 def cmd_login(args) -> dict:
     config = load_config()
-    api_key = args.api_key if args.api_key is not None else os.environ.get("AGENTOPS_API_KEY", config.get("api_key", ""))
+    prior_base_url = str(config.get("base_url") or "").rstrip("/")
+    prior_key_origin = str(config.get("api_key_base_url") or prior_base_url).rstrip("/")
+    base_url = (args.base_url or os.environ.get("AGENTOPS_BASE_URL") or config.get("base_url") or DEFAULT_BASE_URL).rstrip("/")
+    explicit_api_key = args.api_key
+    if explicit_api_key is None and "AGENTOPS_API_KEY" in os.environ:
+        explicit_api_key = os.environ.get("AGENTOPS_API_KEY", "")
+    api_key = explicit_api_key if explicit_api_key is not None else (config.get("api_key", "") if prior_key_origin and prior_key_origin == base_url else "")
     config.update({
-        "base_url": args.base_url or os.environ.get("AGENTOPS_BASE_URL") or config.get("base_url") or DEFAULT_BASE_URL,
+        "base_url": base_url,
         "workspace_id": args.workspace_id or os.environ.get("AGENTOPS_WORKSPACE_ID") or config.get("workspace_id") or DEFAULT_WORKSPACE_ID,
     })
     if args.agent_id or os.environ.get("AGENTOPS_AGENT_ID") or config.get("agent_id"):
         config["agent_id"] = args.agent_id or os.environ.get("AGENTOPS_AGENT_ID") or config.get("agent_id")
     if api_key:
         config["api_key"] = api_key
+        config["api_key_base_url"] = base_url
+    elif config.get("api_key") and prior_key_origin != base_url:
+        config.pop("api_key", None)
+        config.pop("api_key_base_url", None)
     save_config(config)
     return {
         "ok": True,
@@ -1469,7 +1507,10 @@ def _local_service_check_from_command(args, client: AgentOpsClient, command: str
 
 def _fast_service_closure_context(args, client: AgentOpsClient) -> dict:
     manager = args.service_check_manager or "launchd"
-    agent_id = args.service_check_agent_id or client.agent_id or f"agt_worker_daemon_{args.adapter}"
+    daemon_id = f"agt_worker_daemon_{args.adapter}"
+    local_stack_id = f"agt_worker_local_stack_{args.adapter}"
+    requested_agent_id = args.service_check_agent_id or client.agent_id or ""
+    agent_id = requested_agent_id if requested_agent_id in {daemon_id, local_stack_id} else daemon_id
     service_check_command = args.service_check_command or " ".join(shlex.quote(str(part)) for part in [
         "agentops",
         "worker",
@@ -4337,10 +4378,13 @@ def cmd_run_heartbeat(args, client: AgentOpsClient) -> dict:
 
 
 def cmd_runtime_connectors(args, client: AgentOpsClient) -> dict:
+    payload = client.get("/api/agent-gateway/host-runtime-connectors")
     return {
         "provider": "agentops-runtime",
         "operation": "runtime_connectors",
-        "connectors": client.get("/api/runtime-connectors"),
+        "connectors": payload.get("connectors") or [],
+        "auth": payload.get("auth") or {},
+        "safety": payload.get("safety") or {},
         "contract": "read-only runtime connector manifest and trust registry view; use worker readiness for route selection and prepared actions for high-risk live side effects",
         "live_execution_performed": False,
         "token_omitted": True,
@@ -4438,6 +4482,18 @@ def cmd_knowledge_evidence_packet(args, client: AgentOpsClient) -> dict:
         "adapter": args.adapter,
         "limit": args.limit,
         "baseline_limit": args.baseline_limit,
+    })
+
+
+def cmd_knowledge_context_packet(args, client: AgentOpsClient) -> dict:
+    return client.get("/api/agent-gateway/knowledge/context-packet", query={
+        "q": args.query,
+        "task_id": args.task_id,
+        "adapter": args.adapter,
+        "limit": args.limit,
+        "memory_limit": args.memory_limit,
+        "block_chars": args.block_chars,
+        "max_chars": args.max_chars,
     })
 
 
@@ -5286,19 +5342,19 @@ def cmd_workflow_codex_workspace_write(args, client: AgentOpsClient) -> dict:
 
 
 def cmd_worker_stuck(args, client: AgentOpsClient) -> dict:
-    return client.get("/api/workers/stuck-tasks", query={"threshold_sec": args.threshold_sec, "limit": args.limit})
+    return client.get("/api/agent-gateway/host-workers/stuck-tasks", query={"threshold_sec": args.threshold_sec, "limit": args.limit})
 
 
 def cmd_worker_status(args, client: AgentOpsClient) -> dict:
-    return client.get("/api/workers/status")
+    return client.get("/api/agent-gateway/host-workers/status")
 
 
 def cmd_worker_fleet(args, client: AgentOpsClient) -> dict:
-    return client.get("/api/workers/fleet")
+    return client.get("/api/agent-gateway/host-workers/fleet")
 
 
 def cmd_worker_readiness(args, client: AgentOpsClient) -> dict:
-    return client.get("/api/workers/adapter-readiness")
+    return client.get("/api/agent-gateway/host-workers/adapter-readiness")
 
 
 def cmd_worker_logs(args, client: AgentOpsClient) -> dict:
@@ -5348,6 +5404,8 @@ def cmd_worker_service_check(args, client: AgentOpsClient) -> dict:
         label=args.label or "",
         service_path=args.service_path or "",
         api_key_placeholder=args.api_key_placeholder,
+        credential_source=args.credential_source,
+        config_path=args.config_path,
         timeout=args.timeout,
     )
     payload = worker_mod.check_service_installation(check_args)
@@ -5370,11 +5428,14 @@ def cmd_worker_service_install(args, client: AgentOpsClient) -> dict:
         session_refresh_margin_sec=args.session_refresh_margin_sec,
         poll_interval=args.poll_interval,
         label=args.label or "",
-        working_directory=args.working_directory,
+        working_directory=args.working_directory or str(worker_mod.DEFAULT_WORKER_CWD),
         runtime_dir=args.runtime_dir or "",
         log_path=args.log_path or "",
         api_key_placeholder=args.api_key_placeholder,
+        credential_source=args.credential_source,
+        config_path=args.config_path,
         worker_command=args.worker_command or "",
+        hermes_gateway_url=args.hermes_gateway_url or "",
         service_path=args.service_path or "",
         confirm_install=bool(args.confirm_install),
         overwrite=bool(args.overwrite),
@@ -5397,6 +5458,8 @@ def cmd_worker_service_control(args, client: AgentOpsClient) -> dict:
         label=args.label or "",
         service_path=args.service_path or "",
         api_key_placeholder=args.api_key_placeholder,
+        credential_source=args.credential_source,
+        config_path=args.config_path,
         timeout=args.timeout,
         confirm_control=bool(args.confirm_control),
     )
@@ -5794,7 +5857,7 @@ def build_parser() -> argparse.ArgumentParser:
     operator_launch.add_argument("--handoff-mode", choices=["lightweight", "full"], default="lightweight", help="Use lightweight loop-control by default; choose full for deeper operator handoff diagnostics.")
     operator_launch.add_argument("--full-handoff", action="store_true", help="Shortcut for --handoff-mode full.")
     operator_launch.add_argument("--brief", action="store_true", help="Return a compact copy-only launch brief for Hermes/OpenClaw/Codex instead of the full packet.")
-    operator_launch.add_argument("--adapter", choices=["mock", "hermes", "openclaw"], default="mock", help="Adapter context to include in --brief preflight and live-confirmation guidance.")
+    operator_launch.add_argument("--adapter", choices=["mock", "codex", "hermes", "openclaw"], default="mock", help="Adapter context to include in --brief preflight and live-confirmation guidance.")
     operator_launch.set_defaults(handler="operator_loop_launch_packet")
     operator_start_check = operator_sub.add_parser("start-check", help="Read the pre-task local loop start check for Hermes/OpenClaw/Codex.")
     operator_start_check.add_argument("--adapter", choices=["mock", "hermes", "openclaw"], default="mock")
@@ -6148,7 +6211,7 @@ def build_parser() -> argparse.ArgumentParser:
     runtime_event_record = runtime_event_sub.add_parser("record", help="Record a redacted runtime/tool event summary for a run.")
     runtime_event_record.add_argument("--run-id", required=True)
     runtime_event_record.add_argument("--agent-id", default=None)
-    runtime_event_record.add_argument("--adapter", default=None, choices=["mock", "hermes", "openclaw", "agnesfallback"])
+    runtime_event_record.add_argument("--adapter", default=None, choices=["mock", "codex", "hermes", "openclaw", "agnesfallback"])
     runtime_event_record.add_argument("--connector-id", default=None)
     runtime_event_record.add_argument("--event-type", default="runtime.tool_event")
     runtime_event_record.add_argument("--status", default="completed", choices=["planned", "running", "completed", "failed", "blocked", "waiting_approval", "unavailable"])
@@ -6224,6 +6287,15 @@ def build_parser() -> argparse.ArgumentParser:
     knowledge_packet.add_argument("--limit", type=int, default=5)
     knowledge_packet.add_argument("--baseline-limit", type=int, default=5)
     knowledge_packet.set_defaults(handler="knowledge_evidence_packet")
+    knowledge_context = knowledge_sub.add_parser("context-packet", help="Read bounded project summaries and approved memories for transient model context.")
+    knowledge_context.add_argument("query", nargs="?", default="")
+    knowledge_context.add_argument("--task-id", default=None, help="Build context from an existing MIS task without returning raw task text.")
+    knowledge_context.add_argument("--adapter", default=None, help="Optional runtime adapter hint used for task-aware retrieval.")
+    knowledge_context.add_argument("--limit", type=int, default=5, help="Maximum versioned knowledge summaries (1-8).")
+    knowledge_context.add_argument("--memory-limit", type=int, default=3, help="Maximum approved canonical memories (0-5).")
+    knowledge_context.add_argument("--block-chars", type=int, default=480, help="Maximum characters per redacted summary (120-800).")
+    knowledge_context.add_argument("--max-chars", type=int, default=4000, help="Maximum combined context characters (600-6000).")
+    knowledge_context.set_defaults(handler="knowledge_context_packet")
 
     agent_plan = sub.add_parser("agent-plan", help="Agent work method plan commands.")
     agent_plan_sub = agent_plan.add_subparsers(dest="action", required=True)
@@ -6645,6 +6717,8 @@ def build_parser() -> argparse.ArgumentParser:
     worker_service_check.add_argument("--label", default="")
     worker_service_check.add_argument("--service-path", default="")
     worker_service_check.add_argument("--api-key-placeholder", default="<paste one-time token here>")
+    worker_service_check.add_argument("--credential-source", choices=["auto", "direct", "local_config"], default="auto")
+    worker_service_check.add_argument("--config-path", default=str(CONFIG_PATH))
     worker_service_check.add_argument("--timeout", type=int, default=5)
     worker_service_check.set_defaults(handler="worker_service_check")
     worker_service_install = worker_sub.add_parser("service-install", help="Dry-run or write a safe launchd/systemd worker service file.")
@@ -6657,11 +6731,14 @@ def build_parser() -> argparse.ArgumentParser:
     worker_service_install.add_argument("--session-refresh-margin-sec", type=float, default=60)
     worker_service_install.add_argument("--poll-interval", type=float, default=5.0)
     worker_service_install.add_argument("--label", default="")
-    worker_service_install.add_argument("--working-directory", default=str(Path.cwd()))
+    worker_service_install.add_argument("--working-directory", default="", help="Worker project directory. Installed Private Host defaults to its managed current package link.")
     worker_service_install.add_argument("--runtime-dir", default="")
     worker_service_install.add_argument("--log-path", default="")
     worker_service_install.add_argument("--api-key-placeholder", default="<paste one-time token here>")
+    worker_service_install.add_argument("--credential-source", choices=["direct", "local_config"], default="direct")
+    worker_service_install.add_argument("--config-path", default=str(CONFIG_PATH))
     worker_service_install.add_argument("--worker-command", default="", help="Worker executable command for service templates. Defaults to installed agentops-worker or python -m fallback.")
+    worker_service_install.add_argument("--hermes-gateway-url", default=os.environ.get("HERMES_GATEWAY_URL", ""), help="Persist an explicit credential-free Hermes HTTP(S) base URL for a Hermes service.")
     worker_service_install.add_argument("--service-path", default="")
     worker_service_install.add_argument("--confirm-install", action="store_true", help="Write the service file. Default is dry-run.")
     worker_service_install.add_argument("--overwrite", action="store_true")
@@ -6675,6 +6752,8 @@ def build_parser() -> argparse.ArgumentParser:
     worker_service_control.add_argument("--label", default="")
     worker_service_control.add_argument("--service-path", default="")
     worker_service_control.add_argument("--api-key-placeholder", default="<paste one-time token here>")
+    worker_service_control.add_argument("--credential-source", choices=["auto", "direct", "local_config"], default="auto")
+    worker_service_control.add_argument("--config-path", default=str(CONFIG_PATH))
     worker_service_control.add_argument("--timeout", type=int, default=10)
     worker_service_control.add_argument("--confirm-control", action="store_true", help="Actually call launchctl/systemctl. Default is preview only.")
     worker_service_control.set_defaults(handler="worker_service_control")
@@ -6867,6 +6946,7 @@ HANDLERS = {
     "knowledge_search": cmd_knowledge_search,
     "knowledge_index": cmd_knowledge_index,
     "knowledge_evidence_packet": cmd_knowledge_evidence_packet,
+    "knowledge_context_packet": cmd_knowledge_context_packet,
     "agent_plan_create": cmd_agent_plan_create,
     "agent_plan_list": cmd_agent_plan_list,
     "agent_plan_get": cmd_agent_plan_get,

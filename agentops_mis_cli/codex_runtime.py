@@ -42,7 +42,7 @@ ALLOWED_EVENT_TYPES = {
     "turn.completed",
     "error",
 }
-ALLOWED_ITEM_TYPES = {"agent_message", "reasoning"}
+ALLOWED_ITEM_TYPES = {"agent_message", "reasoning", "error"}
 WORKSPACE_WRITE_ITEM_TYPES = ALLOWED_ITEM_TYPES | {"command_execution", "file_change", "todo_list"}
 MAX_JSONL_BYTES = 2_000_000
 MAX_JSONL_EVENTS = 2_000
@@ -203,6 +203,10 @@ def codex_command(binary: Path, cwd: Path, *, sandbox: str = "read-only") -> lis
         "--ephemeral",
         "--ignore-user-config",
         "--strict-config",
+    ]
+    if sandbox == "read-only":
+        command.append("--skip-git-repo-check")
+    command.extend([
         "--config",
         'web_search="disabled"',
         "--sandbox",
@@ -212,7 +216,7 @@ def codex_command(binary: Path, cwd: Path, *, sandbox: str = "read-only") -> lis
         "-C",
         str(cwd),
         "-",
-    ]
+    ])
     for feature in disabled_features:
         command[2:2] = ["--disable", feature]
     return command
@@ -307,8 +311,6 @@ def _parse_jsonl(stdout: str, *, sandbox: str = "read-only") -> tuple[str, int, 
         event_counts[event_type] = event_counts.get(event_type, 0) + 1
         if event_type not in ALLOWED_EVENT_TYPES:
             protocol_errors.append(f"unknown_event_type:{event_type}")
-        if event_type == "error":
-            protocol_errors.append("runtime_error_event")
         item = event.get("item") if isinstance(event.get("item"), dict) else {}
         item_type = str(item.get("type") or "")
         if item_type:
@@ -330,18 +332,30 @@ def _parse_jsonl(stdout: str, *, sandbox: str = "read-only") -> tuple[str, int, 
     agent_message_count = item_counts.get("agent_message", 0)
     if (write_mode and agent_message_count < 1) or (not write_mode and agent_message_count != 1):
         protocol_errors.append("invalid_agent_message_count")
+    runtime_error_event_count = event_counts.get("error", 0)
+    protocol_completed = (
+        event_counts.get("thread.started") == 1
+        and event_counts.get("turn.started") == 1
+        and event_counts.get("turn.completed") == 1
+        and ((write_mode and agent_message_count >= 1) or (not write_mode and agent_message_count == 1))
+    )
+    if runtime_error_event_count and not protocol_completed:
+        protocol_errors.append("runtime_error_event_without_completion")
     observation = {
         "protocol": "codex_exec_jsonl_v1",
         "sandbox": sandbox,
         "ephemeral": True,
         "ignore_user_config": True,
         "strict_config": True,
+        "git_repo_check": "skipped_for_packaged_read_only_runtime" if not write_mode else "required_managed_worktree",
         "web_search": "disabled",
         "disabled_features": list(DISABLED_FEATURES if not write_mode else WORKSPACE_WRITE_DISABLED_FEATURES),
         "prompt_transport": "stdin",
         "event_counts": event_counts,
         "item_type_counts": item_counts,
         "parse_errors": parse_errors,
+        "runtime_error_event_count": runtime_error_event_count,
+        "runtime_error_recovered": bool(runtime_error_event_count and protocol_completed),
         "prohibited_item_types": sorted(set(prohibited)),
         "prohibited_event_count": len(prohibited),
         "protocol_errors": sorted(set(protocol_errors)),
@@ -907,6 +921,7 @@ def codex_preflight(*, binary_path: str, cwd: Path, timeout: int) -> dict:
             "ephemeral": True,
             "ignore_user_config": True,
             "strict_config": True,
+            "git_repo_check": "skipped_for_packaged_read_only_runtime",
             "web_search": "disabled",
             "disabled_features": list(DISABLED_FEATURES),
             "prompt_transport": "stdin",

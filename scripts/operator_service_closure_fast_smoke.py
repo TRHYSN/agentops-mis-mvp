@@ -177,6 +177,39 @@ def main() -> int:
 
             service_path = tmp_path / f"{adapter}.plist"
             write_launchd_service_fixture(service_path, adapter, base_url)
+            poisoned_preview = run_cli(
+                [
+                    "--base-url",
+                    base_url,
+                    "--agent-id",
+                    "agt_acceptance_client_must_not_become_service_identity",
+                    "operator",
+                    "service-closure",
+                    "--adapter",
+                    adapter,
+                    "--fast",
+                    "--run-service-check",
+                    "--service-path",
+                    str(service_path),
+                ],
+                env,
+                outputs,
+            )
+            poisoned_planned = poisoned_preview.get("planned_receipt") if isinstance(poisoned_preview.get("planned_receipt"), dict) else {}
+            poisoned_commands = " ".join(
+                str(poisoned_planned.get(key) or "")
+                for key in ("action_command", "verify_command")
+            )
+            require(
+                f"--agent-id agt_worker_daemon_{adapter}" in poisoned_commands,
+                f"fast closure trusted an unrelated CLI Agent as the service identity: {poisoned_planned}",
+                failures,
+            )
+            require(
+                "agt_acceptance_client_must_not_become_service_identity" not in poisoned_commands,
+                f"fast closure leaked the unrelated CLI Agent into service commands: {poisoned_planned}",
+                failures,
+            )
             preview = run_cli(
                 [
                     "--base-url",

@@ -8,6 +8,7 @@ ledger contains fresh, complete product evidence for the requested adapters.
 from __future__ import annotations
 
 import argparse
+import http.cookiejar
 import json
 import os
 import re
@@ -41,11 +42,35 @@ def token_leaked(text: str) -> bool:
     return any(pattern.search(text or "") for pattern in TOKEN_PATTERNS)
 
 
-def http_get_json(base_url: str, path: str, timeout: int = 30) -> tuple[int, dict]:
+def http_get_json(base_url: str, path: str, timeout: int = 30, *, opener=None) -> tuple[int, dict]:
     req = urllib.request.Request(base_url.rstrip("/") + path, headers={"Accept": "application/json"}, method="GET")
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
+    with (opener.open(req, timeout=timeout) if opener else urllib.request.urlopen(req, timeout=timeout)) as resp:
         raw = resp.read().decode("utf-8")
         return resp.status, json.loads(raw or "{}")
+
+
+def authenticated_human_opener(args: argparse.Namespace):
+    password = os.environ.get(args.password_env, "")
+    if not password:
+        raise RuntimeError(f"Private Host human auth requires password env: {args.password_env}")
+    opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar()))
+    status, auth_status = http_get_json(args.base_url, "/api/human-auth/status", args.timeout, opener=opener)
+    if status != 200 or auth_status.get("required") is not True:
+        raise RuntimeError("Private Host did not report required human authentication")
+    if auth_status.get("bootstrap_required"):
+        raise RuntimeError("Private Host Owner must be bootstrapped before read-only readiness")
+    body = json.dumps({"username": args.username, "password": password}).encode("utf-8")
+    request = urllib.request.Request(
+        args.base_url.rstrip("/") + "/api/human-auth/login",
+        data=body,
+        headers={"Content-Type": "application/json", "Origin": args.origin or args.base_url.rstrip("/")},
+        method="POST",
+    )
+    with opener.open(request, timeout=args.timeout) as response:
+        payload = json.loads(response.read().decode("utf-8") or "{}")
+    if response.status != 200 or (payload.get("user") or {}).get("role") != "owner":
+        raise RuntimeError("Private Host Owner authentication failed")
+    return opener
 
 
 def require(condition: bool, message: str, failures: list[str]) -> None:
@@ -84,13 +109,19 @@ def main() -> int:
     parser.add_argument("--freshness-hours", type=int, default=72)
     parser.add_argument("--limit", type=int, default=8)
     parser.add_argument("--require-adapter", action="append", choices=["hermes", "openclaw"], default=None)
+    parser.add_argument("--human-auth", action="store_true", help="Authenticate through a Private Host human Session.")
+    parser.add_argument("--origin", default=os.environ.get("AGENTOPS_ACCEPTANCE_ORIGIN", ""))
+    parser.add_argument("--username", default=os.environ.get("AGENTOPS_ACCEPTANCE_USERNAME", "owner"))
+    parser.add_argument("--password-env", default="AGENTOPS_ACCEPTANCE_PASSWORD")
+    parser.add_argument("--timeout", type=int, default=30)
     args = parser.parse_args()
     required_adapters = args.require_adapter or ["hermes", "openclaw"]
     failures: list[str] = []
     try:
+        opener = authenticated_human_opener(args) if args.human_auth else None
         query = urllib.parse.urlencode({"freshness_hours": args.freshness_hours, "limit": args.limit})
-        live_status, live = http_get_json(args.base_url, f"/api/operator/live-acceptance?{query}")
-        local_status, local = http_get_json(args.base_url, "/api/local/readiness")
+        live_status, live = http_get_json(args.base_url, f"/api/operator/live-acceptance?{query}", args.timeout, opener=opener)
+        local_status, local = http_get_json(args.base_url, "/api/local/readiness", args.timeout, opener=opener)
         require(live_status == 200, f"live-acceptance HTTP status {live_status}", failures)
         require(local_status == 200, f"local-readiness HTTP status {local_status}", failures)
         require(live.get("operation") == "live_acceptance_readiness", f"wrong live operation: {live}", failures)
@@ -119,6 +150,7 @@ def main() -> int:
             "base_url": args.base_url.rstrip("/"),
             "freshness_hours": args.freshness_hours,
             "required_adapters": required_adapters,
+            "human_session_used": bool(args.human_auth),
             "adapters": summaries,
             "live_acceptance_status": live.get("status"),
             "local_readiness_status": local.get("status"),

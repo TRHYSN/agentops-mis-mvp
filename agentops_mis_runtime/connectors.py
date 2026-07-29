@@ -11,6 +11,7 @@ import datetime as dt
 import json
 import os
 import shlex
+import shutil
 from pathlib import Path
 
 from agentops_mis_runtime.capabilities import runtime_connector_capability_manifest
@@ -18,6 +19,7 @@ from agentops_mis_runtime.capabilities import runtime_connector_capability_manif
 
 ROOT = Path(__file__).resolve().parents[1]
 OPENCLAW_BIN = Path("/opt/homebrew/bin/openclaw")
+CODEX_APP_BIN = Path("/Applications/ChatGPT.app/Contents/Resources/codex")
 
 
 def now_iso() -> str:
@@ -48,10 +50,23 @@ def agnesfallback_cli_command(agnes: dict, prompt: str) -> list[str]:
     return [agnes["binary_path"], "-z", prompt, *agnes.get("extra_args", [])]
 
 
+def codex_binary_available() -> bool:
+    candidates = [
+        os.environ.get("CODEX_BIN", "").strip(),
+        str(CODEX_APP_BIN),
+        shutil.which("codex") or "",
+    ]
+    return any(
+        candidate and Path(candidate).expanduser().is_file() and os.access(Path(candidate).expanduser(), os.X_OK)
+        for candidate in candidates
+    )
+
+
 def runtime_connector_rows() -> list[dict]:
     now = now_iso()
     hermes = hermes_runtime_config()
     agnes = agnesfallback_config()
+    codex_available = codex_binary_available()
     rows = [
         {
             "runtime_connector_id": "rtc_agent_gateway_local",
@@ -86,6 +101,24 @@ def runtime_connector_rows() -> list[dict]:
             "trust_updated_at": now,
             "last_health_at": now,
             "last_error": None if OPENCLAW_BIN.exists() else f"missing {OPENCLAW_BIN}",
+            "created_at": now,
+            "updated_at": now,
+        },
+        {
+            "runtime_connector_id": "rtc_codex_local",
+            "provider": "codex",
+            "connector_type": "governed_cli_worker",
+            "profile_name": "read-only-default",
+            "base_url": None,
+            "binary_path": None,
+            "status": "available" if codex_available else "unavailable",
+            "allow_real_run": 1,
+            "require_confirm_run": 1,
+            "trust_status": "trusted",
+            "trust_note": None,
+            "trust_updated_at": now,
+            "last_health_at": now,
+            "last_error": None if codex_available else "Codex CLI is unavailable.",
             "created_at": now,
             "updated_at": now,
         },

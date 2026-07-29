@@ -1,8 +1,18 @@
-import { Plug, Radio } from "lucide-react";
+import { Activity, Bot, Database, Plug, Radio, ShieldCheck } from "lucide-react";
 import { useState } from "react";
+import { Link } from "react-router";
+import { ConnectorTopology } from "../connectors/ConnectorTopology";
 import { ConnectorCard } from "../shared/ConnectorCard";
 import { StatusBadge } from "../shared/StatusBadge";
-import { loadAudit, loadCommercialConfigStatus, loadRuntimeConnectors, updateRuntimeConnectorTrust, useLiveData } from "../../data/liveApi";
+import {
+  loadAudit,
+  loadCommercialConfigStatus,
+  loadRuntimeConnectors,
+  loadWorkerAdapterReadiness,
+  loadWorkerFleet,
+  updateRuntimeConnectorTrust,
+  useLiveData,
+} from "../../data/liveApi";
 import { pick, usePreferences } from "../../context/PreferencesContext";
 
 export function RuntimeConnectors() {
@@ -10,19 +20,23 @@ export function RuntimeConnectors() {
   const [trustAction, setTrustAction] = useState<string | null>(null);
   const [trustMessage, setTrustMessage] = useState<string | null>(null);
   const { data, loading, error, refresh } = useLiveData(async () => {
-    const [runtimeConnectors, auditLogs, commercialConfigStatus] = await Promise.all([
+    const [runtimeConnectors, auditLogs, commercialConfigStatus, workerFleet, adapterReadiness] = await Promise.all([
       loadRuntimeConnectors(),
       loadAudit(),
       loadCommercialConfigStatus(),
+      loadWorkerFleet(),
+      loadWorkerAdapterReadiness(),
     ]);
     const connectorAuditLogs = auditLogs.filter(a =>
       a.entity_type === "runtime_connectors" || a.entity_type === "runtime_connector" || a.entity_type === "connector"
     );
-    return { runtimeConnectors, connectorAuditLogs, commercialConfigStatus };
+    return { runtimeConnectors, connectorAuditLogs, commercialConfigStatus, workerFleet, adapterReadiness };
   }, []);
   const runtimeConnectors = data?.runtimeConnectors || [];
   const connectorAuditLogs = data?.connectorAuditLogs || [];
   const commercialConfigStatus = data?.commercialConfigStatus;
+  const workerFleet = data?.workerFleet;
+  const adapterReadiness = data?.adapterReadiness;
   const copy = pick(locale, {
     en: {
       title: "Runtime Connectors",
@@ -78,6 +92,19 @@ export function RuntimeConnectors() {
       noBillingCleanup: "No billing, cleanup, hosted-readiness or live-runtime action is performed from this panel.",
       plannedConnectors: "Planned Connectors",
       recentRuntimeEvents: "Recent Runtime Events",
+      topology: "Runtime connection topology",
+      topologySummary: "Human intent flows through MIS policy and connector trust before a Worker reaches a runtime; bounded evidence returns to the ledger.",
+      controlPlane: "MIS control plane",
+      controlPlaneDetail: "Task, plan, approval and workspace authority",
+      trustNode: "Trust registry",
+      trustNodeDetail: "Connector policy and live-run gate",
+      adapterNode: "Runtime adapters",
+      adapterNodeDetail: "Provider-neutral execution boundary",
+      workerNode: "Worker instances",
+      workerNodeDetail: "Scoped identities and heartbeat state",
+      ledgerNode: "Evidence ledger",
+      ledgerNodeDetail: "Run, tool, evaluation and audit readback",
+      codexDetail: "Open Codex instances and bidirectional path",
     },
     zh: {
       title: "运行时连接器",
@@ -133,6 +160,19 @@ export function RuntimeConnectors() {
       noBillingCleanup: "此面板不会执行 billing、cleanup、hosted-readiness 或真实运行时动作。",
       plannedConnectors: "计划接入的连接器",
       recentRuntimeEvents: "最近运行时事件",
+      topology: "运行时连接拓扑",
+      topologySummary: "人的任务先经过 MIS 策略与连接器信任门，再由 Worker 访问运行时；受限证据沿反向链路回到账本。",
+      controlPlane: "MIS 控制面",
+      controlPlaneDetail: "任务、计划、审批和工作区权威",
+      trustNode: "信任登记",
+      trustNodeDetail: "连接器策略与真实运行门",
+      adapterNode: "运行时适配器",
+      adapterNodeDetail: "供应商中立的执行边界",
+      workerNode: "Worker 实例",
+      workerNodeDetail: "受限身份与心跳状态",
+      ledgerNode: "证据账本",
+      ledgerNodeDetail: "Run、工具、评估与审计回读",
+      codexDetail: "查看 Codex 实例与双向链路",
     },
   });
 
@@ -156,6 +196,62 @@ export function RuntimeConnectors() {
     if (status === "review_required") return copy.reviewImpact;
     return copy.trustedImpact;
   };
+  const blockedConnectors = runtimeConnectors.filter(connector => connector.trust_status === "blocked").length;
+  const reviewConnectors = runtimeConnectors.filter(connector => connector.trust_status === "review_required").length;
+  const readyConnectors = runtimeConnectors.filter(connector => ["ready", "live", "available"].includes(connector.status)).length;
+  const workerLaneCount = workerFleet?.lanes.length || 0;
+  const adapterCount = adapterReadiness ? Object.keys(adapterReadiness.adapters).length : 0;
+  const readyAdapterCount = adapterReadiness?.summary.ready_adapters?.length || 0;
+  const topologyNodes = [
+    {
+      id: "control-plane",
+      label: copy.controlPlane,
+      value: "AgentOps MIS",
+      detail: copy.controlPlaneDetail,
+      status: error ? "unavailable" : "ready",
+      icon: <ShieldCheck size={15} />,
+    },
+    {
+      id: "trust-registry",
+      label: copy.trustNode,
+      value: blockedConnectors
+        ? `${blockedConnectors} ${copy.blocked}`
+        : reviewConnectors
+          ? `${reviewConnectors} ${copy.reviewRequired}`
+          : copy.trusted,
+      detail: copy.trustNodeDetail,
+      status: blockedConnectors ? "blocked" : reviewConnectors ? "attention" : "pass",
+      icon: <ShieldCheck size={15} />,
+    },
+    {
+      id: "runtime-adapters",
+      label: copy.adapterNode,
+      value: adapterCount ? `${readyAdapterCount}/${adapterCount}` : `${readyConnectors}/${runtimeConnectors.length || 0}`,
+      detail: copy.adapterNodeDetail,
+      status: adapterCount
+        ? (readyAdapterCount ? "ready" : adapterReadiness?.status || "unavailable")
+        : readyConnectors ? "ready" : "unavailable",
+      icon: <Plug size={15} />,
+    },
+    {
+      id: "worker-fleet",
+      label: copy.workerNode,
+      value: String(workerLaneCount),
+      detail: copy.workerNodeDetail,
+      status: workerLaneCount ? "ready" : "unknown",
+      icon: <Bot size={15} />,
+      to: "/workspace/workers",
+    },
+    {
+      id: "evidence-ledger",
+      label: copy.ledgerNode,
+      value: String(connectorAuditLogs.length),
+      detail: copy.ledgerNodeDetail,
+      status: connectorAuditLogs.length ? "ready" : "planned",
+      icon: <Database size={15} />,
+      to: "/admin/runs",
+    },
+  ];
 
   const changeTrust = async (connectorId: string, trustStatus: "trusted" | "review_required" | "blocked") => {
     setTrustAction(`${connectorId}:${trustStatus}`);
@@ -215,6 +311,12 @@ export function RuntimeConnectors() {
           </div>
         ))}
       </div>
+
+      <ConnectorTopology
+        label={copy.topology}
+        description={copy.topologySummary}
+        nodes={topologyNodes}
+      />
 
       {commercialConfigStatus && (
         <div
@@ -307,7 +409,7 @@ export function RuntimeConnectors() {
       )}
 
       {/* Connector cards grid */}
-      <div className="grid grid-cols-2 gap-4">
+      <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
         {runtimeConnectors.map(connector => (
           <div key={connector.connector_id} className="rounded-xl overflow-hidden" style={{ border: "1px solid var(--mis-border)" }}>
             <ConnectorCard connector={connector} />
@@ -381,6 +483,16 @@ export function RuntimeConnectors() {
                   ))}
                 </div>
               </div>
+              {(`${connector.connector_id} ${connector.provider}`.toLowerCase().includes("codex")) && (
+                <Link
+                  to="/admin/connectors/codex"
+                  className="mt-3 flex min-h-9 items-center justify-between rounded px-3 text-[11px] font-medium"
+                  style={{ color: "var(--mis-cyan)", background: "var(--mis-bg)", border: "1px solid var(--mis-border)" }}
+                >
+                  <span className="inline-flex items-center gap-2"><Activity size={13} />{copy.codexDetail}</span>
+                  <span aria-hidden="true">→</span>
+                </Link>
+              )}
             </div>
           </div>
         ))}
@@ -402,7 +514,7 @@ export function RuntimeConnectors() {
           {copy.plannedConnectors}
         </div>
         <div className="flex gap-3 flex-wrap">
-          {["OpenAI-compatible APIs", "Claude Direct", "Codex", "OpenHands", "CrewAI", "LangGraph"].map(name => (
+          {["OpenAI-compatible APIs", "Claude Direct", "OpenHands", "CrewAI", "LangGraph"].map(name => (
             <span
               key={name}
               className="px-2 py-1 rounded"

@@ -78,6 +78,16 @@ The packet includes the canonical command manifest used for release review:
 - `python3 scripts/github_ci_evidence_smoke.py`
 - `python3 scripts/clean_machine_rc_smoke.py`
 - `python3 scripts/run_local_stack_smoke.py`
+- `python3 scripts/private_host_owner_browser_handoff_smoke.py`
+- `python3 scripts/private_host_auth_workspace_ui_smoke.py`
+- `python3 scripts/human_password_recovery_smoke.py`
+- `python3 scripts/private_host_service_worker_presence_smoke.py`
+- `python3 scripts/human_session_management_smoke.py`
+- `python3 scripts/private_host_worker_machine_read_smoke.py`
+- `python3 scripts/private_host_worker_ownership_smoke.py`
+- `python3 scripts/private_host_rc_status_smoke.py`
+- `python3 scripts/private_host_background_service_smoke.py`
+- `python3 scripts/private_host_macos_launcher_smoke.py`
 - `python3 scripts/release_evidence_packet_smoke.py`
 - `python3 scripts/merge_readiness_status_smoke.py`
 - `python3 scripts/v1_5_product_closure_evidence_smoke.py`
@@ -135,6 +145,7 @@ The packet includes the canonical command manifest used for release review:
 - `python3 scripts/shared_mode_local_write_guard_smoke.py`
 - `python3 scripts/automatic_plan_evidence_workflow_smoke.py`
 - `python3 scripts/migration_rollback_smoke.py`
+- `python3 scripts/memory_workspace_authority_migration_smoke.py`
 - `python3 scripts/approval_semantics_boundary_smoke.py`
 - `python3 scripts/agent_plan_quality_smoke.py`
 - `python3 scripts/knowledge_retrieval_quality_smoke.py`

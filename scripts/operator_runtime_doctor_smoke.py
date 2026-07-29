@@ -225,6 +225,29 @@ def main() -> int:
             validate_payload(api_payload, "api", failures)
             require(api_payload.get("base_url") == base_url, f"base URL not reflected safely: {api_payload.get('base_url')}", failures)
 
+            spoof_marker = "forwarded-runtime-doctor-marker.invalid"
+            status, forwarded_payload = http_json(
+                base_url,
+                "/api/operator/runtime-doctor?limit=3",
+                headers={
+                    "Forwarded": f"host={spoof_marker};proto=https",
+                    "X-Forwarded-Host": spoof_marker,
+                    "X-Forwarded-Proto": "https",
+                },
+            )
+            outputs.append(json.dumps(forwarded_payload, ensure_ascii=False))
+            require(status == 200, f"forwarded-header API status mismatch: {status} {forwarded_payload}", failures)
+            require(
+                forwarded_payload.get("base_url") == base_url,
+                f"forwarded headers changed runtime-doctor base URL: {forwarded_payload.get('base_url')}",
+                failures,
+            )
+            require(
+                spoof_marker not in json.dumps(forwarded_payload, ensure_ascii=False),
+                "forwarded-header marker leaked into runtime-doctor output",
+                failures,
+            )
+
             status, invalid_token_payload = http_json(base_url, "/api/operator/runtime-doctor", headers={"Authorization": "Bearer no-such-token"})
             outputs.append(json.dumps(invalid_token_payload, ensure_ascii=False))
             require(status == 401, f"invalid token should be rejected: {status} {invalid_token_payload}", failures)

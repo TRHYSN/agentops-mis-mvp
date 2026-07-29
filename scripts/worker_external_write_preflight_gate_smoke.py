@@ -15,9 +15,15 @@ import time
 import urllib.error
 import urllib.request
 from pathlib import Path
-
+from types import SimpleNamespace
 
 ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from agentops_mis_cli.worker import worker_external_write_intent
+
+
 SERVER = ROOT / "server.py"
 SECRET_RE = re.compile(r"(Authorization:|Bearer\s+[A-Za-z0-9._~+/=-]+|agtok_[A-Za-z0-9_-]{16,}|agtsess_[A-Za-z0-9_-]{16,}|sk-[A-Za-z0-9_-]{20,}|ntn_[A-Za-z0-9_-]{8,})")
 
@@ -181,6 +187,60 @@ def main() -> int:
     server: subprocess.Popen[str] | None = None
     stamp = str(int(time.time() * 1000))
     worker_results: list[dict] = []
+    intent_args = SimpleNamespace(adapter="openclaw", confirm_run=True)
+    intent_capability = {"requires_prepared_action_for_external_write": True}
+    require(
+        not worker_external_write_intent(
+            {
+                "title": "Local acceptance summary",
+                "description": "Do not perform external writes. Keep every operation local and read-only.",
+                "acceptance_criteria": "Return a bounded local summary.",
+            },
+            intent_args,
+            intent_capability,
+        ),
+        "negated external-write wording must not create a prepared action",
+        failures,
+    )
+    require(
+        not worker_external_write_intent(
+            {
+                "title": "Read-only integration review",
+                "description": "Return evidence without modifying files or using external tools.",
+                "acceptance_criteria": "Summarize the connector status notionally.",
+            },
+            intent_args,
+            intent_capability,
+        ),
+        "connector-name substrings inside ordinary words must not create a prepared action",
+        failures,
+    )
+    require(
+        not worker_external_write_intent(
+            {
+                "title": "本地验收摘要",
+                "description": "不要上传或发布任何内容，仅限本地只读分析。",
+                "acceptance_criteria": "返回简短摘要。",
+            },
+            intent_args,
+            intent_capability,
+        ),
+        "Chinese negated external-write wording must not create a prepared action",
+        failures,
+    )
+    require(
+        worker_external_write_intent(
+            {
+                "title": "Customer delivery",
+                "description": "Do not upload drafts. Publish the approved release to the customer portal.",
+                "acceptance_criteria": "Record the delivery receipt.",
+            },
+            intent_args,
+            intent_capability,
+        ),
+        "a later positive write intent must still create a prepared action",
+        failures,
+    )
 
     with tempfile.TemporaryDirectory(prefix="agentops-worker-external-gate-") as tmp:
         db_path = Path(tmp) / "agentops_worker_gate.db"

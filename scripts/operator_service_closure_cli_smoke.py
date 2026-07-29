@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shlex
 import socket
 import subprocess
 import sys
@@ -287,6 +288,17 @@ def main() -> int:
                 activation_needed = supervision_item(base_url, adapter, failures, outputs)
                 activation_closure = activation_needed.get("service_closure") if isinstance(activation_needed.get("service_closure"), dict) else {}
                 activation_loop = ((activation_needed.get("local_deployment") or {}).get("service_managed_loop") or {})
+                activation_commands = activation_loop.get("commands") if isinstance(activation_loop.get("commands"), dict) else {}
+                receipt_parts = shlex.split(str(activation_commands.get("record_verified_receipt") or ""))
+                expected_signature = (
+                    receipt_parts[receipt_parts.index("--action-signature") + 1]
+                    if "--action-signature" in receipt_parts and receipt_parts.index("--action-signature") + 1 < len(receipt_parts)
+                    else ""
+                )
+                planned_receipt = auto_record.get("planned_receipt") if isinstance(auto_record.get("planned_receipt"), dict) else {}
+                require(bool(expected_signature), f"{adapter} canonical service signature missing: {activation_commands}", failures)
+                require(planned_receipt.get("action_signature") == expected_signature, f"{adapter} CLI/server service signature mismatch: {planned_receipt}", failures)
+                require(planned_receipt.get("action_command") == activation_commands.get("service_control_preview"), f"{adapter} CLI/server service command mismatch: {planned_receipt}", failures)
                 require(activation_loop.get("receipt_verified") is True, f"{adapter} auto-check receipt should be verified: {activation_loop}", failures)
                 require(activation_loop.get("control_readback_attached") is True, f"{adapter} auto-check readback should attach: {activation_loop}", failures)
                 if activation_loop.get("service_loaded") is True:

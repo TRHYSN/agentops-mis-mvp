@@ -154,9 +154,13 @@ agentops-worker \
   --poll-interval 5 \
   --max-tasks 0 \
   --continue-on-error \
-  --write-state \
-  --jsonl-log
+  --write-state
 ```
+
+Long-running services use MIS heartbeat/state and omit per-poll JSONL stdout by
+default so idle workers cannot grow an unbounded service log. Add
+`--jsonl-log` only for a bounded foreground diagnostic session whose output is
+actively collected or rotated.
 
 If the remote machine will execute Hermes or OpenClaw, run preflight first and
 then add `--confirm-run` only after the operator confirms that the runtime is
@@ -210,6 +214,50 @@ permissions. It does not write a real token, load launchd/systemd, restart a
 service, or execute the worker. If a target service file already exists, pass
 `--overwrite` only after reviewing the existing file locally.
 
+### Private Host same-Mac Worker service
+
+For a Worker on the same Mac as an installed Private Host, do not paste the
+Host machine token into a plist. First create the origin-bound, mode `0600`
+local CLI config through the confirmation-gated Host command:
+
+```bash
+agentops host configure-cli --confirm
+```
+
+Then preview and install a Worker service that references only that file path:
+
+```bash
+agentops worker service-install \
+  --manager launchd \
+  --adapter hermes \
+  --agent-id agt_hermes_local_service \
+  --credential-source local_config \
+  --confirm-run
+
+agentops worker service-install \
+  --manager launchd \
+  --adapter hermes \
+  --agent-id agt_hermes_local_service \
+  --credential-source local_config \
+  --confirm-run \
+  --confirm-install
+```
+
+The plist contains `AGENTOPS_WORKER_CREDENTIAL_SOURCE=local_config` and the
+absolute `AGENTOPS_CONFIG` path, but no API key. At process start the Worker
+opens the config without following symlinks, requires a regular file owned by
+the current user with no group/other permissions, and verifies exact Host
+origin and workspace binding. It then keeps the parent credential in memory
+only long enough to mint a short-lived Worker Session. Missing, unsafe or
+mismatched config fails before any Gateway request or Runtime execution.
+
+Repeat with `--adapter openclaw` and a distinct Agent ID for OpenClaw. Both
+live adapters still require `--confirm-run` in the installed definition and
+`service-control --confirm-control` before launchd is mutated. The Private Host
+service remains separate and fixed to `host start --foreground --no-workers`.
+This avoids duplicate ownership while allowing launchd to restore Host and
+explicitly approved Worker loops independently after login.
+
 Run a read-only service check before loading or troubleshooting a worker
 service:
 
@@ -234,6 +282,9 @@ content and fails closed if token-like values such as enrollment/session/API
 tokens are detected in a generated file. It also reports whether the installed
 template exposes the expected OS relaunch policy: launchd `KeepAlive=true` or
 systemd `Restart=always` with `RestartSec=5`.
+For `local_config`, it additionally proves that the config reference and
+`--use-session` are present while `AGENTOPS_API_KEY` is absent; it never prints
+the config contents.
 
 Preview OS service control before mutating launchd/systemd:
 

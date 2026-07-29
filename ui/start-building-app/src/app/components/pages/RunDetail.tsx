@@ -1,20 +1,24 @@
 import { Link, useParams } from "react-router";
-import { Cpu, DollarSign, Clock, GitBranch, AlertTriangle, ShieldCheck, Network } from "lucide-react";
+import { Cpu, DollarSign, Clock, Download, GitBranch, AlertTriangle, ShieldCheck, Network, Brain } from "lucide-react";
 import { StatusBadge } from "../shared/StatusBadge";
 import { RiskBadge } from "../shared/RiskBadge";
 import { AuditTimeline } from "../shared/AuditTimeline";
-import { loadAudit, loadRunDetail, loadRunEvidenceGraph, loadRuns, useLiveData } from "../../data/liveApi";
+import { loadAudit, loadOperatorEvidenceReport, loadRunDetail, loadRunEvidenceGraph, loadRuns, useLiveData } from "../../data/liveApi";
+import { usePreferences } from "../../context/PreferencesContext";
 
 export function RunDetail() {
   const { id } = useParams<{ id: string }>();
+  const { locale } = usePreferences();
+  const zh = locale === "zh";
   const { data, loading, error } = useLiveData(async () => {
-    const [detail, allRuns, auditLogs, evidenceGraph] = await Promise.all([
+    const [detail, allRuns, auditLogs, evidenceGraph, evidenceReport] = await Promise.all([
       loadRunDetail(id || ""),
       loadRuns(),
       loadAudit(),
       loadRunEvidenceGraph(id || ""),
+      loadOperatorEvidenceReport(1, { runId: id || "" }),
     ]);
-    return { detail, allRuns, auditLogs, evidenceGraph };
+    return { detail, allRuns, auditLogs, evidenceGraph, evidenceReport };
   }, [id]);
 
   if (loading) {
@@ -36,6 +40,7 @@ export function RunDetail() {
   const parentRun = run.parent_run_id ? data.allRuns.find(r => r.run_id === run.parent_run_id) : null;
   const score = runEval ? (runEval.score <= 1 ? Math.round(runEval.score * 100) : Math.round(runEval.score)) : 0;
   const pendingApprovals = runApprovals.filter(approval => approval.decision === "pending");
+  const hasApprovedDelivery = runApprovals.some(approval => approval.decision === "approved");
   const failedTools = runTools.filter(tool => ["failed", "error", "blocked"].includes(tool.status));
   const failedEvals = runEvaluations.filter(ev => ev.pass_fail === "fail" || ev.pass_fail === "failed");
   const evidenceGraph = data.evidenceGraph;
@@ -44,6 +49,80 @@ export function RunDetail() {
   const graphEdgeCount = evidenceGraph.edges?.length || 0;
   const graphAvailable = evidenceGraph.status !== "unavailable" && evidenceGraph.operation === "work_delivery_graph_readback";
   const graphSafety = evidenceGraph.safety || {};
+  const reportRun = data.evidenceReport.runs.find(item => item.run_id === run.run_id);
+  const knowledgeReceipt = reportRun?.worker_knowledge_retrieval;
+  const contextReportAvailable = data.evidenceReport.status !== "unavailable" && Boolean(reportRun);
+  const contextApplicable = knowledgeReceipt?.applicable === true;
+  const contextStatus = contextReportAvailable ? knowledgeReceipt?.status || "not_applicable" : "unavailable";
+  const contextReceiptStatus = !contextReportAvailable
+    ? "attention"
+    : !contextApplicable
+      ? "planned"
+      : contextStatus === "ready"
+        ? "pass"
+        : contextStatus === "unavailable"
+          ? "attention"
+          : "fail";
+  const contextBlockCount = knowledgeReceipt?.context_block_count || 0;
+  const approvedMemoryIds = knowledgeReceipt?.approved_memory_ids || [];
+  const contextPacketHashes = knowledgeReceipt?.context_packet_hashes || [];
+  const knowledgePaths = knowledgeReceipt?.paths || [];
+  const pendingMemoryReviews = reportRun?.memory_review?.pending_review || 0;
+  const runMemoryItems = (reportRun?.memory_review?.items || []).map(item => ({
+    memoryId: typeof item.memory_id === "string" ? item.memory_id : "",
+    memoryType: typeof item.memory_type === "string" ? item.memory_type : "unknown",
+    reviewStatus: typeof item.review_status === "string" ? item.review_status : "unknown",
+    sourceRef: typeof item.source_ref === "string" ? item.source_ref : "",
+  })).filter(item => item.memoryId && item.sourceRef === run.run_id);
+  const contextCopy = zh ? {
+    title: "项目上下文收据",
+    ready: "该 Worker 在执行适配器前读取了受治理的 Context Packet。收据会区分版本化项目知识与实际使用的已审核记忆，只展示 ID、哈希、计数和脱敏证明。",
+    missing: "该 Run 尚没有完整的项目上下文消费证据；请查看证据报告中的缺失项。",
+    notApplicable: "该 Run 不是 Agent Worker 执行，当前没有项目上下文消费收据。",
+    unavailable: "连接的服务暂时无法返回该 Run 的项目上下文收据。",
+    contextBlocks: "上下文块",
+    knowledgeSources: "知识来源",
+    approvedMemories: "已用审核记忆",
+    consumedCalls: "消费工具调用",
+    packetHash: "Context Packet 哈希",
+    memoryIds: "已使用的记忆 ID",
+    sourcePaths: "项目知识来源",
+    resultingMemories: "本次 Run 产生的记忆证据",
+    contextBodyOmitted: "上下文正文未落库",
+    queryOmitted: "检索问题未保存",
+    snippetOmitted: "检索片段未保存",
+    rawContentOmitted: "原始内容未保存",
+    transcriptOmitted: "完整对话未保存",
+    promptOmitted: "原始提示词未保存",
+    responseOmitted: "原始回复未保存",
+    tokenOmitted: "密钥未保存",
+    openMemory: "打开记忆审核",
+    pendingCandidates: "条记忆待审核",
+  } : {
+    title: "Project Context Receipt",
+    ready: "This Worker consumed a governed Context Packet before adapter execution. The receipt distinguishes versioned project Knowledge from any approved Memory IDs actually used and shows only safe evidence.",
+    missing: "This run does not yet have complete project-context consumption evidence; inspect the evidence report gaps.",
+    notApplicable: "This is not an Agent Worker run, so no project-context consumption receipt applies.",
+    unavailable: "The connected service cannot currently return a project-context receipt for this run.",
+    contextBlocks: "Context blocks",
+    knowledgeSources: "Knowledge sources",
+    approvedMemories: "Approved memories used",
+    consumedCalls: "Consumed tool calls",
+    packetHash: "Context Packet hash",
+    memoryIds: "Consumed Memory IDs",
+    sourcePaths: "Project Knowledge sources",
+    resultingMemories: "Memory evidence produced by this run",
+    contextBodyOmitted: "Context body not persisted",
+    queryOmitted: "Raw query omitted",
+    snippetOmitted: "Retrieval snippets omitted",
+    rawContentOmitted: "Raw content omitted",
+    transcriptOmitted: "Full transcript omitted",
+    promptOmitted: "Raw prompt omitted",
+    responseOmitted: "Raw response omitted",
+    tokenOmitted: "Credential omitted",
+    openMemory: "Open memory review",
+    pendingCandidates: "memory reviews pending",
+  };
   const liveRuntime = run.runtime_type === "hermes" || run.runtime_type === "openclaw";
   const evidenceChainStatus = run.status === "failed" || run.status === "blocked" || failedTools.length > 0 || failedEvals.length > 0
     ? "fail"
@@ -148,6 +227,109 @@ export function RunDetail() {
               Review approvals: {pendingApprovals.length}
             </Link>
           )}
+        </div>
+      </div>
+
+      <div
+        data-testid="run-detail-project-context-receipt"
+        className="rounded-xl p-4"
+        style={{ background: "var(--mis-surface)", border: "1px solid var(--mis-border)" }}
+      >
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div className="max-w-4xl">
+            <div className="text-xs font-semibold flex items-center gap-1.5" style={{ color: "var(--mis-text)" }}>
+              <Brain size={13} style={{ color: contextReceiptStatus === "pass" ? "var(--mis-success)" : "var(--mis-purple)" }} />
+              {contextCopy.title}
+            </div>
+            <p className="mt-1 text-[11px] leading-relaxed" style={{ color: "var(--mis-muted)" }}>
+              {!contextReportAvailable
+                ? contextCopy.unavailable
+                : contextReceiptStatus === "pass"
+                ? contextCopy.ready
+                : contextApplicable
+                  ? contextCopy.missing
+                  : contextCopy.notApplicable}
+            </p>
+          </div>
+          <StatusBadge status={contextReceiptStatus} size="md" label={`Context: ${contextStatus}`} />
+        </div>
+
+        <div className="mt-3 grid grid-cols-2 md:grid-cols-4 gap-2">
+          {[
+            { label: contextCopy.contextBlocks, value: contextBlockCount },
+            { label: contextCopy.knowledgeSources, value: knowledgePaths.length },
+            { label: contextCopy.approvedMemories, value: approvedMemoryIds.length },
+            { label: contextCopy.consumedCalls, value: knowledgeReceipt?.consumed_tool_calls || 0 },
+          ].map(item => (
+            <div key={item.label} className="rounded px-3 py-2" style={{ background: "var(--mis-surface2)", border: "1px solid rgba(148,163,184,0.14)" }}>
+              <span className="text-[10px]" style={{ color: "var(--mis-muted)" }}>{item.label}</span>
+              <div className="mt-1 text-sm font-semibold" style={{ color: "var(--mis-text)" }}>{item.value}</div>
+            </div>
+          ))}
+        </div>
+
+        {contextApplicable && (
+          <div className="mt-3 space-y-2 text-[10px]">
+            <div className="rounded px-3 py-2" style={{ background: "var(--mis-surface2)" }}>
+              <div style={{ color: "var(--mis-muted)" }}>{contextCopy.packetHash}</div>
+              <div className="mt-1 break-all font-mono" style={{ color: "var(--mis-dim)" }}>
+                {contextPacketHashes.length > 0 ? contextPacketHashes.join(" · ") : "—"}
+              </div>
+            </div>
+            {approvedMemoryIds.length > 0 && (
+              <div className="rounded px-3 py-2" style={{ background: "var(--mis-surface2)" }}>
+                <div style={{ color: "var(--mis-muted)" }}>{contextCopy.memoryIds}</div>
+                <div className="mt-1 flex flex-wrap gap-1.5">
+                  {approvedMemoryIds.map(memoryId => (
+                    <span key={memoryId} className="rounded px-1.5 py-0.5 font-mono" style={{ color: "var(--mis-cyan)", border: "1px solid rgba(34,211,238,0.20)" }}>{memoryId}</span>
+                  ))}
+                </div>
+              </div>
+            )}
+            {knowledgePaths.length > 0 && (
+              <div className="rounded px-3 py-2" style={{ background: "var(--mis-surface2)" }}>
+                <div style={{ color: "var(--mis-muted)" }}>{contextCopy.sourcePaths}</div>
+                <div className="mt-1 flex flex-wrap gap-1.5">
+                  {knowledgePaths.slice(0, 6).map((path, index) => (
+                    <span key={`${path}-${index}`} className="rounded px-1.5 py-0.5 font-mono" style={{ color: "var(--mis-dim)", border: "1px solid var(--mis-border)" }}>{path}</span>
+                  ))}
+                </div>
+              </div>
+            )}
+            {runMemoryItems.length > 0 && (
+              <div className="rounded px-3 py-2" style={{ background: "var(--mis-surface2)" }}>
+                <div style={{ color: "var(--mis-muted)" }}>{contextCopy.resultingMemories}</div>
+                <div className="mt-1 space-y-1.5">
+                  {runMemoryItems.slice(0, 6).map(item => (
+                    <div key={item.memoryId} className="flex flex-wrap items-center gap-1.5">
+                      <span className="font-mono" style={{ color: "var(--mis-cyan)" }}>{item.memoryId}</span>
+                      <span style={{ color: "var(--mis-dim)" }}>{item.memoryType}</span>
+                      <StatusBadge status={item.reviewStatus} />
+                      <span className="font-mono" style={{ color: "var(--mis-muted)" }}>source: {item.sourceRef}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+            <div className="flex flex-wrap gap-1.5">
+              {[
+                { label: contextCopy.contextBodyOmitted, ok: knowledgeReceipt?.context_body_not_persisted === true },
+                { label: contextCopy.queryOmitted, ok: knowledgeReceipt?.raw_query_omitted === true },
+                { label: contextCopy.snippetOmitted, ok: knowledgeReceipt?.snippet_omitted === true },
+                { label: contextCopy.rawContentOmitted, ok: knowledgeReceipt?.raw_content_omitted === true },
+                { label: contextCopy.transcriptOmitted, ok: knowledgeReceipt?.raw_transcript_omitted === true },
+                { label: contextCopy.promptOmitted, ok: knowledgeReceipt?.raw_prompt_omitted === true },
+                { label: contextCopy.responseOmitted, ok: knowledgeReceipt?.raw_response_omitted === true },
+                { label: contextCopy.tokenOmitted, ok: knowledgeReceipt?.token_omitted === true },
+              ].map(item => <StatusBadge key={item.label} status={item.ok ? "pass" : "fail"} label={item.label} />)}
+            </div>
+          </div>
+        )}
+
+        <div className="mt-3 text-[10px]">
+          <Link to="/workspace/memory" style={{ color: "var(--mis-cyan)" }}>
+            {contextCopy.openMemory} · {pendingMemoryReviews} {contextCopy.pendingCandidates}
+          </Link>
         </div>
       </div>
 
@@ -387,7 +569,22 @@ export function RunDetail() {
           <div className="space-y-2">
             {runArtifacts.map((artifact) => (
               <div key={artifact.artifact_id} className="p-3 rounded-lg" style={{ background: "var(--mis-surface2)" }}>
-                <div className="text-xs font-medium" style={{ color: "var(--mis-text)" }}>{artifact.title}</div>
+                <div className="flex items-center justify-between gap-2">
+                  <div className="text-xs font-medium" style={{ color: "var(--mis-text)" }}>{artifact.title}</div>
+                  {hasApprovedDelivery && (
+                    <a
+                      data-testid="approved-artifact-download"
+                      href={`/mis-api/artifacts/${encodeURIComponent(artifact.artifact_id)}/download`}
+                      download
+                      title="Download approved artifact"
+                      aria-label="Download approved artifact"
+                      className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded"
+                      style={{ color: "var(--mis-cyan)", border: "1px solid rgba(34,211,238,0.24)", background: "rgba(34,211,238,0.08)" }}
+                    >
+                      <Download size={13} />
+                    </a>
+                  )}
+                </div>
                 <div className="text-[11px] mt-1" style={{ color: "var(--mis-dim)" }}>{artifact.summary}</div>
               </div>
             ))}
