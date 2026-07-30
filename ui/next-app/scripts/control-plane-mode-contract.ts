@@ -66,6 +66,9 @@ try {
   assert.throws(() => postgresDsn(), /Postgres host\/database\/user/);
   mutableEnvironment.AGENTOPS_POSTGRES_DSN = "postgresql://control-plane.invalid/agentops";
   assert.equal(postgresDsn(), "postgresql://control-plane.invalid/agentops");
+  mutableEnvironment.AGENTOPS_POSTGRES_HOST = "postgres";
+  assert.throws(() => postgresDsn(), /configuration families/);
+  delete mutableEnvironment.AGENTOPS_POSTGRES_HOST;
   assert.equal(
     postgresApplicationName(),
     "agentops-mis-typescript-control-plane",

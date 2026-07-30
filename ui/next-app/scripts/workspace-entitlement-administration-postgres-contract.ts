@@ -22,6 +22,7 @@ import {
   SCHEMA_CONTRACT,
 } from "../src/server/controlPlane/schemaReadiness";
 import { closeControlPlanePoolForTests } from "../src/server/controlPlane/db";
+import { createGatewayEnrollment } from "../src/server/controlPlane/gatewayAdministration";
 import { establishHumanSession } from "../src/server/controlPlane/humanSession";
 import { HUMAN_SCRYPT_PARAMS } from "../src/server/controlPlane/humanPasswordPolicy";
 
@@ -34,6 +35,11 @@ const OPERATOR_PASSWORD = `${randomBytes(24).toString("base64url")}Aa1!`;
 const ORIGIN = "https://entitlement.example.test";
 const LOGIN_APPLICATION_NAME =
   `agentops-entitlement-login-${randomBytes(4).toString("hex")}`;
+
+type HumanSession = Readonly<{
+  cookie: string;
+  csrf: string;
+}>;
 
 type ArgumentOverrides = Readonly<{
   workspaceId?: string;
@@ -184,7 +190,7 @@ async function waitForBlockedByPid(
 async function assertLoginEntitlementLockOrder(
   connectionString: string,
   fixture: Client,
-) {
+): Promise<HumanSession> {
   const observer = new Client({
     connectionString,
     application_name: "agentops-entitlement-lock-observer",
@@ -225,7 +231,7 @@ async function assertLoginEntitlementLockOrder(
     const entitlementPid = await waitForBlockedByPid(
       observer,
       "agentops-entitlement-administration-contract",
-      [blockerPid, loginPid],
+      [loginPid],
       "expected_entitlement_cli_credential_lock_waiter",
     );
     assert.notEqual(entitlementPid, loginPid);
@@ -239,12 +245,109 @@ async function assertLoginEntitlementLockOrder(
     assert.equal(settled[0].value.status, 200);
     assert.equal(settled[1].status, "fulfilled");
     assert.equal(settled[1].value.mode, "plan");
+    return {
+      cookie: settled[0].value.setCookie.split(";", 1)[0],
+      csrf: String(settled[0].value.body.csrf_token || ""),
+    };
   } finally {
     if (!blockerReleased) {
       await fixture.query("ROLLBACK").catch(() => undefined);
     }
     const pendingOperations: Promise<unknown>[] = [];
     if (loginPromise) pendingOperations.push(loginPromise);
+    if (entitlementPromise) pendingOperations.push(entitlementPromise);
+    await Promise.allSettled(pendingOperations);
+    await observer.end().catch(() => undefined);
+  }
+}
+
+function enrollmentRequest(session: HumanSession) {
+  return new Request(
+    `${ORIGIN}/api/mis/agent-gateway/enrollment/create`,
+    {
+      method: "POST",
+      headers: new Headers({
+        cookie: session.cookie,
+        host: "entitlement.example.test",
+        origin: ORIGIN,
+        "x-agentops-csrf": session.csrf,
+        "x-agentops-workspace-id": "ws_entitlement_plan",
+        "idempotency-key": "entitlement-outer-lock-0001",
+        "content-type": "application/json",
+      }),
+      body: JSON.stringify({
+        workspace_id: "ws_entitlement_plan",
+        agent_id: "agt_entitlement_outer_lock",
+        name: "Entitlement outer lock contract",
+        role: "Remote worker",
+        runtime_type: "hermes",
+        scopes: ["agents:heartbeat", "tasks:read"],
+        ttl_days: 30,
+        heartbeat_timeout_sec: 300,
+        label: "outer lock contract",
+      }),
+    },
+  );
+}
+
+async function assertMembershipBeforeWorkspaceLockOrder(
+  connectionString: string,
+  fixture: Client,
+  session: HumanSession,
+) {
+  const observer = new Client({
+    connectionString,
+    application_name: "agentops-entitlement-outer-lock-observer",
+  });
+  await observer.connect();
+  let blockerReleased = false;
+  let humanPromise: ReturnType<typeof createGatewayEnrollment> | undefined;
+  let entitlementPromise: ReturnType<typeof execute> | undefined;
+  try {
+    await fixture.query("BEGIN");
+    await fixture.query(
+      "SELECT pg_advisory_xact_lock(hashtextextended($1,0))",
+      ["agentops:workspace-entitlement:ws_entitlement_plan"],
+    );
+    const blockerPid = (
+      await fixture.query<{ pid: number }>("SELECT pg_backend_pid() AS pid")
+    ).rows[0].pid;
+    humanPromise = createGatewayEnrollment(enrollmentRequest(session));
+    void humanPromise.catch(() => undefined);
+    const humanPid = await waitForBlockedByPid(
+      observer,
+      LOGIN_APPLICATION_NAME,
+      [blockerPid],
+      "expected_human_workspace_lock_waiter",
+    );
+    entitlementPromise = execute(
+      connectionString,
+      parse({ workspaceId: "ws_entitlement_plan" }),
+    );
+    void entitlementPromise.catch(() => undefined);
+    const entitlementPid = await waitForBlockedByPid(
+      observer,
+      "agentops-entitlement-administration-contract",
+      [humanPid],
+      "expected_entitlement_cli_membership_lock_waiter",
+    );
+    assert.notEqual(entitlementPid, humanPid);
+    await fixture.query("COMMIT");
+    blockerReleased = true;
+    const settled = await Promise.allSettled([
+      humanPromise,
+      entitlementPromise,
+    ]);
+    assert.equal(settled[0].status, "fulfilled");
+    assert.equal(settled[0].value.status, 403);
+    assert.equal(settled[1].status, "fulfilled");
+    assert.equal(settled[1].value.mode, "plan");
+  } finally {
+    if (!blockerReleased) {
+      await fixture.query("ROLLBACK").catch(() => undefined);
+    }
+    const pendingOperations: Promise<unknown>[] = [];
+    if (humanPromise) pendingOperations.push(humanPromise);
     if (entitlementPromise) pendingOperations.push(entitlementPromise);
     await Promise.allSettled(pendingOperations);
     await observer.end().catch(() => undefined);
@@ -384,7 +487,10 @@ async function assertPlanOnlyZeroWrite(
   fixture: Client,
 ) {
   const workspaceId = "ws_entitlement_plan";
-  await seedOperator(fixture, workspaceId);
+  await seedOperator(fixture, workspaceId, {
+    userRole: "owner",
+    membershipRole: "owner",
+  });
   const planned = await execute(connectionString, parse({ workspaceId }));
   assertSafeReceipt(planned, connectionString);
   assert.equal(planned.mode, "plan");
@@ -948,6 +1054,20 @@ async function assertStaticBoundary() {
     source,
     /FROM human_login_credentials credential[\s\S]*?FOR UPDATE`[\s\S]*?SELECT role AS user_role FROM users[\s\S]*?FOR UPDATE`[\s\S]*?FROM workspace_memberships[\s\S]*?FOR UPDATE`/,
   );
+  const administrationStart = source.indexOf(
+    "async function administerInsideTransaction",
+  );
+  const operatorLock = source.indexOf(
+    "await requireTrustedOperator(",
+    administrationStart,
+  );
+  const workspaceLock = source.indexOf(
+    "SELECT pg_advisory_xact_lock(hashtextextended($1,0))",
+    administrationStart,
+  );
+  assert(administrationStart >= 0);
+  assert(operatorLock > administrationStart);
+  assert(workspaceLock > operatorLock);
   assert.match(source, /AGENTOPS_ENTITLEMENT_OPERATOR_PASSWORD/);
   assert.match(source, /appendAudit/);
   assert.match(source, /updated_by_user_id/);
@@ -1031,7 +1151,15 @@ async function run() {
     await fixture.connect();
     try {
       await assertPlanOnlyZeroWrite(connectionString, fixture);
-      await assertLoginEntitlementLockOrder(connectionString, fixture);
+      const humanSession = await assertLoginEntitlementLockOrder(
+        connectionString,
+        fixture,
+      );
+      await assertMembershipBeforeWorkspaceLockOrder(
+        connectionString,
+        fixture,
+        humanSession,
+      );
       await assertCreateUpdateAndReplay(connectionString, fixture);
       await assertConcurrentSingleWinner(connectionString, fixture);
       await assertOperatorAndAbsentGuards(connectionString, fixture);
@@ -1056,6 +1184,7 @@ async function run() {
       invalid_combinations_rejected: true,
       trusted_operator_enforced: true,
       human_login_entitlement_lock_order: true,
+      membership_before_workspace_lock_order: true,
       append_only_audit_verified: true,
       secret_omission_verified: true,
       external_network_calls: externalNetworkCalls,

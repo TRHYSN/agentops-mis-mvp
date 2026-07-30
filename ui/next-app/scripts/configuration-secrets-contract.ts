@@ -87,9 +87,10 @@ async function run() {
       postgresDsn(),
       "postgresql://contract.invalid/example",
     );
+    process.env.AGENTOPS_POSTGRES_HOST = "postgres";
+    await expectFailure(() => postgresDsn());
 
     delete process.env.AGENTOPS_POSTGRES_DSN_FILE;
-    process.env.AGENTOPS_POSTGRES_HOST = "postgres";
     process.env.AGENTOPS_POSTGRES_PORT = "5432";
     process.env.AGENTOPS_POSTGRES_DATABASE = "agentops";
     process.env.AGENTOPS_POSTGRES_USER = "agentops";

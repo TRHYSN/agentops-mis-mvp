@@ -82,6 +82,23 @@ export function secretEnvironmentValue(name: string) {
 }
 
 export function postgresDsn() {
+  const dsnFamilyConfigured = Boolean(
+    String(process.env.AGENTOPS_POSTGRES_DSN || "")
+    || String(process.env.AGENTOPS_POSTGRES_DSN_FILE || "").trim()
+  );
+  const componentFamilyConfigured = [
+    "AGENTOPS_POSTGRES_HOST",
+    "AGENTOPS_POSTGRES_PORT",
+    "AGENTOPS_POSTGRES_DATABASE",
+    "AGENTOPS_POSTGRES_USER",
+    "AGENTOPS_POSTGRES_PASSWORD",
+    "AGENTOPS_POSTGRES_PASSWORD_FILE",
+  ].some((name) => Boolean(String(process.env[name] || "").trim()));
+  if (dsnFamilyConfigured && componentFamilyConfigured) {
+    throw new Error(
+      "Postgres DSN and component configuration families are mutually exclusive.",
+    );
+  }
   const configuredDsn = secretEnvironmentValue("AGENTOPS_POSTGRES_DSN").trim();
   if (configuredDsn) return configuredDsn;
 
