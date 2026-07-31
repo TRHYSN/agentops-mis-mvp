@@ -24,6 +24,8 @@ import { AuditCenter } from "./components/pages/AuditCenter";
 import { CustomerProjectReport } from "./components/pages/CustomerProjectReport";
 import { PrivateHostAcceptance } from "./components/pages/PrivateHostAcceptance";
 import { AccountSecurity } from "./components/pages/AccountSecurity";
+import { ExperimentDetail } from "./components/pages/ExperimentDetail";
+import { Experiments } from "./components/pages/Experiments";
 import { PreferencesProvider } from "./context/PreferencesContext";
 import { AuthGate } from "./components/auth/AuthGate";
 
@@ -43,6 +45,8 @@ export default function App() {
               <Route path="/workspace/workers" element={<WorkerConsole />} />
               <Route path="/workspace/approvals" element={<ApprovalsInbox />} />
               <Route path="/workspace/memory" element={<MemoryLibrary />} />
+              <Route path="/workspace/experiments" element={<Experiments />} />
+              <Route path="/workspace/experiments/:id" element={<ExperimentDetail />} />
               <Route path="/workspace/reports" element={<Reports />} />
               <Route path="/workspace/account" element={<AccountSecurity />} />
               <Route path="/workspace/customer-projects/:projectId/report" element={<CustomerProjectReport />} />

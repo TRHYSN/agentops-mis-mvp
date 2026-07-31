@@ -1,0 +1,84 @@
+{
+  "name": "tiny-mlp-confirmatory-local",
+  "stage": "confirmatory",
+  "executor": "local",
+  "command": [
+    "python3",
+    "examples/tiny_mlp_train.py",
+    "--seed",
+    "{seed}"
+  ],
+  "matrix": {
+    "seed": [
+      17,
+      29
+    ]
+  },
+  "max_concurrency": 2,
+  "timeout_seconds": 60,
+  "retries": 0,
+  "workdir": "..",
+  "environment": {},
+  "integrity": {
+    "strict_actuals": true,
+    "required_actual_fields": [
+      "initialization_mode",
+      "training_scope",
+      "dataset_version",
+      "model_architecture",
+      "checkpoint_selection_rule",
+      "metric_code_hash"
+    ],
+    "minimum_completed_trials": 2,
+    "minimum_distinct_seeds": 2,
+    "minimum_primary_metric": 0.9,
+    "allow_warning_deviations": false,
+    "require_provenance": true
+  },
+  "protocol": {
+    "research_question": "Can a dependency-free tiny MLP reproducibly learn the declared synthetic XOR classification task across two seeds?",
+    "primary_metric": "validation_accuracy",
+    "initialization_mode": "from_scratch",
+    "training_scope": "synthetic_classification",
+    "dataset_version": "synthetic-xor-v1",
+    "model_architecture": "mlp-2x8x2-tanh-softmax",
+    "checkpoint_selection_rule": "final_epoch",
+    "metric_code_hash": "sha256:071e84299d11509a8e22594231403ed2f79d570333c1f5199ab7af9cbdfa0133",
+    "claim_policy": "eligible only after both declared seeds complete with provenance-matched actuals and validation_accuracy evidence"
+  },
+  "provenance": {
+    "code": {
+      "repository": "https://github.com/geogejoy107-jpg/agentops-mis-mvp.git",
+      "revision": "tiny-mlp-example-v1",
+      "dirty": false
+    },
+    "datasets": [
+      {
+        "name": "synthetic-xor",
+        "uri": "generator://research-lab/tiny-mlp-xor",
+        "version": "synthetic-xor-v1",
+        "metadata": {
+          "downloaded": false,
+          "raw_samples_persisted": false
+        }
+      }
+    ],
+    "models": [],
+    "resolved_config": {
+      "activation": "tanh",
+      "epochs": 250,
+      "hidden_size": 8,
+      "input_size": 2,
+      "learning_rate": 0.2,
+      "output_size": 2,
+      "optimizer": "full_batch_gradient_descent",
+      "train_size": 192,
+      "validation_size": 64
+    },
+    "environment": {
+      "name": "python-standard-library",
+      "uri": "python.org/stdlib",
+      "version": "3.11+"
+    }
+  }
+}

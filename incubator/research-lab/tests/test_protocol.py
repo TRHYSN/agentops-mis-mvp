@@ -80,7 +80,24 @@ class ProtocolTests(unittest.TestCase):
         one = ExperimentSpec.from_dict({**base, "environment": {"RUN_LABEL": "one"}})
         two = ExperimentSpec.from_dict({**base, "environment": {"RUN_LABEL": "two"}})
         self.assertEqual(one.protocol_hash, two.protocol_hash)
-        self.assertNotIn("one", str(one.protocol_document))
+        self.assertEqual(one.protocol_document["environment_keys"], ["RUN_LABEL"])
+        self.assertNotIn("environment_values", one.protocol_document)
+
+    def test_sensitive_environment_keys_are_rejected(self) -> None:
+        raw = {
+            "name": "sensitive-env",
+            "stage": "pilot",
+            "command": ["echo", "ok"],
+            "environment": {"API_TOKEN": "not-recorded"},
+            "protocol": {
+                "research_question": "q",
+                "primary_metric": "m",
+                "initialization_mode": "from_scratch",
+                "training_scope": "full_model",
+            },
+        }
+        with self.assertRaisesRegex(SpecError, "sensitive keys"):
+            ExperimentSpec.from_dict(raw)
 
 
 if __name__ == "__main__":

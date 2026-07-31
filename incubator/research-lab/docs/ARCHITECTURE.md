@@ -1,9 +1,9 @@
-# Standalone Research Lab architecture — v0.3
+# Standalone Research Lab architecture — v0.4
 
 ```text
 CLI / read-only local site
             |
-Standalone SQLite WAL ledger (schema v3)
+Standalone SQLite WAL ledger (schema v1)
             |
 Frozen Experiment Protocol + integrity engine
             |

@@ -145,6 +145,13 @@ from agentops_mis_core.operator_start_check import (
     operator_start_check_local_readiness_gate,
 )
 from agentops_mis_core.read_model_cache import ReadModelCache
+from agentops_mis_core.research_experiments import (
+    ResearchExperimentError,
+    ensure_research_schema,
+    get_research_experiment,
+    ingest_research_evidence,
+    list_research_experiments,
+)
 from agentops_mis_core import human_auth
 from agentops_mis_core.private_host_acceptance import (
     artifact_metadata_sha256 as compute_artifact_metadata_sha256,
@@ -2393,6 +2400,7 @@ def init_schema():
     with db_session() as conn:
         conn.executescript(SCHEMA_SQL)
         human_auth.init_schema(conn)
+        ensure_research_schema(conn)
         ensure_schema_migrations(conn)
         ensure_v121_reference_data(conn)
         conn.commit()
@@ -3902,6 +3910,8 @@ VALID_AGENT_GATEWAY_SCOPES = {
     "plan_evidence:write",
     "knowledge:read",
     "knowledge:write",
+    "research:read",
+    "research:write",
     "tasks:create",
     "tasks:read",
     "tasks:claim",
@@ -3918,6 +3928,7 @@ VALID_AGENT_GATEWAY_SCOPES = {
 AGENT_GATEWAY_OBSERVER_SCOPES = {
     "agents:heartbeat",
     "knowledge:read",
+    "research:read",
     "agent_plans:read",
     "plan_evidence:read",
     "tasks:read",
@@ -3929,6 +3940,8 @@ AGENT_GATEWAY_WORKER_WRITE_SCOPES = {
     "plan_evidence:write",
     "knowledge:read",
     "knowledge:write",
+    "research:read",
+    "research:write",
     "tasks:create",
     "tasks:claim",
     "runs:write",
@@ -3998,6 +4011,8 @@ def agent_gateway_enrollment_policy_preview(body) -> tuple[dict, int]:
             "plan_evidence:write",
             "knowledge:read",
             "knowledge:write",
+            "research:read",
+            "research:write",
             "tasks:read",
             "tasks:claim",
             "runs:write",
@@ -34031,7 +34046,11 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/human-auth/status":
                 return self.send_json(human_auth.status(conn, self.headers))
             machine_scoped_read = (
-                path == "/api/operator/loop-supervision"
+                (
+                    path == "/api/operator/loop-supervision"
+                    or path == "/api/research/experiments"
+                    or path.startswith("/api/research/experiments/")
+                )
                 and str(self.headers.get("Authorization") or "").startswith("Bearer ")
             )
             if human_auth.required() and not path.startswith("/api/agent-gateway/") and not machine_scoped_read:
@@ -34041,6 +34060,77 @@ class Handler(BaseHTTPRequestHandler):
                     return self.send_json(payload, status)
                 self._human_auth_context = context
             human_workspace = human_session_workspace(self._human_auth_context)
+            if path == "/api/research/experiments":
+                machine_auth = None
+                if machine_scoped_read:
+                    machine_auth, auth_error = agent_gateway_auth_context(
+                        conn,
+                        self.headers,
+                        "research:read",
+                    )
+                    if auth_error:
+                        return self.send_json(
+                            auth_error,
+                            agent_gateway_error_status(auth_error),
+                        )
+                requested_workspace = str((qs.get("workspace_id") or ["local-demo"])[0])
+                workspace_id = (
+                    (machine_auth or {}).get("workspace_id")
+                    or human_workspace
+                    or requested_workspace
+                )
+                status_filter = str((qs.get("status") or [""])[0]).strip() or None
+                limit = (qs.get("limit") or [50])[0]
+                try:
+                    payload = list_research_experiments(
+                        conn,
+                        workspace_id=workspace_id,
+                        status=status_filter,
+                        limit=limit,
+                    )
+                except ResearchExperimentError as exc:
+                    return self.send_json({
+                        "error": "invalid_research_query",
+                        "message": str(exc),
+                        "token_omitted": True,
+                    }, 400)
+                return self.send_json(payload)
+            research_detail_match = re.fullmatch(
+                r"/api/research/experiments/([A-Za-z0-9_.:-]{1,160})",
+                path,
+            )
+            if research_detail_match:
+                machine_auth = None
+                if machine_scoped_read:
+                    machine_auth, auth_error = agent_gateway_auth_context(
+                        conn,
+                        self.headers,
+                        "research:read",
+                    )
+                    if auth_error:
+                        return self.send_json(
+                            auth_error,
+                            agent_gateway_error_status(auth_error),
+                        )
+                requested_workspace = str((qs.get("workspace_id") or ["local-demo"])[0])
+                workspace_id = (
+                    (machine_auth or {}).get("workspace_id")
+                    or human_workspace
+                    or requested_workspace
+                )
+                try:
+                    payload, status = get_research_experiment(
+                        conn,
+                        unquote(research_detail_match.group(1)),
+                        workspace_id=workspace_id,
+                    )
+                except ResearchExperimentError as exc:
+                    return self.send_json({
+                        "error": "invalid_research_query",
+                        "message": str(exc),
+                        "token_omitted": True,
+                    }, 400)
+                return self.send_json(payload, status)
             if path == "/api/human-auth/sessions":
                 if not human_auth.required():
                     return self.send_json({"error": "human_auth_disabled", "message": "Human authentication is not enabled."}, 409)
@@ -35710,23 +35800,88 @@ class Handler(BaseHTTPRequestHandler):
                 clear_read_model_cache()
                 return self.send_json(payload, status)
             human_context = None
-            if human_auth.required():
+            machine_research_write = (
+                path == "/api/research/experiments/ingest"
+                and str(self.headers.get("Authorization") or "").startswith("Bearer ")
+            )
+            research_machine_auth = None
+            if human_auth.required() and not machine_research_write:
                 human_context, auth_error = human_auth.request_auth(conn, self.headers, path, "POST")
                 if auth_error:
                     payload, status = auth_error
                     conn.rollback()
                     return self.send_json(payload, status)
-            else:
+            elif not human_auth.required():
                 local_write_auth_error = local_ui_write_auth_error(self.headers)
                 if local_write_auth_error:
                     payload, status = local_write_auth_error
                     conn.rollback()
                     return self.send_json(payload, status)
+            if machine_research_write:
+                research_machine_auth, auth_error = agent_gateway_auth_context(
+                    conn,
+                    self.headers,
+                    "research:write",
+                )
+                if auth_error:
+                    conn.rollback()
+                    return self.send_json(
+                        auth_error,
+                        agent_gateway_error_status(auth_error),
+                    )
             human_workspace = human_session_workspace(human_context)
             human_headers = self.headers
             if human_workspace:
                 human_headers = dict(self.headers)
                 human_headers["X-AgentOps-Workspace-Id"] = human_workspace
+            if path == "/api/research/experiments/ingest":
+                if research_machine_auth:
+                    requested_workspace = normalize_workspace_id(
+                        body.get("workspace_id")
+                        or research_machine_auth["workspace_id"]
+                    )
+                    if requested_workspace != research_machine_auth["workspace_id"]:
+                        conn.rollback()
+                        return self.send_json({
+                            "error": "forbidden",
+                            "message": "Agent token cannot ingest research evidence into another workspace.",
+                            "token_omitted": True,
+                        }, 403)
+                    body["workspace_id"] = research_machine_auth["workspace_id"]
+                if human_workspace:
+                    requested_workspace = normalize_workspace_id(
+                        body.get("workspace_id") or human_workspace
+                    )
+                    if requested_workspace != human_workspace:
+                        conn.rollback()
+                        return self.send_json({
+                            "error": "forbidden",
+                            "message": "Human Session cannot ingest research evidence into another workspace.",
+                            "token_omitted": True,
+                        }, 403)
+                    body["workspace_id"] = human_workspace
+                try:
+                    payload, status = atomic_api_write(
+                        conn,
+                        "research_evidence_ingest",
+                        lambda: ingest_research_evidence(
+                            conn,
+                            body,
+                            audit_fn=audit,
+                            now=now_iso(),
+                        ),
+                    )
+                except ResearchExperimentError as exc:
+                    conn.rollback()
+                    return self.send_json({
+                        "error": "invalid_research_evidence",
+                        "message": str(exc),
+                        "body_omitted": True,
+                        "token_omitted": True,
+                    }, 400)
+                conn.commit()
+                clear_read_model_cache()
+                return self.send_json(payload, status)
             if human_workspace and path.startswith((
                 "/api/commander/",
                 "/api/operator/",

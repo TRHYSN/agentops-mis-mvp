@@ -4725,6 +4725,206 @@ export async function loadEvaluations(): Promise<Evaluation[]> {
   return (await apiJson<Record<string, unknown>[]>("/evaluations")).map(normalizeEvaluation);
 }
 
+export interface ResearchExperiment {
+  experiment_id: string;
+  task_id: string | null;
+  name: string;
+  stage: string;
+  status: string;
+  claim_status: string;
+  protocol_hash: string;
+  provenance_hash: string;
+  primary_metric: string;
+  final_metric_value: number | null;
+  trial_count: number;
+  completed_trial_count: number;
+  metric_count: number;
+  artifact_count: number;
+  evaluation_count: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ResearchTrial {
+  trial_id: string;
+  experiment_id: string;
+  run_id: string | null;
+  status: string;
+  params: Record<string, unknown>;
+  primary_metric: string;
+  final_metric_value: number | null;
+  started_at: string | null;
+  ended_at: string | null;
+  created_at: string;
+}
+
+export interface ResearchMetric {
+  metric_id: string;
+  trial_id: string;
+  name: string;
+  value: number;
+  step: number | null;
+  split: string;
+  recorded_at: string;
+}
+
+export interface ResearchArtifact {
+  artifact_id: string;
+  run_id: string | null;
+  artifact_type: string;
+  title: string;
+  summary: string;
+  content_hash: string;
+  created_at: string;
+}
+
+export interface ResearchEvaluation {
+  evaluation_id: string;
+  run_id: string | null;
+  evaluator_type: string;
+  score: number;
+  pass_fail: string;
+  notes: string;
+  created_at: string;
+}
+
+export interface ResearchExperimentDetail {
+  experiment: ResearchExperiment;
+  trials: ResearchTrial[];
+  latest_metrics: ResearchMetric[];
+  artifacts: ResearchArtifact[];
+  evaluations: ResearchEvaluation[];
+}
+
+function researchRecord(value: unknown): Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : {};
+}
+
+function nullableNumber(value: unknown): number | null {
+  if (value === null || value === undefined || value === "") return null;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function normalizeResearchExperiment(row: Record<string, unknown>): ResearchExperiment {
+  const protocol = researchRecord(row.protocol);
+  const claimGate = researchRecord(row.claim_gate);
+  const latestMetric = researchRecord(row.latest_metric);
+  const hasClaimDecision = row.claim_eligible !== undefined && row.claim_eligible !== null;
+  const claimStatus = String(
+    row.claim_status
+      || claimGate.status
+      || (hasClaimDecision && boolValue(row.claim_eligible) ? "eligible" : hasClaimDecision && row.status === "completed" ? "ineligible" : "pending"),
+  );
+  return {
+    experiment_id: String(row.experiment_id || ""),
+    task_id: row.task_id ? String(row.task_id) : null,
+    name: String(row.name || row.title || row.experiment_id || "Untitled experiment"),
+    stage: String(row.stage || "smoke"),
+    status: String(row.status || "planned"),
+    claim_status: claimStatus,
+    protocol_hash: String(row.protocol_hash || protocol.protocol_hash || ""),
+    provenance_hash: String(row.provenance_hash || ""),
+    primary_metric: String(row.primary_metric || protocol.primary_metric || latestMetric.name || ""),
+    final_metric_value: nullableNumber(row.final_metric_value ?? row.primary_metric_value ?? latestMetric.value),
+    trial_count: numberValue(row.trial_count ?? row.trials_count, asArray(row.trials).length),
+    completed_trial_count: numberValue(row.completed_trial_count ?? row.completed_trials, 0),
+    metric_count: numberValue(row.metric_count ?? row.metrics_count, asArray(row.metrics).length),
+    artifact_count: numberValue(row.artifact_count ?? row.artifacts_count, asArray(row.artifacts).length),
+    evaluation_count: numberValue(row.evaluation_count ?? row.evaluations_count, asArray(row.evaluations).length),
+    created_at: String(row.created_at || ""),
+    updated_at: String(row.updated_at || row.completed_at || row.created_at || ""),
+  };
+}
+
+function normalizeResearchTrial(row: Record<string, unknown>): ResearchTrial {
+  const latestMetric = researchRecord(row.latest_metric);
+  return {
+    trial_id: String(row.trial_id || ""),
+    experiment_id: String(row.experiment_id || ""),
+    run_id: row.run_id ? String(row.run_id) : null,
+    status: String(row.status || "queued"),
+    params: researchRecord(row.params),
+    primary_metric: String(row.primary_metric || latestMetric.name || ""),
+    final_metric_value: nullableNumber(row.final_metric_value ?? row.primary_metric_value ?? latestMetric.value),
+    started_at: row.started_at ? String(row.started_at) : null,
+    ended_at: row.ended_at ? String(row.ended_at) : null,
+    created_at: String(row.created_at || ""),
+  };
+}
+
+function normalizeResearchMetric(row: Record<string, unknown>): ResearchMetric {
+  return {
+    metric_id: String(row.metric_id || `${row.trial_id || "trial"}:${row.name || "metric"}:${row.step ?? "latest"}`),
+    trial_id: String(row.trial_id || ""),
+    name: String(row.name || row.metric_name || ""),
+    value: numberValue(row.value, 0),
+    step: nullableNumber(row.step),
+    split: String(row.split || "train"),
+    recorded_at: String(row.recorded_at || row.created_at || ""),
+  };
+}
+
+function normalizeResearchArtifact(row: Record<string, unknown>): ResearchArtifact {
+  return {
+    artifact_id: String(row.artifact_id || ""),
+    run_id: row.run_id ? String(row.run_id) : null,
+    artifact_type: String(row.artifact_type || row.type || "artifact"),
+    title: String(row.title || row.name || row.artifact_id || "Artifact"),
+    summary: String(row.summary || ""),
+    content_hash: String(row.content_hash || row.hash || row.sha256 || ""),
+    created_at: String(row.created_at || ""),
+  };
+}
+
+function normalizeResearchEvaluation(row: Record<string, unknown>): ResearchEvaluation {
+  return {
+    evaluation_id: String(row.evaluation_id || ""),
+    run_id: row.run_id ? String(row.run_id) : null,
+    evaluator_type: String(row.evaluator_type || "research_claim_gate"),
+    score: numberValue(row.score, 0),
+    pass_fail: String(row.pass_fail || (row.pass === true ? "pass" : "fail")),
+    notes: String(row.notes || row.summary || ""),
+    created_at: String(row.created_at || ""),
+  };
+}
+
+export async function loadResearchExperiments(): Promise<ResearchExperiment[]> {
+  const raw = await apiJson<unknown>("/research/experiments");
+  const rows = Array.isArray(raw) ? raw : asArray(researchRecord(raw).experiments);
+  return rows.map((row) => normalizeResearchExperiment(researchRecord(row)));
+}
+
+export async function loadResearchExperiment(id: string): Promise<ResearchExperimentDetail> {
+  const raw = researchRecord(await apiJson<unknown>(`/research/experiments/${encodeURIComponent(id)}`));
+  const experimentRaw = Object.keys(researchRecord(raw.experiment)).length > 0
+    ? researchRecord(raw.experiment)
+    : raw;
+  const trials = asArray(raw.trials).map((row) => normalizeResearchTrial(researchRecord(row)));
+  const latestMetrics = asArray(raw.latest_metrics ?? raw.metrics).map((row) => normalizeResearchMetric(researchRecord(row)));
+  const artifacts = asArray(raw.artifacts).map((row) => normalizeResearchArtifact(researchRecord(row)));
+  const evaluations = asArray(raw.evaluations).map((row) => normalizeResearchEvaluation(researchRecord(row)));
+  const experiment = normalizeResearchExperiment(experimentRaw);
+  return {
+    experiment: {
+      ...experiment,
+      trial_count: experimentRaw.trial_count === undefined && experimentRaw.trials_count === undefined ? trials.length : experiment.trial_count,
+      completed_trial_count: experimentRaw.completed_trial_count === undefined && experimentRaw.completed_trials === undefined
+        ? trials.filter((trial) => trial.status === "completed").length
+        : experiment.completed_trial_count,
+      metric_count: experimentRaw.metric_count === undefined && experimentRaw.metrics_count === undefined ? latestMetrics.length : experiment.metric_count,
+      artifact_count: experimentRaw.artifact_count === undefined && experimentRaw.artifacts_count === undefined ? artifacts.length : experiment.artifact_count,
+      evaluation_count: experimentRaw.evaluation_count === undefined && experimentRaw.evaluations_count === undefined ? evaluations.length : experiment.evaluation_count,
+    },
+    trials,
+    latest_metrics: latestMetrics,
+    artifacts,
+    evaluations,
+  };
+}
+
 export async function loadEvaluationCaseCandidates(input: {
   status?: string;
   limit?: number;
