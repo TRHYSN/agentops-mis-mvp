@@ -665,6 +665,7 @@ export async function lifecycleLockStatus(stateDirectory) {
 export async function recoverStaleLifecycleLock(
   stateDirectory,
   confirmationOperationId,
+  options = {},
 ) {
   await assertPrivateDirectory(stateDirectory);
   const state = await readLifecycleState(stateDirectory);
@@ -688,6 +689,9 @@ export async function recoverStaleLifecycleLock(
   const verified = await readLockOwner(candidate);
   await assertOwnerIsStale(verified.owner);
   await assertNoLiveLifecycleChildren(candidate, verified.owner);
+  if (typeof options.assertExternalLeaseReleased === "function") {
+    await options.assertExternalLeaseReleased();
+  }
   const isolated = await isolateLock(
     stateDirectory,
     candidate,

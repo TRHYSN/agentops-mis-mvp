@@ -244,7 +244,7 @@ async function run() {
       '    cat >/dev/null',
       '    rmdir "$FAKE_DB_STATE/$database"',
       "    ;;",
-      "  *createdb*)",
+      "  *CREATE\\ DATABASE*)",
       '    log "createdb:$last"',
       '    mkdir "$FAKE_DB_STATE/$last"',
       '    if [ -n "${FAKE_CREATEDB_GATE:-}" ]; then',

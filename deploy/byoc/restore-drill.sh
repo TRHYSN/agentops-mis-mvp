@@ -186,6 +186,7 @@ drop_restore_database() {
     - \
     "$restore_database_oid" \
     "$restore_cluster_identifier" \
+    exact \
     "$restore_expected_marker" \
     >/dev/null 2>&1
 }
@@ -221,7 +222,8 @@ trap 'exit 130' 2
 trap 'exit 143' 15
 
 docker compose --env-file "$env_file" -f "$compose_file" exec -T postgres \
-  sh -ceu 'createdb --username "$POSTGRES_USER" "$1"' sh "$restore_database"
+  sh -ceu 'printf "%s\n" "SELECT pg_advisory_lock(7157544864185932631);" "CREATE DATABASE :\"database\";" | psql --username "$POSTGRES_USER" --dbname postgres --no-psqlrc --set ON_ERROR_STOP=1 --set database="$1" >/dev/null' \
+  sh "$restore_database"
 created=true
 restore_identity=$(
   docker compose --env-file "$env_file" -f "$compose_file" exec -T postgres \
@@ -247,13 +249,90 @@ esac
 restore_identity_bound=true
 if [ -n "$restore_operation_marker" ]; then
   docker compose --env-file "$env_file" -f "$compose_file" exec -T postgres \
-    sh -ceu 'psql --username "$POSTGRES_USER" --dbname postgres --no-psqlrc --set ON_ERROR_STOP=1 --command "COMMENT ON DATABASE \"$1\" IS '\''$2'\''"' \
+    sh -ceu 'printf "%s\n" "SELECT pg_advisory_lock(7157544864185932631);" "COMMENT ON DATABASE :\"database\" IS :'\''marker'\'';" | psql --username "$POSTGRES_USER" --dbname postgres --no-psqlrc --set ON_ERROR_STOP=1 --set database="$1" --set marker="$2" >/dev/null' \
     sh "$restore_database" "$restore_operation_marker"
   restore_expected_marker=$restore_operation_marker
 fi
 
 docker compose --env-file "$env_file" -f "$compose_file" exec -T postgres \
-  sh -ceu 'pg_restore --username "$POSTGRES_USER" --dbname "$1" --no-owner --no-privileges --exit-on-error' sh "$restore_database" \
+  sh -ceu '
+    lease_key=7157544864185932631
+    lease_ready=$(mktemp)
+    lease_pid=
+    restore_pid=
+    cleanup_lease() {
+      if [ -n "$restore_pid" ]; then
+        kill "$restore_pid" 2>/dev/null || :
+        wait "$restore_pid" 2>/dev/null || :
+        restore_pid=
+      fi
+      if [ -n "$lease_pid" ]; then
+        kill "$lease_pid" 2>/dev/null || :
+        wait "$lease_pid" 2>/dev/null || :
+        lease_pid=
+      fi
+      rm -f "$lease_ready"
+    }
+    trap cleanup_lease 0 1 2 15
+    psql \
+      --username "$POSTGRES_USER" \
+      --dbname postgres \
+      --no-psqlrc \
+      --set ON_ERROR_STOP=1 >/dev/null <<SQL &
+SELECT pg_advisory_lock($lease_key);
+\! printf "%s\n" ready > "$lease_ready"
+SELECT pg_sleep(86400);
+SQL
+    lease_pid=$!
+    attempt=0
+    while [ ! -s "$lease_ready" ]; do
+      if ! kill -0 "$lease_pid" 2>/dev/null; then
+        printf "%s\n" restore_database_lease_acquire_failed >&2
+        exit 1
+      fi
+      attempt=$((attempt + 1))
+      if [ "$attempt" -ge 300 ]; then
+        printf "%s\n" restore_database_lease_acquire_timeout >&2
+        exit 1
+      fi
+      sleep 0.1
+    done
+    pg_restore --username "$POSTGRES_USER" --dbname "$1" --no-owner --no-privileges --exit-on-error &
+    restore_pid=$!
+    restore_status=0
+    wait "$restore_pid" || restore_status=$?
+    restore_pid=
+    if [ "$restore_status" -ne 0 ]; then
+      exit "$restore_status"
+    fi
+    cleanup_lease
+    lease_released=false
+    attempt=0
+    while [ "$attempt" -lt 100 ]; do
+      released=$(
+        psql \
+          --username "$POSTGRES_USER" \
+          --dbname postgres \
+          --no-psqlrc \
+          --set ON_ERROR_STOP=1 \
+          --tuples-only \
+          --no-align \
+          --command "SELECT CASE WHEN pg_try_advisory_lock($lease_key) THEN pg_advisory_unlock($lease_key) ELSE false END" \
+          2>/dev/null || :
+      )
+      if [ "$released" = t ]; then
+        lease_released=true
+        break
+      fi
+      attempt=$((attempt + 1))
+      sleep 0.1
+    done
+    if [ "$lease_released" != true ]; then
+      printf "%s\n" restore_database_lease_release_failed >&2
+      exit 1
+    fi
+    trap - 0 1 2 15
+  ' sh "$restore_database" \
   < "$backup"
 
 if ! validation_log=$(

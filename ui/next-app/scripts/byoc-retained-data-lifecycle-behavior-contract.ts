@@ -137,7 +137,9 @@ function createFakeDriver() {
     clusterSystemIdentifier: "7390012345678901234",
     databases: new Set(["agentops"]),
     databaseOids: new Map([["agentops", "16384"]]),
-    databaseMarkers: new Map<string, string>(),
+    databaseMarkers: new Map<string, string>([
+      ["agentops", "customer_managed_database_comment"],
+    ]),
     nextDatabaseOid: 16385,
     restoreDatabases: new Set<string>(),
     sql: [] as string[],
@@ -189,10 +191,14 @@ function createFakeDriver() {
       const targetDatabase = args[5] || "";
       const expectedOid = args[6] || "";
       const expectedCluster = args[7] || "";
-      const expectedMarker = args[8] || "";
+      const markerMode = args[8] || "";
+      const expectedMarker = args[9] || "";
       state.sql.push(
-        `destructive:${operation}:${database}:${targetDatabase}:${expectedOid}:${expectedCluster}:${expectedMarker}`,
+        `destructive:${operation}:${database}:${targetDatabase}:${expectedOid}:${expectedCluster}:${markerMode}:${expectedMarker}`,
       );
+      if (!["ignore", "exact"].includes(markerMode)) {
+        return failed("destructive_marker_mode_invalid");
+      }
       if (state.replaceDatabaseBeforeDestructiveOnce) {
         state.replaceDatabaseBeforeDestructiveOnce = false;
         state.databaseOids.set(database, String(state.nextDatabaseOid++));
@@ -205,7 +211,10 @@ function createFakeDriver() {
       if (
         state.clusterSystemIdentifier !== expectedCluster
         || state.databaseOids.get(database) !== expectedOid
-        || (state.databaseMarkers.get(database) || "") !== expectedMarker
+        || (
+          markerMode === "exact"
+          && (state.databaseMarkers.get(database) || "") !== expectedMarker
+        )
       ) {
         return failed("destructive_identity_changed");
       }
@@ -287,8 +296,19 @@ function createFakeDriver() {
       if (joined.includes(" exec -T control-plane npm run byoc:schema-identity")) {
         return ok(`${schemaIdentity(schemaFor(state.currentImageId))}\n`);
       }
-      if (joined.includes(" exec -T control-plane npm run byoc:database-identity")) {
+      if (
+        joined.includes(
+          " exec -T control-plane node /usr/local/lib/agentops/node-secret-entrypoint.mjs --postgres-runtime -- npm run byoc:database-identity",
+        )
+      ) {
         return ok(`${databaseIdentity(state.runtimeDatabase)}\n`);
+      }
+      if (
+        joined.includes(" exec -T postgres")
+        && joined.includes("pg_try_advisory_lock(7157544864185932631")
+        && joined.includes("pg_advisory_unlock(7157544864185932631")
+      ) {
+        return ok("t\n");
       }
       if (joined.includes(" exec -T postgres") && joined.includes("SELECT count(*)")) {
         if (
@@ -1144,6 +1164,7 @@ try {
     restore_operation_marker_binding_verified: true,
     destructive_cleanup_identity_guard_verified: true,
     destructive_ddl_toctou_guard_verified: true,
+    authority_database_comment_ignored_safely: true,
     stopped_backup_order_verified: true,
     cleanup_failure_does_not_block_restart: true,
     quarantine_cleanup_pending_is_recoverable: true,

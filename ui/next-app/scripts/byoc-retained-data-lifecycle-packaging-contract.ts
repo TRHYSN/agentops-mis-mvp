@@ -70,7 +70,14 @@ assert.match(cli, /registerLifecycleChildProcess/);
 assert.match(cli, /releaseLifecycleChildProcess/);
 assert.match(cli, /agentops_child_lease_ready_v1/);
 assert.match(cli, /assertDatabaseLifecycleLeaseReleased/);
-assert.match(cli, /pg_try_advisory_lock\(7157544864185932631\)/);
+assert.match(
+  cli,
+  /const DATABASE_OPERATION_ADVISORY_LOCK_KEY = "7157544864185932631"/,
+);
+assert.match(
+  cli,
+  /pg_try_advisory_lock\(\$\{DATABASE_OPERATION_ADVISORY_LOCK_KEY\}\)/,
+);
 assert.match(cli, /lifecycle_database_operation_lease_active/);
 const recoverLockImplementation = cli.slice(
   cli.indexOf("async function recoverLock"),
@@ -195,6 +202,13 @@ assert.doesNotMatch(restore, /\bdropdb\b/);
 assert.match(restore, /postgres-destructive-database\.sh/);
 assert.match(restore, /pg_advisory_lock\(7157544864185932631\)/);
 assert.match(restore, /(?:guardian|lease)_pid/);
+assert.match(restore, /restore_pid/);
+assert.match(restore, /kill "\$restore_pid"/);
+assert.ok(
+  restore.indexOf('kill "$restore_pid"')
+    < restore.indexOf('kill "$lease_pid"'),
+  "signal cleanup must stop pg_restore before releasing the database lease",
+);
 assert.match(restore, /pg_restore/);
 assert.ok(
   restore.indexOf("pg_advisory_lock(7157544864185932631)")
@@ -251,6 +265,7 @@ console.log(JSON.stringify({
   destructive_database_marker_mode_packaged: true,
   runtime_secret_database_identity_probe_packaged: true,
   restore_database_lease_guardian_packaged: true,
+  restore_process_stops_before_lease_release: true,
   stale_lock_database_lease_probe_packaged: true,
   external_dba_ddl_trust_boundary_documented: true,
   lifecycle_child_process_leases_packaged: true,

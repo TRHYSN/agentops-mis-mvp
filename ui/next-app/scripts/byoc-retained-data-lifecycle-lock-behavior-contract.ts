@@ -278,11 +278,19 @@ try {
 
   const cliDirectory = await createStateDirectory("cli-dead-owner");
   await leaveDeadOwnerLock(cliDirectory);
+  const releasedDatabaseLeaseRunner = async () => ({
+    status: 0,
+    stdout: "t\n",
+    stderr: "",
+  });
   const cliRecovery = await runLifecycle([
     "recover-lock",
     "--confirm-operation-id",
     OPERATION_ID,
-  ], { stateDirectory: cliDirectory });
+  ], {
+    stateDirectory: cliDirectory,
+    runner: releasedDatabaseLeaseRunner,
+  });
   assert.deepEqual(cliRecovery, {
     contract: "agentops_byoc_retained_data_lifecycle_v1",
     ok: true,
@@ -290,11 +298,37 @@ try {
     operation_id: OPERATION_ID,
     stale_lock_recovered: true,
     owner_identity_verified_stale: true,
+    database_operation_lease_verified_released: true,
     credentials_omitted: true,
     sql_omitted: true,
     row_data_omitted: true,
   });
   assert.equal(await lifecycleLockStatus(cliDirectory), false);
+
+  const activeDatabaseLeaseDirectory = await createStateDirectory(
+    "active-database-lease",
+  );
+  await leaveDeadOwnerLock(activeDatabaseLeaseDirectory);
+  await expectError(
+    () => runLifecycle([
+      "recover-lock",
+      "--confirm-operation-id",
+      OPERATION_ID,
+    ], {
+      stateDirectory: activeDatabaseLeaseDirectory,
+      runner: async () => ({ status: 0, stdout: "f\n", stderr: "" }),
+    }),
+    /lifecycle_database_operation_lease_active/,
+  );
+  assert.equal(await lifecycleLockStatus(activeDatabaseLeaseDirectory), true);
+  await runLifecycle([
+    "recover-lock",
+    "--confirm-operation-id",
+    OPERATION_ID,
+  ], {
+    stateDirectory: activeDatabaseLeaseDirectory,
+    runner: releasedDatabaseLeaseRunner,
+  });
 
   const liveChildDirectory = await createStateDirectory("live-child-owner");
   const liveChildPid = await leaveDeadOwnerWithLiveChild(liveChildDirectory);
@@ -363,6 +397,7 @@ try {
     dead_pid_recovery_verified: true,
     operator_cli_recovery_verified: true,
     live_child_process_group_recovery_refused: true,
+    active_database_operation_lease_recovery_refused: true,
     interrupted_isolation_recovery_verified: true,
     exact_operation_confirmation_verified: true,
     concurrent_acquisition_refused: true,

@@ -33,6 +33,7 @@ const POSTGRES_SYSTEM_IDENTIFIER = /^[1-9][0-9]{9,24}$/;
 const POSTGRES_DATABASE_OID = /^[1-9][0-9]{0,9}$/;
 const RESTORE_DATABASE_MARKER =
   /^agentops_byoc_restore_v1:byoc_lifecycle_[0-9a-f]{20}:[0-9a-f]{64}$/;
+const DATABASE_OPERATION_ADVISORY_LOCK_KEY = "7157544864185932631";
 const TERMINAL_PHASES = new Set(["applied", "rolled_back"]);
 const DATABASE_SWAP_PHASES = new Set([
   "restore_intent",
@@ -81,7 +82,8 @@ function terminateChildProcessGroup(child) {
 
 async function defaultRunner(command, args, options = {}) {
   const detached = process.platform !== "win32";
-  const gated = process.platform !== "win32";
+  const trackLifecycleLease = options.trackLifecycleLease !== false;
+  const gated = process.platform !== "win32" && trackLifecycleLease;
   const child = spawn(
     gated ? "/bin/sh" : command,
     gated
@@ -132,21 +134,23 @@ async function defaultRunner(command, args, options = {}) {
     child.once("error", (error) => finish(127, error));
     child.once("close", (code) => finish(code ?? 1));
   });
-  let lease;
-  try {
-    lease = await registerLifecycleChildProcess(
-      options.stateDirectory,
-      child.pid,
-      detached ? child.pid : child.pid,
-    );
-  } catch {
-    terminateChildProcessGroup(child);
-    await completion;
-    return {
-      status: 127,
-      stdout: "",
-      stderr: "",
-    };
+  let lease = null;
+  if (trackLifecycleLease) {
+    try {
+      lease = await registerLifecycleChildProcess(
+        options.stateDirectory,
+        child.pid,
+        detached ? child.pid : child.pid,
+      );
+    } catch {
+      terminateChildProcessGroup(child);
+      await completion;
+      return {
+        status: 127,
+        stdout: "",
+        stderr: "",
+      };
+    }
   }
   const timeout = setTimeout(() => {
     terminateChildProcessGroup(child);
@@ -157,10 +161,12 @@ async function defaultRunner(command, args, options = {}) {
   else child.stdin.end();
   const completed = await completion;
   clearTimeout(timeout);
-  try {
-    await releaseLifecycleChildProcess(options.stateDirectory, lease);
-  } catch {
-    return { status: 127, stdout: "", stderr: "" };
+  if (lease !== null) {
+    try {
+      await releaseLifecycleChildProcess(options.stateDirectory, lease);
+    } catch {
+      return { status: 127, stdout: "", stderr: "" };
+    }
   }
   return {
     status: overflow ? 1 : completed.status,
@@ -457,6 +463,10 @@ async function runningAuthorityDatabase(context) {
         "exec",
         "-T",
         "control-plane",
+        "node",
+        "/usr/local/lib/agentops/node-secret-entrypoint.mjs",
+        "--postgres-runtime",
+        "--",
         "npm",
         "run",
         "byoc:database-identity",
@@ -951,6 +961,7 @@ async function destructiveDatabaseOperation(
         targetDatabase,
         expectedOid,
         expectedClusterIdentifier,
+        expectedMarker === null ? "ignore" : "exact",
         expectedMarker ?? "",
       ],
       { cwd: context.repositoryRoot, env: commandEnvironment(context) },
@@ -1279,6 +1290,36 @@ async function status(context) {
   });
 }
 
+async function assertDatabaseLifecycleLeaseReleased(context) {
+  const stage = "lock_recovery";
+  const output = checked(
+    await context.recoveryRunner(
+      "docker",
+      composeArguments(context, [
+        "exec",
+        "-T",
+        "postgres",
+        "sh",
+        "-ceu",
+        `psql --username "$POSTGRES_USER" --dbname postgres --no-psqlrc --set ON_ERROR_STOP=1 --tuples-only --no-align --command "SELECT CASE WHEN pg_try_advisory_lock(${DATABASE_OPERATION_ADVISORY_LOCK_KEY}) THEN pg_advisory_unlock(${DATABASE_OPERATION_ADVISORY_LOCK_KEY}) ELSE false END"`,
+      ]),
+      {
+        cwd: context.repositoryRoot,
+        env: commandEnvironment(context),
+        timeout: 30_000,
+      },
+    ),
+    "lifecycle_database_operation_lease_unavailable",
+    stage,
+  );
+  if (!["t", "true"].includes(output.toLowerCase())) {
+    throw new LifecycleError(
+      "lifecycle_database_operation_lease_active",
+      stage,
+    );
+  }
+}
+
 async function recoverLock(context, values) {
   const confirmation = String(
     values["--confirm-operation-id"] || "",
@@ -1290,14 +1331,20 @@ async function recoverLock(context, values) {
     );
   }
   try {
+    const assertExternalLeaseReleased = () =>
+      assertDatabaseLifecycleLeaseReleased(context);
     const recovered = await recoverStaleLifecycleLock(
       context.stateDirectory,
       confirmation,
+      {
+        assertExternalLeaseReleased,
+      },
     );
     return receipt("recover-lock", {
       operation_id: recovered.operation_id,
       stale_lock_recovered: recovered.recovered === true,
       owner_identity_verified_stale: true,
+      database_operation_lease_verified_released: true,
     });
   } catch (error) {
     throw asLifecycleError(error, "lock_recovery");
@@ -2233,6 +2280,15 @@ export async function runLifecycle(arguments_, options = {}) {
         ...runnerOptions,
         stateDirectory,
       })),
+    recoveryRunner:
+      options.recoveryRunner
+      || options.runner
+      || ((command, args, runnerOptions = {}) =>
+        defaultRunner(command, args, {
+          ...runnerOptions,
+          stateDirectory,
+          trackLifecycleLease: false,
+        })),
     now: options.now || (() => new Date()),
     randomHex: options.randomHex || (() => randomBytes(16).toString("hex")),
     wait: options.wait || ((milliseconds) => new Promise((resolveWait) => {
