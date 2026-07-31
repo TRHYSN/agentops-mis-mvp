@@ -48,12 +48,22 @@ export async function cleanupPostgresRoleBoundaryFixture(
   createdSchemas: readonly string[],
   createdRoles: readonly string[],
   functionOwnerRole: string,
+  createdDatabases: readonly string[] = [],
 ) {
   const errors: unknown[] = [];
   for (const client of [...clients].reverse()) {
     if (!client) continue;
     try {
       await client.end();
+    } catch (error) {
+      errors.push(error);
+    }
+  }
+  for (const database of [...createdDatabases].reverse()) {
+    try {
+      await baseOwner.query(
+        `DROP DATABASE IF EXISTS ${quotedIdentifier(database)}`,
+      );
     } catch (error) {
       errors.push(error);
     }
@@ -111,11 +121,17 @@ export async function cleanupPostgresRoleBoundaryFixture(
   }
   try {
     const residue = await baseOwner.query<{
+      database_count: string;
       schema_count: string;
       role_count: string;
       default_acl_count: string;
     }>(
       `SELECT
+         (
+           SELECT count(*)::text
+           FROM pg_database
+           WHERE datname=ANY($3::text[])
+         ) AS database_count,
          (
            SELECT count(*)::text
            FROM pg_namespace
@@ -133,10 +149,11 @@ export async function cleanupPostgresRoleBoundaryFixture(
              ON owner_role.oid=default_acl.defaclrole
            WHERE owner_role.rolname=ANY($2::text[])
          ) AS default_acl_count`,
-      [createdSchemas, createdRoles],
+      [createdSchemas, createdRoles, createdDatabases],
     );
     if (
-      residue.rows[0]?.schema_count !== "0"
+      residue.rows[0]?.database_count !== "0"
+      || residue.rows[0]?.schema_count !== "0"
       || residue.rows[0]?.role_count !== "0"
       || residue.rows[0]?.default_acl_count !== "0"
     ) {

@@ -36,6 +36,7 @@ const functionOwnerRole = derivedPostgresFunctionOwnerRole(
   runtimeApiSchema,
 );
 const functionOwnerMembershipProbe = `role_fn_probe_${suffix}`;
+const crossDatabaseName = `role_restore_${suffix}`;
 const runtimePassword = `${randomBytes(24).toString("base64url")}R1!`;
 const entitlementAdminPassword =
   `${randomBytes(24).toString("base64url")}A1!`;
@@ -377,6 +378,7 @@ async function run() {
   const owner = new Client({ connectionString: baseDsn });
   const createdRoles: string[] = [];
   const createdSchemas: string[] = [];
+  const createdDatabases: string[] = [];
   const cleanupClients: Client[] = [];
   let contractError: unknown;
   let contractFailed = false;
@@ -602,6 +604,80 @@ async function run() {
       );
       assert.equal(
         adminAfterReprovision.function_owner_restricted,
+        true,
+      );
+
+      activeCheck = "function_owner_cross_database_restore";
+      await owner.query(
+        `CREATE DATABASE ${quotedIdentifier(crossDatabaseName)}`,
+      );
+      createdDatabases.push(crossDatabaseName);
+      const crossDatabaseDsn = new URL(baseDsn);
+      crossDatabaseDsn.pathname = `/${crossDatabaseName}`;
+      crossDatabaseDsn.searchParams.set(
+        "options",
+        `-csearch_path=${applicationSchema}`,
+      );
+      const crossDatabaseOwner = new Client({
+        connectionString: crossDatabaseDsn.toString(),
+      });
+      await crossDatabaseOwner.connect();
+      cleanupClients.push(crossDatabaseOwner);
+      await crossDatabaseOwner.query(
+        `CREATE SCHEMA ${quotedIdentifier(applicationSchema)}`,
+      );
+      const crossDatabaseMigration = await runPostgresSchemaCommand(
+        "migrate",
+        {
+          connectionString: crossDatabaseDsn.toString(),
+          applicationSchema,
+          runtimeApiSchema,
+          runtimeRole,
+          runtimePassword,
+          entitlementAdminRole,
+          entitlementAdminPassword,
+          provisionRoleBoundary: true,
+        },
+      );
+      assert.equal(
+        crossDatabaseMigration.applied_count,
+        POSTGRES_MIGRATION_MANIFEST.length,
+      );
+      const baseRuntimeWithCrossDatabaseOwner =
+        await assertPostgresRuntimeRoleBoundary(runtime, {
+          applicationSchema,
+          runtimeApiSchema,
+          runtimeRole,
+        });
+      assert.equal(
+        baseRuntimeWithCrossDatabaseOwner.function_owner_restricted,
+        true,
+      );
+      const crossDatabaseDomain =
+        `${quotedIdentifier(applicationSchema)}.` +
+        "\"function_owner_cross_database_probe\"";
+      await crossDatabaseOwner.query(
+        `CREATE DOMAIN ${crossDatabaseDomain} AS text`,
+      );
+      await crossDatabaseOwner.query(
+        `ALTER DOMAIN ${crossDatabaseDomain}
+         OWNER TO ${quotedIdentifier(functionOwnerRole)}`,
+      );
+      try {
+        await expectFunctionOwnerReadinessDenied(runtime, entitlementAdmin);
+      } finally {
+        await crossDatabaseOwner.query(
+          `DROP DOMAIN ${crossDatabaseDomain}`,
+        );
+      }
+      const baseRuntimeAfterCrossDatabaseDrift =
+        await assertPostgresRuntimeRoleBoundary(runtime, {
+          applicationSchema,
+          runtimeApiSchema,
+          runtimeRole,
+        });
+      assert.equal(
+        baseRuntimeAfterCrossDatabaseDrift.function_owner_restricted,
         true,
       );
 
@@ -1199,6 +1275,8 @@ async function run() {
         runtime_api_function_set_closed: true,
         function_owner_login_drift_denied: true,
         function_owner_membership_drift_denied: true,
+        function_owner_cross_database_restore_allowed: true,
+        function_owner_cross_database_non_function_drift_denied: true,
         function_owner_non_function_object_drift_denied: true,
         function_owner_non_function_object_drift_restored: true,
         function_owner_readiness_restored: true,
@@ -1235,6 +1313,7 @@ async function run() {
       createdSchemas,
       createdRoles,
       functionOwnerRole,
+      createdDatabases,
     );
   } catch (cleanupError) {
     if (contractFailed) {

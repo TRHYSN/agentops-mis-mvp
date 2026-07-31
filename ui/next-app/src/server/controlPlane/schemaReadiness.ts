@@ -664,6 +664,9 @@ async function restrictedFunctionOwnerBoundary(
   runtimeApiSchema: string,
 ) {
   if (!(await restrictedFunctionOwnerRole(client, roleName))) return false;
+  // Roles are cluster-global, so an online source database and its restore drill
+  // may share this NOLOGIN owner. Only current-database functions are trusted
+  // after full catalog inspection; every non-function ownership stays forbidden.
   const result = await client.query<{
     app_usage: boolean;
     app_create: boolean;
@@ -750,26 +753,28 @@ async function restrictedFunctionOwnerBoundary(
            AND ownership_dependency.deptype='o'
            AND owner_role.rolname=$1
            AND NOT (
-             ownership_dependency.dbid=(
-               SELECT database_row.oid
-               FROM pg_database database_row
-               WHERE database_row.datname=current_database()
-             )
-             AND ownership_dependency.classid='pg_proc'::regclass
-             AND EXISTS(
-               SELECT 1
-               FROM pg_proc function_row
-               JOIN pg_namespace namespace_row
-                 ON namespace_row.oid=function_row.pronamespace
-               WHERE function_row.oid=ownership_dependency.objid
-                 AND function_row.proowner=owner_role.oid
-                 AND (
-                   (
-                     namespace_row.nspname=$2
-                     AND function_row.prosecdef
+             ownership_dependency.classid='pg_proc'::regclass
+             AND (
+               ownership_dependency.dbid<>(
+                 SELECT database_row.oid
+                 FROM pg_database database_row
+                 WHERE database_row.datname=current_database()
+               )
+               OR EXISTS(
+                 SELECT 1
+                 FROM pg_proc function_row
+                 JOIN pg_namespace namespace_row
+                   ON namespace_row.oid=function_row.pronamespace
+                 WHERE function_row.oid=ownership_dependency.objid
+                   AND function_row.proowner=owner_role.oid
+                   AND (
+                     (
+                       namespace_row.nspname=$2
+                       AND function_row.prosecdef
+                     )
+                     OR namespace_row.nspname=$3
                    )
-                   OR namespace_row.nspname=$3
-                 )
+               )
              )
            )
        ) AS unexpected_owned_object`,
