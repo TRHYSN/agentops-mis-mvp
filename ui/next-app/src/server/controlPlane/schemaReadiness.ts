@@ -317,6 +317,20 @@ const ENTITLEMENT_CHALLENGE_FUNCTIONS = Object.freeze({
     invocation: "$1,$2,$3",
   },
 } as const);
+const APPLICATION_SECURITY_DEFINER_IDENTITIES = Object.freeze([
+  "agentops_append_entitlement_audit_v11(text,text,text,text,jsonb,jsonb,text,text,text)",
+  "agentops_apply_workspace_entitlement_core_v11(text,text,jsonb)",
+  "agentops_apply_workspace_entitlement_v11(text,text,jsonb)",
+  "agentops_assert_entitlement_operator_v11(text,text)",
+  "agentops_assert_restricted_login_role_v11(text)",
+  "agentops_claim_entitlement_admin_challenge_v11(text,text,jsonb,text,text)",
+  "agentops_entitlement_stored_v11(text)",
+  "agentops_issue_entitlement_admin_challenge_core_v11(text,text,text,text,jsonb,text,interval,text)",
+  "agentops_issue_workspace_entitlement_admin_challenge_v11(text,text,text,text,jsonb,text,interval)",
+  "agentops_plan_workspace_entitlement_core_v11(text,text,jsonb)",
+  "agentops_plan_workspace_entitlement_v11(text,text,jsonb)",
+  "agentops_validate_entitlement_request_v11(jsonb,text,text,text)",
+] as const);
 
 function safeIdentifier(value: string, errorCode: string) {
   if (!SAFE_IDENTIFIER.test(value)) throw new SchemaReadinessError(errorCode);
@@ -675,6 +689,7 @@ async function restrictedFunctionOwnerBoundary(
     owns_schema: boolean;
     owns_relation: boolean;
     application_security_definer_owner_drift: boolean;
+    application_security_definer_identity_drift: boolean;
     application_security_definer_execute_acl_drift: boolean;
     function_ownership_outside_boundary: boolean;
     unexpected_owned_object: boolean;
@@ -709,6 +724,27 @@ async function restrictedFunctionOwnerBoundary(
            AND function_row.prosecdef
            AND owner_role.rolname<>$1
        ) AS application_security_definer_owner_drift,
+       (
+         SELECT COALESCE(
+           array_agg(
+             function_row.proname || '(' ||
+             replace(oidvectortypes(function_row.proargtypes),' ','')
+             || ')'
+             ORDER BY
+               function_row.proname,
+               replace(oidvectortypes(function_row.proargtypes),' ','')
+           ),
+           ARRAY[]::text[]
+         )
+         FROM pg_proc function_row
+         JOIN pg_namespace namespace_row
+           ON namespace_row.oid=function_row.pronamespace
+         JOIN pg_roles owner_role
+           ON owner_role.oid=function_row.proowner
+         WHERE namespace_row.nspname=$2
+           AND function_row.prosecdef
+           AND owner_role.rolname=$1
+       )<>$4::text[] AS application_security_definer_identity_drift,
        EXISTS(
          SELECT 1
          FROM pg_proc function_row
@@ -754,6 +790,12 @@ async function restrictedFunctionOwnerBoundary(
            AND owner_role.rolname=$1
            AND NOT (
              ownership_dependency.classid='pg_proc'::regclass
+             AND ownership_dependency.dbid<>0
+             AND EXISTS(
+               SELECT 1
+               FROM pg_database database_row
+               WHERE database_row.oid=ownership_dependency.dbid
+             )
              AND (
                ownership_dependency.dbid<>(
                  SELECT database_row.oid
@@ -778,7 +820,12 @@ async function restrictedFunctionOwnerBoundary(
              )
            )
        ) AS unexpected_owned_object`,
-    [roleName, applicationSchema, runtimeApiSchema],
+    [
+      roleName,
+      applicationSchema,
+      runtimeApiSchema,
+      APPLICATION_SECURITY_DEFINER_IDENTITIES,
+    ],
   );
   const boundary = result.rows[0];
   return Boolean(
@@ -789,6 +836,7 @@ async function restrictedFunctionOwnerBoundary(
     && !boundary.owns_schema
     && !boundary.owns_relation
     && !boundary.application_security_definer_owner_drift
+    && !boundary.application_security_definer_identity_drift
     && !boundary.application_security_definer_execute_acl_drift
     && !boundary.function_ownership_outside_boundary
     && !boundary.unexpected_owned_object

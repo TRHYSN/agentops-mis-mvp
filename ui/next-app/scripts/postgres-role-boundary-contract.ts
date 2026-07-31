@@ -681,6 +681,44 @@ async function run() {
         true,
       );
 
+      activeCheck = "function_owner_application_function_set_closed";
+      const unexpectedApplicationFunction =
+        `${quotedIdentifier(applicationSchema)}.` +
+        "\"function_owner_unexpected_probe\"()";
+      await scopedOwner.query(
+        `CREATE FUNCTION ${unexpectedApplicationFunction}
+         RETURNS void
+         LANGUAGE sql
+         SECURITY DEFINER
+         SET search_path=pg_catalog,pg_temp
+         AS 'SELECT'`,
+      );
+      await scopedOwner.query(
+        `ALTER FUNCTION ${unexpectedApplicationFunction}
+         OWNER TO ${quotedIdentifier(functionOwnerRole)}`,
+      );
+      await scopedOwner.query(
+        `REVOKE ALL ON FUNCTION ${unexpectedApplicationFunction}
+         FROM PUBLIC`,
+      );
+      try {
+        await expectFunctionOwnerReadinessDenied(runtime, entitlementAdmin);
+      } finally {
+        await scopedOwner.query(
+          `DROP FUNCTION ${unexpectedApplicationFunction}`,
+        );
+      }
+      const runtimeAfterUnexpectedFunction =
+        await assertPostgresRuntimeRoleBoundary(runtime, {
+          applicationSchema,
+          runtimeApiSchema,
+          runtimeRole,
+        });
+      assert.equal(
+        runtimeAfterUnexpectedFunction.function_owner_restricted,
+        true,
+      );
+
       activeCheck = "function_owner_stale_execute_acl_repaired";
       const entitlementIssueCore = `${
         quotedIdentifier(applicationSchema)
@@ -1277,6 +1315,7 @@ async function run() {
         function_owner_membership_drift_denied: true,
         function_owner_cross_database_restore_allowed: true,
         function_owner_cross_database_non_function_drift_denied: true,
+        function_owner_application_function_set_closed: true,
         function_owner_non_function_object_drift_denied: true,
         function_owner_non_function_object_drift_restored: true,
         function_owner_readiness_restored: true,

@@ -199,7 +199,7 @@ async function run() {
     source("./byoc-backup-restore-behavior-contract.ts"),
     source("../../../deploy/byoc/node-secret-entrypoint.mjs"),
     source("../../../deploy/byoc/postgres-dsn-for-restore.mjs"),
-    source("../../../deploy/byoc/postgres-role-boundary-check.ts"),
+    source("../../../deploy/byoc/postgres-role-boundary-check.mts"),
     source("../../../deploy/byoc/node-healthcheck.mjs"),
     source("../src/server/controlPlane/schemaReadiness.ts"),
   ]);
@@ -224,7 +224,7 @@ async function run() {
   assert.match(dockerfile, /node-secret-entrypoint\.mjs/);
   assert.match(dockerfile, /node-healthcheck\.mjs/);
   assert.match(dockerfile, /postgres-dsn-for-restore\.mjs/);
-  assert.match(dockerfile, /postgres-role-boundary-check\.ts/);
+  assert.match(dockerfile, /postgres-role-boundary-check\.mts/);
   assert.match(dockerfile, /restore-provision\.sh/);
   assert.match(dockerfile, /COPY migrations\/postgres \.\/migrations\/postgres/);
   assert.match(dockerfile, /WORKDIR \/opt\/agentops\/ui\/next-app/);
@@ -604,7 +604,7 @@ async function run() {
   );
   assert.match(
     restoreProvisionScript,
-    /postgres-role-boundary-check\.ts" "\$boundary"/,
+    /postgres-role-boundary-check\.mts" "\$boundary"/,
   );
   assert.match(
     restoreRoleBoundaryCheck,

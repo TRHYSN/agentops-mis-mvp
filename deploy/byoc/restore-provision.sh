@@ -197,7 +197,7 @@ run_boundary_check() {
   fi
   chmod 600 "$boundary_receipt"
   if ! ./node_modules/.bin/tsx \
-    "$lib_dir/postgres-role-boundary-check.ts" "$boundary" \
+    "$lib_dir/postgres-role-boundary-check.mts" "$boundary" \
     >"$boundary_receipt" 2>&1
   then
     boundary_code=$(
