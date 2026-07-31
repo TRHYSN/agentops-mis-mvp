@@ -62,8 +62,9 @@ python3.11 -m venv <temporary-directory>
 
 - Bounded evidence sync into MIS Task/Run/Metric/Artifact/Evaluation/Audit passes.
 - Human Workspace experiment list/detail and Claim Gate readback are implemented.
-- Private Host `1.6.0-research-lab-local.1` is installed from commit `39f8ca0`;
-  its repository-independent CLI completed the real MLP and idempotent MIS sync.
+- Private Host `1.6.0-research-lab-local.3` is installed from the clean
+  acceptance head; its repository-independent CLI completed the real MLP and
+  idempotent MIS sync.
 
 ## Remaining product gates
 

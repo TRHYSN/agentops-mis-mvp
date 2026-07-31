@@ -39,11 +39,11 @@ credentials, raw prompts or raw responses.
 - MIS Audit records for the evidence hash: 1
 
 The final installed acceptance used AgentOps MIS Private Host
-`1.6.0-research-lab-local.1`, packaged from commit `39f8ca0`, and a Research Lab
-state directory under `~/.agentops/research-lab`. The installer created a
-verified pre-update ledger backup, preserved Owner state, kept
-`1.6.0-private-host-preview.44` as the rollback target and restarted the
-host-only launchd service. No database or Research Lab state is committed.
+`1.6.0-research-lab-local.3`, packaged from the clean acceptance head, and a
+Research Lab state directory under `~/.agentops/research-lab`. The installer
+created a verified pre-update ledger backup, preserved Owner state, kept the
+previous Research Lab release as the immediate rollback target and restarted
+the host-only launchd service. No database or Research Lab state is committed.
 
 ## Idempotency and failure behavior
 
@@ -82,8 +82,8 @@ The UI has complete English/Chinese labels and no mock fallback.
 
 ## Installed product acceptance
 
-- `agentops host version` reports packaged commit `39f8ca0` and previous version
-  `1.6.0-private-host-preview.44`.
+- `agentops host version` reports the clean acceptance-head commit and previous
+  Research Lab release as the rollback target.
 - `agentops host status` and `agentops host doctor` report a ready loopback Host,
   ready Owner login and private Tailscale URL with Funnel disabled.
 - The installed, repository-independent `agentops experiment` command validates,
