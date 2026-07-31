@@ -68,6 +68,7 @@ class IntegrityPolicy:
     minimum_distinct_seeds: int
     allow_warning_deviations: bool
     require_provenance: bool
+    minimum_primary_metric: float | None
 
     @classmethod
     def from_dict(cls, raw: dict[str, Any] | None, *, stage: ExperimentStage) -> "IntegrityPolicy":
@@ -95,7 +96,20 @@ class IntegrityPolicy:
         require_provenance = raw.get("require_provenance", default_require_provenance)
         if not isinstance(require_provenance, bool):
             raise SpecError("integrity.require_provenance must be a boolean")
-        return cls(tuple(dict.fromkeys(required)), strict_actuals, minimum_completed_trials, minimum_distinct_seeds, allow_warning_deviations, require_provenance)
+        minimum_primary_metric = raw.get("minimum_primary_metric")
+        if minimum_primary_metric is not None and (
+            isinstance(minimum_primary_metric, bool) or not isinstance(minimum_primary_metric, (int, float))
+        ):
+            raise SpecError("integrity.minimum_primary_metric must be a number")
+        return cls(
+            tuple(dict.fromkeys(required)),
+            strict_actuals,
+            minimum_completed_trials,
+            minimum_distinct_seeds,
+            allow_warning_deviations,
+            require_provenance,
+            None if minimum_primary_metric is None else float(minimum_primary_metric),
+        )
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -105,6 +119,7 @@ class IntegrityPolicy:
             "minimum_distinct_seeds": self.minimum_distinct_seeds,
             "allow_warning_deviations": self.allow_warning_deviations,
             "require_provenance": self.require_provenance,
+            "minimum_primary_metric": self.minimum_primary_metric,
         }
 
 
@@ -187,6 +202,9 @@ class ExperimentSpec:
         environment = raw.get("environment", {})
         if not isinstance(environment, dict) or not all(isinstance(key, str) and isinstance(value, str) for key, value in environment.items()):
             raise SpecError("environment must map strings to strings")
+        sensitive_environment_keys = sorted(key for key in environment if is_sensitive_key(key))
+        if sensitive_environment_keys:
+            raise SpecError("environment contains sensitive keys; use an approved runtime secret provider")
 
         executor = raw.get("executor", "local")
         if executor not in {"local", "ssh"}:

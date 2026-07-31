@@ -360,6 +360,32 @@ def main() -> int:
         worker_help = run([str(installed_worker), "--help"], env=env)
         if worker_help.returncode != 0 or "Run an AgentOps MIS worker loop." not in worker_help.stdout:
             fail("installed agentops-worker --help failed", worker_help)
+        research_example = (
+            install_root
+            / "current"
+            / "incubator"
+            / "research-lab"
+            / "examples"
+            / "tiny_mlp_experiment.json"
+        )
+        research_validate = run(
+            [
+                str(bin_dir / "agentops"),
+                "experiment",
+                "validate",
+                "--spec",
+                str(research_example),
+            ],
+            env=env,
+        )
+        research_validate_payload = json.loads(research_validate.stdout or "{}")
+        if (
+            research_validate.returncode != 0
+            or research_validate_payload.get("ok") is not True
+            or research_validate_payload.get("delegate_source") != "repository_module"
+            or research_validate_payload.get("token_omitted") is not True
+        ):
+            fail("installed agentops experiment validate failed", research_validate)
         for command in ("bootstrap-owner", "configure-cli", "backup", "backup-verify", "restore"):
             command_help = run([str(bin_dir / "agentops"), "host", command, "--help"], env=env)
             if command_help.returncode != 0:
@@ -371,6 +397,7 @@ def main() -> int:
         for release_doc in (
             "docs/PRIVATE_HOST_OPERATOR_RUNBOOK.md",
             "docs/PRIVATE_HOST_WORKER_SERVICE_ACCEPTANCE.md",
+            "docs/DEEP_LEARNING_EXPERIMENT_QUICKSTART.md",
             "docs/RELEASE_PROVENANCE.md",
             "docs/REMOTE_WORKER_OPERATIONS_RUNBOOK.md",
             "docs/SBOM_MINIMAL.md",

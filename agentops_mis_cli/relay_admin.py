@@ -58,6 +58,7 @@ EXPECTED_WHEEL_MODULES = frozenset(
         "agentops_mis_cli/host_log.py",
         "agentops_mis_cli/http_transport.py",
         "agentops_mis_cli/redaction.py",
+        "agentops_mis_cli/research_lab.py",
         "agentops_mis_cli/relay_activation.py",
         "agentops_mis_cli/relay_activation_controller.py",
         "agentops_mis_cli/relay_activation_evidence.py",
@@ -97,6 +98,7 @@ EXPECTED_WHEEL_MODULES = frozenset(
         "agentops_mis_core/private_host_acceptance.py",
         "agentops_mis_core/read_model_cache.py",
         "agentops_mis_core/relay_transport.py",
+        "agentops_mis_core/research_experiments.py",
         "agentops_mis_core/worker_fleet.py",
         "agentops_mis_core/workflow_jobs.py",
     }

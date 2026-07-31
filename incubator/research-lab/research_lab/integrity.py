@@ -119,7 +119,13 @@ def _decode_json(value: Any) -> Any:
         return value
 
 
-def evaluate_claim_eligibility(experiment: dict[str, Any], trials: Iterable[dict[str, Any]], deviations: Iterable[dict[str, Any]], metric_names_by_trial: dict[str, set[str]] | None = None) -> ClaimEligibility:
+def evaluate_claim_eligibility(
+    experiment: dict[str, Any],
+    trials: Iterable[dict[str, Any]],
+    deviations: Iterable[dict[str, Any]],
+    metric_names_by_trial: dict[str, set[str]] | None = None,
+    final_metric_values_by_trial: dict[str, dict[str, float]] | None = None,
+) -> ClaimEligibility:
     trial_list = list(trials)
     deviation_list = list(deviations)
     protocol_document = _decode_json(experiment.get("protocol_json")) or {}
@@ -161,4 +167,16 @@ def evaluate_claim_eligibility(experiment: dict[str, Any], trials: Iterable[dict
         missing_metric = [str(trial["id"]) for trial in completed if primary_metric not in metric_names_by_trial.get(str(trial["id"]), set())]
         if missing_metric:
             reasons.append(f"primary metric {primary_metric!r} missing from {len(missing_metric)} completed Trial(s)")
+    if primary_metric and integrity.minimum_primary_metric is not None and final_metric_values_by_trial is not None:
+        below_threshold = []
+        for trial in completed:
+            trial_id = str(trial["id"])
+            value = final_metric_values_by_trial.get(trial_id, {}).get(primary_metric)
+            if value is None or value < integrity.minimum_primary_metric:
+                below_threshold.append(trial_id)
+        if below_threshold:
+            reasons.append(
+                f"primary metric {primary_metric!r} must be >= {integrity.minimum_primary_metric:g} "
+                f"for every completed Trial; {len(below_threshold)} Trial(s) failed"
+            )
     return ClaimEligibility(not reasons, tuple(reasons), stage.value, len(completed), len(trial_list), len(seeds), critical, warnings)

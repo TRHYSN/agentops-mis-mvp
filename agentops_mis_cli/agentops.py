@@ -4463,6 +4463,17 @@ def cmd_artifact_list(args, client: AgentOpsClient) -> dict:
     return client.get("/api/agent-gateway/artifacts", query=query)
 
 
+def cmd_experiment(args, client: AgentOpsClient) -> dict:
+    from .research_lab import run_experiment_command
+
+    return run_experiment_command(
+        args,
+        base_url=client.base_url,
+        workspace_id=client.workspace_id,
+        api_key=client.api_key,
+    )
+
+
 def cmd_knowledge_search(args, client: AgentOpsClient) -> dict:
     return client.get("/api/agent-gateway/knowledge/search", query={
         "q": args.query,
@@ -6270,6 +6281,27 @@ def build_parser() -> argparse.ArgumentParser:
     artifact_record.add_argument("--content-hash", default=None)
     artifact_record.set_defaults(handler="artifact_record")
 
+    experiment = sub.add_parser("experiment", help="Validate, run, inspect, or sync Research Lab experiments.")
+    experiment_sub = experiment.add_subparsers(dest="experiment_action", required=True)
+    experiment_validate = experiment_sub.add_parser("validate", help="Validate a Research Lab experiment spec.")
+    experiment_validate.add_argument("--spec", required=True)
+    experiment_validate.add_argument("--servers", default=None, help="Non-secret server profile file for SSH spec validation.")
+    experiment_validate.set_defaults(handler="experiment")
+    experiment_run = experiment_sub.add_parser("run", help="Plan or explicitly confirm a local Research Lab run.")
+    experiment_run.add_argument("--spec", required=True)
+    experiment_run.add_argument("--state-dir", default=".research-lab")
+    experiment_run.add_argument("--confirm-run", action="store_true", help="Execute the run. The default only returns a dry-run plan.")
+    experiment_run.set_defaults(handler="experiment")
+    experiment_show = experiment_sub.add_parser("show", help="Read a bounded Research Lab experiment summary.")
+    experiment_show.add_argument("--experiment-id", required=True)
+    experiment_show.add_argument("--state-dir", default=".research-lab")
+    experiment_show.set_defaults(handler="experiment")
+    experiment_sync = experiment_sub.add_parser("sync", help="Plan or explicitly confirm bounded evidence sync to AgentOps MIS.")
+    experiment_sync.add_argument("--experiment-id", required=True)
+    experiment_sync.add_argument("--state-dir", default=".research-lab")
+    experiment_sync.add_argument("--confirm-sync", action="store_true", help="Publish bounded evidence. The default only returns a sync plan.")
+    experiment_sync.set_defaults(handler="experiment")
+
     knowledge = sub.add_parser("knowledge", help="Knowledge base and Markdown index commands.")
     knowledge_sub = knowledge.add_subparsers(dest="action", required=True)
     knowledge_search = knowledge_sub.add_parser("search", help="Search indexed specs, base notes, runbooks and shared memory.")
@@ -6943,6 +6975,7 @@ HANDLERS = {
     "toolcall_record": cmd_toolcall_record,
     "artifact_list": cmd_artifact_list,
     "artifact_record": cmd_artifact_record,
+    "experiment": cmd_experiment,
     "knowledge_search": cmd_knowledge_search,
     "knowledge_index": cmd_knowledge_index,
     "knowledge_evidence_packet": cmd_knowledge_evidence_packet,
