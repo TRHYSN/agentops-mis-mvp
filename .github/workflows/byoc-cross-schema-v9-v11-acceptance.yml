@@ -1,0 +1,298 @@
+name: BYOC Cross-Schema v9 to v11 Acceptance
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - .github/workflows/byoc-cross-schema-v9-v11-acceptance.yml
+      - deploy/byoc/cross-schema-v9-v11-acceptance.sh
+      - deploy/byoc/compose.historical-v9.yaml
+      - deploy/byoc/historical-v9.Dockerfile
+      - deploy/byoc/historical-v9-adapter/**
+      - deploy/byoc/Dockerfile
+      - deploy/byoc/compose.yaml
+      - deploy/byoc/backup.sh
+      - migrations/postgres/**
+      - ui/next-app/**
+  pull_request:
+    paths:
+      - .github/workflows/byoc-cross-schema-v9-v11-acceptance.yml
+      - deploy/byoc/cross-schema-v9-v11-acceptance.sh
+      - deploy/byoc/compose.historical-v9.yaml
+      - deploy/byoc/historical-v9.Dockerfile
+      - deploy/byoc/historical-v9-adapter/**
+      - deploy/byoc/Dockerfile
+      - deploy/byoc/compose.yaml
+      - deploy/byoc/backup.sh
+      - migrations/postgres/**
+      - ui/next-app/**
+
+permissions:
+  contents: read
+
+concurrency:
+  group: agentops-byoc-cross-schema-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  cross-schema-acceptance:
+    name: Real v9 forward migration and backup-authoritative rollback
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      COMPOSE_PROJECT_NAME: agentops-byoc-cross-${{ github.run_id }}-${{ github.run_attempt }}
+      AGENTOPS_HISTORICAL_V9_REVISION: f55def1233403a503a39d9af92371a71770c23f7
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+      - name: Checkout current target
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Checkout audited historical v9 source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: f55def1233403a503a39d9af92371a71770c23f7
+          path: historical-source
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Verify exact source ancestry and immutable inputs
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "${GITHUB_SHA}"
+          test "$(git -C historical-source rev-parse HEAD)" = \
+            "${AGENTOPS_HISTORICAL_V9_REVISION}"
+          git merge-base --is-ancestor \
+            "${AGENTOPS_HISTORICAL_V9_REVISION}" "${GITHUB_SHA}"
+          test "$(
+            sha256sum historical-source/ui/next-app/package-lock.json |
+              awk '{print $1}'
+          )" = "22ae9970d43e8a9896ee61b71de9834fb1512f42c770d80784191b5dad2caaba"
+          test "$(
+            sha256sum historical-source/ui/next-app/src/server/controlPlane/schemaManifest.ts |
+              awk '{print $1}'
+          )" = "8cf59998821a27c37b949bcdb94897ad3b61ce4341b79f37cc0e93365d750838"
+          test "$(
+            sha256sum ui/next-app/package-lock.json | awk '{print $1}'
+          )" = "22ae9970d43e8a9896ee61b71de9834fb1512f42c770d80784191b5dad2caaba"
+
+      - name: Verify cross-schema packaging contract
+        working-directory: ui/next-app
+        run: |
+          set -euo pipefail
+          npm ci --ignore-scripts
+          npx --no-install tsx scripts/byoc-cross-schema-v9-v11-packaging-contract.ts
+
+      - name: Create ephemeral credentials and acceptance paths
+        run: |
+          set -euo pipefail
+          umask 077
+          root="${RUNNER_TEMP}/agentops-byoc-cross-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          secrets="${root}/secrets"
+          old_env="${root}/historical-v9.env"
+          target_env="${root}/target-v11.env"
+          backup="${root}/pre-upgrade-v9.bundle"
+          suffix="$(openssl rand -hex 16)"
+          install -d -m 700 "${root}" "${secrets}"
+          openssl rand -hex 32 > "${secrets}/postgres-migrator-password"
+          openssl rand -hex 32 > "${secrets}/postgres-runtime-password"
+          openssl rand -hex 32 > "${secrets}/postgres-entitlement-admin-password"
+          openssl rand -base64 32 > "${secrets}/entitlement-operator-password"
+          openssl rand -hex 32 > "${secrets}/human-session-hmac-key"
+          chmod 600 "${secrets}"/*
+          {
+            printf 'AGENTOPS_CROSS_SCHEMA_ROOT=%s\n' "${root}"
+            printf 'AGENTOPS_CROSS_SCHEMA_SECRETS=%s\n' "${secrets}"
+            printf 'AGENTOPS_CROSS_SCHEMA_OLD_ENV_FILE=%s\n' "${old_env}"
+            printf 'AGENTOPS_CROSS_SCHEMA_TARGET_ENV_FILE=%s\n' "${target_env}"
+            printf 'AGENTOPS_CROSS_SCHEMA_BACKUP_BUNDLE=%s\n' "${backup}"
+            printf 'AGENTOPS_CROSS_SCHEMA_RESTORE_DATABASE=agentops_restore_%s\n' \
+              "${GITHUB_RUN_ID}_${GITHUB_RUN_ATTEMPT}"
+            printf 'AGENTOPS_CROSS_SCHEMA_QUARANTINE_DATABASE=agentops_quarantine_%s\n' \
+              "${GITHUB_RUN_ID}_${GITHUB_RUN_ATTEMPT}"
+            printf 'AGENTOPS_CROSS_SCHEMA_AUTHORITY_ID=audit_cross_schema_%s\n' \
+              "${suffix}"
+            printf 'AGENTOPS_CROSS_SCHEMA_PROBE_SUFFIX=%s\n' "${suffix}"
+            printf 'AGENTOPS_CROSS_SCHEMA_REGISTRY=agentops-cross-registry-%s-%s\n' \
+              "${GITHUB_RUN_ID}" "${GITHUB_RUN_ATTEMPT}"
+          } >> "${GITHUB_ENV}"
+
+      - name: Start pinned local registry
+        run: |
+          set -euo pipefail
+          docker run \
+            --detach \
+            --name "${AGENTOPS_CROSS_SCHEMA_REGISTRY}" \
+            --publish 127.0.0.1:5000:5000 \
+            registry:2@sha256:a3d8aaa63ed8681a604f1dea0aa03f100d5895b6a58ace528858a7b332415373
+          curl \
+            --fail \
+            --silent \
+            --show-error \
+            --retry 20 \
+            --retry-all-errors \
+            --retry-delay 1 \
+            http://127.0.0.1:5000/v2/ >/dev/null
+
+      - name: Build real Node 22 historical and current images
+        run: |
+          set -euo pipefail
+          old_tag="localhost:5000/agentops-mis-byoc:historical-v9-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          target_tag="localhost:5000/agentops-mis-byoc:target-v11-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          timeout 15m docker build \
+            --file deploy/byoc/historical-v9.Dockerfile \
+            --build-arg "AGENTOPS_HISTORICAL_SOURCE_REVISION=${AGENTOPS_HISTORICAL_V9_REVISION}" \
+            --tag "${old_tag}" \
+            .
+          timeout 15m docker build \
+            --file deploy/byoc/Dockerfile \
+            --build-arg "AGENTOPS_BUILD_IDENTITY=target-v11-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
+            --build-arg "AGENTOPS_SOURCE_REVISION=${GITHUB_SHA}" \
+            --tag "${target_tag}" \
+            .
+          docker push "${old_tag}"
+          docker push "${target_tag}"
+          old_digest="$(
+            docker image inspect --format '{{index .RepoDigests 0}}' "${old_tag}"
+          )"
+          target_digest="$(
+            docker image inspect --format '{{index .RepoDigests 0}}' "${target_tag}"
+          )"
+          old_id="$(docker image inspect --format '{{.Id}}' "${old_digest}")"
+          target_id="$(docker image inspect --format '{{.Id}}' "${target_digest}")"
+          test "${old_id}" != "${target_id}"
+          test "$(
+            docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' \
+              "${old_digest}"
+          )" = "${AGENTOPS_HISTORICAL_V9_REVISION}"
+          test "$(
+            docker image inspect --format '{{index .Config.Labels "io.agentops.byoc.historical-adapter"}}' \
+              "${old_digest}"
+          )" = "agentops_byoc_historical_schema_adapter_v1"
+          test "$(
+            docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' \
+              "${target_digest}"
+          )" = "${GITHUB_SHA}"
+          docker run --rm --entrypoint node "${old_digest}" --version |
+            grep -E '^v22\.'
+          docker run --rm --entrypoint node "${target_digest}" --version |
+            grep -E '^v22\.'
+          {
+            printf 'AGENTOPS_CROSS_SCHEMA_OLD_IMAGE=%s\n' "${old_digest}"
+            printf 'AGENTOPS_CROSS_SCHEMA_OLD_IMAGE_ID=%s\n' "${old_id}"
+            printf 'AGENTOPS_CROSS_SCHEMA_TARGET_IMAGE=%s\n' "${target_digest}"
+            printf 'AGENTOPS_CROSS_SCHEMA_TARGET_IMAGE_ID=%s\n' "${target_id}"
+          } >> "${GITHUB_ENV}"
+
+      - name: Bind historical and target Compose configurations
+        run: |
+          set -euo pipefail
+          umask 077
+          {
+            printf 'AGENTOPS_IMAGE=%s\n' "${AGENTOPS_CROSS_SCHEMA_OLD_IMAGE}"
+            printf 'AGENTOPS_BIND_ADDRESS=127.0.0.1\n'
+            printf 'AGENTOPS_PORT=3001\n'
+            printf 'AGENTOPS_ALLOWED_ORIGINS=http://127.0.0.1:3001\n'
+            printf 'AGENTOPS_POSTGRES_DATABASE=agentops\n'
+            printf 'AGENTOPS_POSTGRES_MIGRATOR_USER=agentops_migrator\n'
+            printf 'AGENTOPS_POSTGRES_MIGRATOR_PASSWORD_FILE=%s/postgres-migrator-password\n' \
+              "${AGENTOPS_CROSS_SCHEMA_SECRETS}"
+            printf 'AGENTOPS_HUMAN_SESSION_HMAC_KEY_FILE=%s/human-session-hmac-key\n' \
+              "${AGENTOPS_CROSS_SCHEMA_SECRETS}"
+          } > "${AGENTOPS_CROSS_SCHEMA_OLD_ENV_FILE}"
+          {
+            printf 'AGENTOPS_IMAGE=%s\n' "${AGENTOPS_CROSS_SCHEMA_TARGET_IMAGE}"
+            printf 'AGENTOPS_BUILD_IDENTITY=target-v11-%s-%s\n' \
+              "${GITHUB_RUN_ID}" "${GITHUB_RUN_ATTEMPT}"
+            printf 'AGENTOPS_SOURCE_REVISION=%s\n' "${GITHUB_SHA}"
+            printf 'AGENTOPS_BIND_ADDRESS=127.0.0.1\n'
+            printf 'AGENTOPS_PORT=3001\n'
+            printf 'AGENTOPS_ALLOWED_ORIGINS=http://127.0.0.1:3001\n'
+            printf 'AGENTOPS_ENTITLEMENT_CONTROL_PLANE_URL=http://127.0.0.1:3001\n'
+            printf 'AGENTOPS_ENTITLEMENT_CONTROL_PLANE_ORIGIN=http://127.0.0.1:3001\n'
+            printf 'AGENTOPS_ENTITLEMENT_OPERATOR_USERNAME=owner\n'
+            printf 'AGENTOPS_POSTGRES_DATABASE=agentops\n'
+            printf 'AGENTOPS_POSTGRES_MIGRATOR_USER=agentops_migrator\n'
+            printf 'AGENTOPS_POSTGRES_RUNTIME_USER=agentops_runtime\n'
+            printf 'AGENTOPS_POSTGRES_ENTITLEMENT_ADMIN_USER=agentops_entitlement_admin\n'
+            printf 'AGENTOPS_POSTGRES_MIGRATOR_PASSWORD_FILE=%s/postgres-migrator-password\n' \
+              "${AGENTOPS_CROSS_SCHEMA_SECRETS}"
+            printf 'AGENTOPS_POSTGRES_RUNTIME_PASSWORD_FILE=%s/postgres-runtime-password\n' \
+              "${AGENTOPS_CROSS_SCHEMA_SECRETS}"
+            printf 'AGENTOPS_POSTGRES_ENTITLEMENT_ADMIN_PASSWORD_FILE=%s/postgres-entitlement-admin-password\n' \
+              "${AGENTOPS_CROSS_SCHEMA_SECRETS}"
+            printf 'AGENTOPS_ENTITLEMENT_OPERATOR_PASSWORD_FILE=%s/entitlement-operator-password\n' \
+              "${AGENTOPS_CROSS_SCHEMA_SECRETS}"
+            printf 'AGENTOPS_HUMAN_SESSION_HMAC_KEY_FILE=%s/human-session-hmac-key\n' \
+              "${AGENTOPS_CROSS_SCHEMA_SECRETS}"
+          } > "${AGENTOPS_CROSS_SCHEMA_TARGET_ENV_FILE}"
+          chmod 600 \
+            "${AGENTOPS_CROSS_SCHEMA_OLD_ENV_FILE}" \
+            "${AGENTOPS_CROSS_SCHEMA_TARGET_ENV_FILE}"
+          docker compose \
+            --env-file "${AGENTOPS_CROSS_SCHEMA_OLD_ENV_FILE}" \
+            -f deploy/byoc/compose.historical-v9.yaml config --quiet
+          docker compose \
+            --env-file "${AGENTOPS_CROSS_SCHEMA_TARGET_ENV_FILE}" \
+            -f deploy/byoc/compose.yaml config --quiet
+
+      - name: Run real cross-schema forward migration and rollback
+        run: |
+          set -euo pipefail
+          receipt="${RUNNER_TEMP}/agentops-byoc-cross-schema-receipt.json"
+          timeout 35m deploy/byoc/cross-schema-v9-v11-acceptance.sh > "${receipt}"
+          jq -e '
+            .ok == true
+            and .contract
+              == "agentops_byoc_cross_schema_v9_v11_acceptance_v1"
+            and .old_source_revision
+              == "f55def1233403a503a39d9af92371a71770c23f7"
+            and .source_schema_contract == "agentops_commercial_postgres_v9"
+            and .target_schema_contract == "agentops_commercial_postgres_v11"
+            and .source_migrations_applied == 10
+            and .forward_migrations_applied == 3
+            and .v11_data_probe_written == true
+            and .backup_restore_authoritative == true
+            and .down_migration_performed == false
+            and .old_authority_preserved == true
+            and .target_probe_removed == true
+            and .old_image_restored == true
+            and .postgres_volume_preserved == true
+            and .postgres_cluster_identity_preserved == true
+            and .target_roles_cleaned == true
+            and .python_used == false
+            and .sqlite_used == false
+            and .mock_docker_used == false
+            and .credentials_omitted == true
+            and .row_data_omitted == true
+          ' "${receipt}" >/dev/null
+          echo "::notice title=BYOC cross-schema acceptance::Real historical v9 Node 22 image migrated three manifest entries to the exact current v11 image, wrote a v11-only challenge probe, then restored the committed v9 backup and old image without a down migration."
+
+      - name: Cleanup ephemeral BYOC topology
+        if: always()
+        run: |
+          set +e
+          if [ -n "${AGENTOPS_CROSS_SCHEMA_TARGET_ENV_FILE:-}" ] && \
+             [ -f "${AGENTOPS_CROSS_SCHEMA_TARGET_ENV_FILE}" ]; then
+            docker compose \
+              --env-file "${AGENTOPS_CROSS_SCHEMA_TARGET_ENV_FILE}" \
+              -f deploy/byoc/compose.yaml \
+              down --volumes --remove-orphans --timeout 10
+          fi
+          if [ -n "${AGENTOPS_CROSS_SCHEMA_OLD_ENV_FILE:-}" ] && \
+             [ -f "${AGENTOPS_CROSS_SCHEMA_OLD_ENV_FILE}" ]; then
+            docker compose \
+              --env-file "${AGENTOPS_CROSS_SCHEMA_OLD_ENV_FILE}" \
+              -f deploy/byoc/compose.historical-v9.yaml \
+              down --volumes --remove-orphans --timeout 10
+          fi
+          docker rm --force "${AGENTOPS_CROSS_SCHEMA_REGISTRY:-unused}" 2>/dev/null
+          if [ -n "${AGENTOPS_CROSS_SCHEMA_ROOT:-}" ] && \
+             [ -d "${AGENTOPS_CROSS_SCHEMA_ROOT}" ]; then
+            find "${AGENTOPS_CROSS_SCHEMA_ROOT}" -depth -delete
+          fi

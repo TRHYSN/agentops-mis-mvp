@@ -1,0 +1,123 @@
+name: agentops-mis-byoc
+
+services:
+  postgres:
+    image: postgres:16-alpine@sha256:57c72fd2a128e416c7fcc499958864df5301e940bca0a56f58fddf30ffc07777
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${AGENTOPS_POSTGRES_DATABASE:-agentops}
+      POSTGRES_USER: ${AGENTOPS_POSTGRES_MIGRATOR_USER:-agentops_migrator}
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_migrator_password
+    secrets:
+      - postgres_migrator_password
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - pg_isready -U "$${POSTGRES_USER}" -d "$${POSTGRES_DB}"
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    volumes:
+      - agentops_postgres_data:/var/lib/postgresql/data
+    networks:
+      - control_plane
+
+  migrate:
+    image: ${AGENTOPS_IMAGE:?set AGENTOPS_IMAGE to the audited v9 digest}
+    restart: "no"
+    user: "0:0"
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - DAC_OVERRIDE
+      - SETGID
+      - SETUID
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /run/agentops-historical-secrets:rw,noexec,nosuid,size=1m,mode=0700,uid=1000,gid=1000
+    entrypoint:
+      - node
+      - /usr/local/lib/agentops/historical-v9-secret-entrypoint.mjs
+      - --postgres
+      - --
+    command: ["npm", "run", "migrate:postgres"]
+    environment: &historical_database_environment
+      AGENTOPS_DEPLOYMENT_MODE: production
+      AGENTOPS_CONTROL_PLANE_MODE: postgres
+      AGENTOPS_POSTGRES_HOST: postgres
+      AGENTOPS_POSTGRES_PORT: "5432"
+      AGENTOPS_POSTGRES_DATABASE: ${AGENTOPS_POSTGRES_DATABASE:-agentops}
+      AGENTOPS_POSTGRES_USER: ${AGENTOPS_POSTGRES_MIGRATOR_USER:-agentops_migrator}
+      AGENTOPS_POSTGRES_PASSWORD_SOURCE_FILE: /run/secrets/postgres_migrator_password
+      AGENTOPS_POSTGRES_SSL: "false"
+    secrets:
+      - postgres_migrator_password
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - control_plane
+
+  control-plane:
+    image: ${AGENTOPS_IMAGE:?set AGENTOPS_IMAGE to the audited v9 digest}
+    restart: unless-stopped
+    user: "0:0"
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - DAC_OVERRIDE
+      - SETGID
+      - SETUID
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /run/agentops-historical-secrets:rw,noexec,nosuid,size=1m,mode=0700,uid=1000,gid=1000
+    entrypoint:
+      - node
+      - /usr/local/lib/agentops/historical-v9-secret-entrypoint.mjs
+      - --postgres
+      - --human-session
+      - --
+    command: ["node", "scripts/start.mjs"]
+    environment:
+      <<: *historical_database_environment
+      AGENTOPS_HUMAN_SESSION_HMAC_KEY_SOURCE_FILE: /run/secrets/human_session_hmac_key
+      AGENTOPS_ALLOWED_ORIGINS: ${AGENTOPS_ALLOWED_ORIGINS:?set AGENTOPS_ALLOWED_ORIGINS}
+      AGENTOPS_NEXT_HOST: 0.0.0.0
+      AGENTOPS_NEXT_PORT: "3001"
+    secrets:
+      - postgres_migrator_password
+      - human_session_hmac_key
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - fetch('http://127.0.0.1:3001/api/mis/health').then(async r=>{if(!r.ok)throw new Error(await r.text())})
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+    ports:
+      - ${AGENTOPS_BIND_ADDRESS:-127.0.0.1}:${AGENTOPS_PORT:-3001}:3001
+    networks:
+      - control_plane
+
+volumes:
+  agentops_postgres_data:
+
+networks:
+  control_plane:
+    driver: bridge
+
+secrets:
+  postgres_migrator_password:
+    file: ${AGENTOPS_POSTGRES_MIGRATOR_PASSWORD_FILE:?set AGENTOPS_POSTGRES_MIGRATOR_PASSWORD_FILE}
+  human_session_hmac_key:
+    file: ${AGENTOPS_HUMAN_SESSION_HMAC_KEY_FILE:?set AGENTOPS_HUMAN_SESSION_HMAC_KEY_FILE}
