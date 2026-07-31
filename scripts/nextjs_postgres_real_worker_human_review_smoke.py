@@ -2692,7 +2692,7 @@ def main() -> int:
             """SELECT
               namespace_row.nspname AS schema_name,
               procedure_row.proname AS function_name,
-              pg_get_function_identity_arguments(procedure_row.oid)
+              oidvectortypes(procedure_row.proargtypes)
                 AS identity_arguments
             FROM pg_proc AS procedure_row
             JOIN pg_namespace AS namespace_row
@@ -2704,7 +2704,7 @@ def main() -> int:
             ORDER BY
               namespace_row.nspname,
               procedure_row.proname,
-              pg_get_function_identity_arguments(procedure_row.oid)""",
+              oidvectortypes(procedure_row.proargtypes)""",
             (schema, runtime_api_schema),
         )
         if executable_application_functions != [
