@@ -119,6 +119,11 @@ Do not write it into source control.
 
 ## Remote Machine Setup
 
+Windows 10/11 has a user-local installer, a protected `%LOCALAPPDATA%` config,
+and a Task Scheduler Worker lifecycle. Use
+[`WINDOWS_CLIENT_WORKER_RUNBOOK.md`](WINDOWS_CLIENT_WORKER_RUNBOOK.md) for the
+PowerShell path. The shell examples below remain the macOS/Linux path.
+
 On the remote machine:
 
 ```bash
@@ -176,6 +181,14 @@ agentops-worker service-template \
   --adapter mock \
   --agent-id agt_remote_builder \
   > ~/Library/LaunchAgents/local.agentops.worker.agt_remote_builder.plist
+```
+
+Windows uses the same credential-free contract through Task Scheduler:
+
+```powershell
+agentops-worker service-install --manager windows-task --adapter mock --base-url "https://your-private-host.example" --workspace-id local-demo --agent-id agt_remote_builder --credential-source local_config
+agentops-worker service-install --manager windows-task --adapter mock --base-url "https://your-private-host.example" --workspace-id local-demo --agent-id agt_remote_builder --credential-source local_config --confirm-install
+agentops-worker service-control --manager windows-task --action load --adapter mock --base-url "https://your-private-host.example" --workspace-id local-demo --agent-id agt_remote_builder --credential-source local_config --confirm-control
 ```
 
 ```bash

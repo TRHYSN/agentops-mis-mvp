@@ -231,10 +231,9 @@ print(json.dumps({"version": version, "sha256": hashlib.sha256(p.read_bytes()).h
             }
             $reused = $true
         } else {
-            $staging = Join-Path $versionsDir (".staging-" + [Guid]::NewGuid().ToString("N"))
-            New-Item -ItemType Directory -Path $staging | Out-Null
+            New-Item -ItemType Directory -Path $target | Out-Null
             try {
-                $venv = Join-Path $staging "venv"
+                $venv = Join-Path $target "venv"
                 $venvArgs = @($python.prefix) + @("-m", "venv", $venv)
                 Invoke-Checked -Executable $python.executable -Arguments $venvArgs -Failure "Python venv creation failed"
                 $venvPython = Join-Path $venv "Scripts\python.exe"
@@ -243,7 +242,7 @@ print(json.dumps({"version": version, "sha256": hashlib.sha256(p.read_bytes()).h
                 $workerExe = Join-Path $venv "Scripts\agentops-worker.exe"
                 Invoke-Checked -Executable $agentopsExe -Arguments @("--help") -Failure "agentops entry point verification failed"
                 Invoke-Checked -Executable $workerExe -Arguments @("--help") -Failure "agentops-worker entry point verification failed"
-                Write-AtomicJson -PathValue (Join-Path $staging "install.json") -Payload @{
+                Write-AtomicJson -PathValue (Join-Path $target "install.json") -Payload @{
                     schema_version = $SchemaVersion
                     product = $Product
                     version = $version
@@ -251,11 +250,11 @@ print(json.dumps({"version": version, "sha256": hashlib.sha256(p.read_bytes()).h
                     python_version = [string]$python.version
                     credentials_stored = $false
                 }
-                Move-Item -LiteralPath $staging -Destination $target
-            } finally {
-                if (Test-Path -LiteralPath $staging) {
-                    Remove-Item -LiteralPath $staging -Recurse -Force
+            } catch {
+                if (Test-Path -LiteralPath $target) {
+                    Remove-Item -LiteralPath $target -Recurse -Force
                 }
+                throw
             }
         }
 

@@ -62,6 +62,29 @@ function Remove-UserPathEntry {
     return $true
 }
 
+function Get-ManagedWorkerTaskCount {
+    param([string]$InstallPath)
+    $scheduledTask = Get-Command "Get-ScheduledTask" -ErrorAction SilentlyContinue
+    if ($null -eq $scheduledTask) {
+        throw "Task Scheduler inspection is unavailable; refusing uninstall"
+    }
+    $prefix = $InstallPath.TrimEnd('\') + "\versions\"
+    $managed = @(Get-ScheduledTask -ErrorAction Stop | Where-Object {
+        $task = $_
+        if ($task.TaskName -like "local.agentops.worker.*") { return $true }
+        foreach ($action in @($task.Actions)) {
+            $execute = if ($action.PSObject.Properties.Name -contains "Execute") { [string]$action.Execute } else { "" }
+            $arguments = if ($action.PSObject.Properties.Name -contains "Arguments") { [string]$action.Arguments } else { "" }
+            if ($execute.StartsWith($prefix, [System.StringComparison]::OrdinalIgnoreCase) -or
+                $arguments.Contains("agentops_mis_cli.worker")) {
+                return $true
+            }
+        }
+        return $false
+    })
+    return $managed.Count
+}
+
 try {
     if (-not $TestMode -and [Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT) {
         throw "this uninstaller supports Windows only"
@@ -85,6 +108,10 @@ try {
         [System.IO.Path]::GetFullPath([string]$marker.install_root) -ine $install -or
         [System.IO.Path]::GetFullPath([string]$marker.bin_dir) -ine $bin) {
         throw "managed Windows CLI marker is invalid"
+    }
+    $managedTaskCount = Get-ManagedWorkerTaskCount -InstallPath $install
+    if ($managedTaskCount -gt 0) {
+        throw "managed scheduled Workers remain; unload them with agentops-worker service-control before uninstall"
     }
 
     $allowed = @("agentops.cmd", "agentops-worker.cmd", "agentops-launcher.ps1", "managed.json")
@@ -124,6 +151,7 @@ try {
         path_removed = $pathRemoved
         data_preserved = (-not $dataPurged)
         data_purged = $dataPurged
+        managed_worker_tasks = 0
     }
 } catch {
     Write-JsonResult -Payload @{

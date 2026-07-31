@@ -65,3 +65,19 @@ jobs:
           & "${{ steps.install.outputs.python }}" `
             "$env:GITHUB_WORKSPACE\scripts\windows_cli_worker_acceptance.py" `
             --wheel "${{ steps.wheel.outputs.path }}"
+
+      - name: Verify credential config remains atomic on ACL failure
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          & "${{ steps.install.outputs.python }}" `
+            "$env:GITHUB_WORKSPACE\scripts\windows_config_atomic_write_smoke.py"
+          & "${{ steps.install.outputs.python }}" `
+            "$env:GITHUB_WORKSPACE\scripts\windows_worker_service_security_smoke.py"
+
+      - name: Run real isolated PowerShell installer lifecycle
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          & "${{ steps.install.outputs.python }}" `
+            "$env:GITHUB_WORKSPACE\scripts\windows_installer_smoke.py"

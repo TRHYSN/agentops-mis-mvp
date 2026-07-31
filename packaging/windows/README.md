@@ -64,6 +64,13 @@ $env:AGENTOPS_BASE_URL = "https://your-private-host.example"
 agentops status
 ```
 
+To persist a scoped enrollment without placing it in PowerShell history, use
+the no-echo prompt:
+
+```powershell
+agentops login --base-url "https://your-private-host.example" --workspace-id "local-demo" --agent-id "agt_windows_worker" --prompt-api-key
+```
+
 Use an enrollment or short-lived session token only through the documented
 Agent Gateway flow. Do not place tokens in this repository, installer command
 history, launcher files, or screenshots.
@@ -71,12 +78,12 @@ history, launcher files, or screenshots.
 ## Optional Windows Worker task
 
 The installer deliberately does not register or start Task Scheduler work.
-After the Windows Worker mainline is integrated, the installed command supports
-preview-first task management through `--manager windows-task`:
+The installed command supports preview-first task management through
+`--manager windows-task`:
 
 ```powershell
-agentops-worker service-template --manager windows-task --adapter mock --agent-id agt_windows_local
-agentops-worker service-install --manager windows-task --adapter mock --agent-id agt_windows_local
+agentops-worker service-template --manager windows-task --adapter mock --base-url "https://your-private-host.example" --workspace-id local-demo --agent-id agt_windows_local --credential-source local_config
+agentops-worker service-install --manager windows-task --adapter mock --base-url "https://your-private-host.example" --workspace-id local-demo --agent-id agt_windows_local --credential-source local_config
 ```
 
 `service-install` remains a dry run until its explicit confirmation flag is
@@ -92,6 +99,10 @@ rejected instead of replacing a known version. Launchers are switched only
 after the new venv and both console entry points pass verification.
 
 ## Uninstall
+
+First unload every registered `local.agentops.worker.*` task. Uninstall fails
+closed if a managed scheduled Worker remains, preventing an orphan task from
+pointing at a removed executable.
 
 ```powershell
 .\packaging\windows\uninstall.ps1

@@ -39,5 +39,6 @@ claim that Windows process execution passed.
   integrated Worker supports preview-first `--manager windows-task` lifecycle.
 - This installer consumes a local source checkout; a signed release downloader
   remains future release engineering work.
-- Real Hermes/OpenClaw execution on Windows requires separate runtime adapters
-  and is outside this disjoint packaging slice.
+- Real Hermes/OpenClaw execution requires a physical Windows machine with the
+  corresponding runtime installed; offline installer acceptance cannot replace
+  that real-runtime gate.

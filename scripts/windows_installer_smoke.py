@@ -5,10 +5,12 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import zipfile
 from pathlib import Path
 
@@ -88,6 +90,8 @@ def assert_static_contract() -> dict[str, object]:
     required_uninstall_markers = (
         'Join-Path $env:LOCALAPPDATA "AgentOps MIS"',
         "managed Windows CLI marker is missing",
+        "managed scheduled Workers remain",
+        "Get-ScheduledTask",
         "-PurgeData requires -ConfirmPurgeData",
         "data_preserved",
         "Assert-NoReparsePoint",
@@ -167,9 +171,11 @@ def parse_last_json(output: str) -> dict[str, object]:
 
 def assert_no_sensitive_output(*values: str) -> None:
     joined = "\n".join(values).lower()
-    for marker in ("authorization: bearer", "begin private key", "ntn_", "sk-"):
+    for marker in ("authorization: bearer", "begin private key", "ntn_"):
         if marker in joined:
             raise AssertionError(f"sensitive marker in acceptance output: {marker}")
+    if re.search(r"\bsk-[a-z0-9_-]{16,}", joined):
+        raise AssertionError("sensitive marker in acceptance output: OpenAI-style token")
 
 
 def run_windows_e2e(shell: str) -> dict[str, object]:
@@ -196,7 +202,11 @@ def run_windows_e2e(shell: str) -> dict[str, object]:
         first = run(install_command, cwd=ROOT, timeout=180)
         assert_no_sensitive_output(first.stdout, first.stderr)
         if first.returncode != 0:
-            raise AssertionError(f"Windows install failed: {first.stderr.strip()}")
+            try:
+                installer_error = str(parse_last_json(first.stdout).get("error") or "unknown installer error")
+            except AssertionError:
+                installer_error = "installer did not emit its bounded JSON error"
+            raise AssertionError(f"Windows install failed: {installer_error}")
         first_payload = parse_last_json(first.stdout)
         if first_payload.get("ok") is not True or first_payload.get("credentials_stored") is not False:
             raise AssertionError("Windows install result failed its safety contract")
@@ -208,6 +218,45 @@ def run_windows_e2e(shell: str) -> dict[str, object]:
         second = run(install_command, cwd=ROOT, timeout=180)
         if second.returncode != 0 or parse_last_json(second.stdout).get("reused_version") is not True:
             raise AssertionError("exact Windows reinstall was not idempotent")
+        scheduled_label = f"local.agentops.worker.uninstall-guard-{os.getpid()}"
+        create_task = run(
+            [
+                "schtasks.exe", "/Create", "/TN", scheduled_label, "/SC", "ONCE",
+                "/ST", "23:59", "/TR", "cmd.exe /d /c exit 0", "/F",
+            ],
+            timeout=60,
+        )
+        if create_task.returncode != 0:
+            raise AssertionError(f"failed to create uninstall-guard task: {create_task.stderr.strip()}")
+        try:
+            blocked_uninstall = run(
+                [
+                    *base,
+                    str(WINDOWS_DIR / "uninstall.ps1"),
+                    "-InstallRoot", str(install_root),
+                    "-BinDir", str(bin_dir),
+                    "-DataRoot", str(data_root),
+                    "-KeepPath",
+                    "-TestMode",
+                ],
+                cwd=ROOT,
+                timeout=120,
+            )
+            blocked_payload = parse_last_json(blocked_uninstall.stdout)
+            if blocked_uninstall.returncode == 0 or blocked_payload.get("ok") is not False or not install_root.is_dir():
+                raise AssertionError("Windows uninstall did not fail closed with a managed Worker task")
+        finally:
+            run(["schtasks.exe", "/Delete", "/TN", scheduled_label, "/F"], timeout=60)
+        task_deleted = False
+        deadline = time.monotonic() + 15
+        while time.monotonic() < deadline:
+            query = run(["schtasks.exe", "/Query", "/TN", scheduled_label], timeout=30)
+            if query.returncode != 0:
+                task_deleted = True
+                break
+            time.sleep(0.25)
+        if not task_deleted:
+            raise AssertionError("managed Worker task deletion did not become visible")
         uninstall = run(
             [
                 *base,
@@ -227,7 +276,7 @@ def run_windows_e2e(shell: str) -> dict[str, object]:
         assert_no_sensitive_output(second.stdout, second.stderr, uninstall.stdout, uninstall.stderr)
         uninstall_payload = parse_last_json(uninstall.stdout)
         if uninstall.returncode != 0 or uninstall_payload.get("data_preserved") is not True:
-            raise AssertionError("Windows uninstall failed")
+            raise AssertionError(f"Windows uninstall failed: {uninstall_payload.get('error') or 'unknown error'}")
         if install_root.exists() or (bin_dir / "agentops.cmd").exists() or not sentinel.is_file():
             raise AssertionError("Windows uninstall ownership/data-preservation contract failed")
         return {
@@ -235,6 +284,7 @@ def run_windows_e2e(shell: str) -> dict[str, object]:
             "install_ok": True,
             "entry_points_ok": True,
             "idempotent_reinstall": True,
+            "managed_worker_uninstall_guard": True,
             "uninstall_ok": True,
             "data_preserved": True,
         }

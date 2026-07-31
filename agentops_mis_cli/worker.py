@@ -27,6 +27,7 @@ import stat
 import subprocess
 import sys
 import time
+import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.error import HTTPError, URLError
@@ -46,6 +47,15 @@ from agentops_mis_cli.codex_runtime import (
     remove_managed_codex_worktree,
 )
 from agentops_mis_cli.http_transport import credential_opener, credential_transport_url_allowed, safe_credential_error
+from agentops_mis_cli.platform_paths import (
+    default_config_path,
+    default_windows_service_dir,
+    default_worker_runtime_dir,
+    harden_private_file,
+    is_windows,
+    windows_current_sid,
+    windows_private_file_is_acceptable,
+)
 from agentops_mis_cli.redaction import redact_text
 
 
@@ -58,10 +68,10 @@ DEFAULT_AGENT_ID = "agt_worker_local"
 DEFAULT_HERMES_GATEWAY_URL = "http://127.0.0.1:8642"
 DEFAULT_HERMES_MODEL = "hermes-agent"
 DEFAULT_HERMES_MAX_TOKENS = int(os.environ.get("HERMES_MAX_TOKENS", "512"))
-DEFAULT_OPENCLAW_BIN = "/opt/homebrew/bin/openclaw"
+DEFAULT_OPENCLAW_BIN = shutil.which("openclaw") or ("openclaw.exe" if is_windows() else "/opt/homebrew/bin/openclaw")
 WORKER_PULL_CANDIDATE_LIMIT = 50
 WORKER_SECRET_BOUNDARY_VERSION = "trusted_worker_client_v1"
-DEFAULT_CONFIG_PATH = Path(os.environ.get("AGENTOPS_CONFIG", "~/.agentops/config.json")).expanduser()
+DEFAULT_CONFIG_PATH = default_config_path()
 LOCAL_CONFIG_WORKER_SESSION_SCOPES = (
     "agents:write",
     "agents:heartbeat",
@@ -89,7 +99,7 @@ def default_runtime_dir() -> Path:
         return Path(configured).expanduser()
     if REPO_ROOT:
         return REPO_ROOT / ".agentops_runtime" / "workers"
-    return Path(os.environ.get("AGENTOPS_HOME", "~/.agentops")).expanduser() / "workers"
+    return default_worker_runtime_dir()
 
 
 def default_worker_cwd() -> Path:
@@ -142,6 +152,13 @@ def stable_hash(value) -> str:
 def current_process_identity() -> dict:
     """Return a non-reversible identity for this worker process."""
     pid = os.getpid()
+    if is_windows():
+        rendered = f"{pid}|{sys.executable}|{time.time_ns()}"
+        return {
+            "process_identity_schema_version": 1,
+            "process_group_id": pid,
+            "process_identity_hash": hashlib.sha256(rendered.encode("utf-8")).hexdigest(),
+        }
     try:
         process = subprocess.run(
             ["/bin/ps", "-p", str(pid), "-o", "lstart=", "-o", "command="],
@@ -229,10 +246,12 @@ def load_local_config_api_key(args) -> str:
         file_stat = os.fstat(descriptor)
         if not stat.S_ISREG(file_stat.st_mode):
             raise WorkerCredentialError("local_config_not_regular_file")
-        if file_stat.st_mode & 0o077:
+        if not is_windows() and file_stat.st_mode & 0o077:
             raise WorkerCredentialError("local_config_permissions_too_open")
-        if hasattr(os, "getuid") and file_stat.st_uid != os.getuid():
+        if not is_windows() and hasattr(os, "getuid") and file_stat.st_uid != os.getuid():
             raise WorkerCredentialError("local_config_owner_mismatch")
+        if is_windows() and not windows_private_file_is_acceptable(config_path):
+            raise WorkerCredentialError("local_config_acl_unverified")
         with os.fdopen(descriptor, "r", encoding="utf-8") as handle:
             descriptor = -1
             config = json.load(handle)
@@ -3448,9 +3467,76 @@ WantedBy=default.target
 """
 
 
+def render_windows_task_template(args) -> str:
+    label = getattr(args, "label", "") or service_label(args.agent_id)
+    runtime_dir = getattr(args, "runtime_dir", "") or str(default_worker_runtime_dir())
+    args.runtime_dir = runtime_dir
+    entrypoint = resolve_worker_entrypoint(args)
+    worker_options = build_worker_command(args)[len(entrypoint):]
+    command = [
+        *entrypoint,
+        "--base-url",
+        args.base_url,
+        "--workspace-id",
+        args.workspace_id,
+        "--agent-id",
+        args.agent_id,
+    ]
+    credential_source = str(getattr(args, "credential_source", "direct") or "direct")
+    api_key_placeholder = str(getattr(args, "api_key_placeholder", DEFAULT_API_KEY_PLACEHOLDER) or "").strip()
+    if credential_source == "local_config":
+        config_path = Path(str(getattr(args, "config_path", "") or DEFAULT_CONFIG_PATH)).expanduser().resolve(strict=False)
+        command.extend(["--credential-source", "local_config", "--config-path", str(config_path)])
+    elif api_key_placeholder not in {"", DEFAULT_API_KEY_PLACEHOLDER}:
+        raise WorkerServiceConfigError("windows_task_raw_api_key_rejected")
+    if args.adapter == "hermes":
+        gateway_url = normalize_service_hermes_gateway_url(getattr(args, "hermes_gateway_url", ""))
+        if gateway_url:
+            command.extend(["--hermes-gateway-url", gateway_url])
+    safe_agent = re.sub(r"[^A-Za-z0-9_.-]+", "-", args.agent_id or DEFAULT_AGENT_ID).strip("-") or "agent"
+    command.extend([*worker_options, "--state-path", str(Path(runtime_dir) / f"{safe_agent}.state.json")])
+    task_arguments = subprocess.list2cmdline(command[1:])
+    author = os.environ.get("USERNAME") or "AgentOps MIS"
+    domain = os.environ.get("USERDOMAIN", "").strip()
+    task_user = windows_current_sid() or (f"{domain}\\{author}" if domain and author != "AgentOps MIS" else author)
+    return f"""<?xml version="1.0" encoding="UTF-16"?>
+<Task version="1.4" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <RegistrationInfo>
+    <Author>{html.escape(author)}</Author>
+    <Description>AgentOps MIS Worker ({html.escape(label)})</Description>
+  </RegistrationInfo>
+  <Triggers>
+    <LogonTrigger><Enabled>true</Enabled></LogonTrigger>
+  </Triggers>
+  <Principals>
+    <Principal id="Author">
+      <UserId>{html.escape(task_user)}</UserId>
+      <LogonType>InteractiveToken</LogonType>
+      <RunLevel>LeastPrivilege</RunLevel>
+    </Principal>
+  </Principals>
+  <Settings>
+    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+    <StartWhenAvailable>true</StartWhenAvailable>
+    <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
+    <RestartOnFailure><Interval>PT1M</Interval><Count>999</Count></RestartOnFailure>
+  </Settings>
+  <Actions Context="Author">
+    <Exec>
+      <Command>{html.escape(command[0])}</Command>
+      <Arguments>{html.escape(task_arguments)}</Arguments>
+      <WorkingDirectory>{html.escape(str(getattr(args, "working_directory", DEFAULT_WORKER_CWD)))}</WorkingDirectory>
+    </Exec>
+  </Actions>
+</Task>
+"""
+
+
 def build_service_template_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Render a safe launchd/systemd template for agentops-worker.")
-    parser.add_argument("--manager", choices=["launchd", "systemd"], required=True)
+    parser = argparse.ArgumentParser(description="Render a safe launchd/systemd/Windows Task Scheduler template for agentops-worker.")
+    parser.add_argument("--manager", choices=["launchd", "systemd", "windows-task"], required=True)
     parser.add_argument("--base-url", default=os.environ.get("AGENTOPS_BASE_URL", DEFAULT_BASE_URL))
     parser.add_argument("--workspace-id", default=os.environ.get("AGENTOPS_WORKSPACE_ID", DEFAULT_WORKSPACE_ID))
     parser.add_argument("--agent-id", default=os.environ.get("AGENTOPS_AGENT_ID", DEFAULT_AGENT_ID))
@@ -3475,7 +3561,9 @@ def build_service_template_parser() -> argparse.ArgumentParser:
 def render_service_template_for_args(args) -> str:
     if args.manager == "launchd":
         return render_launchd_template(args)
-    return render_systemd_template(args)
+    if args.manager == "systemd":
+        return render_systemd_template(args)
+    return render_windows_task_template(args)
 
 
 def default_service_path(manager: str, agent_id: str, label: str = "") -> Path:
@@ -3483,7 +3571,9 @@ def default_service_path(manager: str, agent_id: str, label: str = "") -> Path:
     if manager == "launchd":
         service_name = label or service_label(agent_id)
         return Path("~/Library/LaunchAgents").expanduser() / f"{service_name}.plist"
-    return Path("~/.config/systemd/user").expanduser() / f"agentops-worker-{safe_agent}.service"
+    if manager == "systemd":
+        return Path("~/.config/systemd/user").expanduser() / f"agentops-worker-{safe_agent}.service"
+    return default_windows_service_dir() / f"agentops-worker-{safe_agent}.xml"
 
 
 def service_load_commands(manager: str, path: Path, label: str) -> dict:
@@ -3494,12 +3584,20 @@ def service_load_commands(manager: str, path: Path, label: str) -> dict:
             "unload": ["launchctl", "bootout", domain, str(path)],
             "status": ["launchctl", "print", f"{domain}/{label}"],
         }
-    unit = path.name
+    if manager == "systemd":
+        unit = path.name
+        return {
+            "daemon_reload": ["systemctl", "--user", "daemon-reload"],
+            "enable_now": ["systemctl", "--user", "enable", "--now", unit],
+            "disable_now": ["systemctl", "--user", "disable", "--now", unit],
+            "status": ["systemctl", "--user", "status", unit, "--no-pager"],
+        }
     return {
-        "daemon_reload": ["systemctl", "--user", "daemon-reload"],
-        "enable_now": ["systemctl", "--user", "enable", "--now", unit],
-        "disable_now": ["systemctl", "--user", "disable", "--now", unit],
-        "status": ["systemctl", "--user", "status", unit, "--no-pager"],
+        "create": ["schtasks.exe", "/Create", "/TN", label, "/XML", str(path), "/F"],
+        "run": ["schtasks.exe", "/Run", "/TN", label],
+        "end": ["schtasks.exe", "/End", "/TN", label],
+        "delete": ["schtasks.exe", "/Delete", "/TN", label, "/F"],
+        "status": ["schtasks.exe", "/Query", "/TN", label, "/FO", "LIST", "/V"],
     }
 
 
@@ -3511,11 +3609,17 @@ def service_control_sequence(manager: str, path: Path, label: str, action: str) 
         if action == "unload":
             return [commands["unload"]]
         return [commands["unload"], commands["load"]]
+    if manager == "systemd":
+        if action == "load":
+            return [commands["daemon_reload"], commands["enable_now"]]
+        if action == "unload":
+            return [commands["disable_now"]]
+        return [commands["daemon_reload"], ["systemctl", "--user", "restart", path.name]]
     if action == "load":
-        return [commands["daemon_reload"], commands["enable_now"]]
+        return [commands["create"], commands["run"]]
     if action == "unload":
-        return [commands["disable_now"]]
-    return [commands["daemon_reload"], ["systemctl", "--user", "restart", path.name]]
+        return [commands["end"], commands["delete"]]
+    return [commands["end"], commands["run"]]
 
 
 def shell_join(command: list[str]) -> str:
@@ -3524,11 +3628,32 @@ def shell_join(command: list[str]) -> str:
 
 def read_service_file(path: Path) -> tuple[bool, str]:
     try:
-        return True, path.read_text(encoding="utf-8", errors="replace")
+        payload = path.read_bytes()
+        encoding = "utf-16" if payload.startswith((b"\xff\xfe", b"\xfe\xff")) else "utf-8"
+        return True, payload.decode(encoding, errors="replace")
     except FileNotFoundError:
         return False, ""
     except Exception as exc:
         return False, f"READ_ERROR:{redact_text(str(exc), 200)}"
+
+
+def atomic_write_private_text(path: Path, content: str, *, encoding: str = "utf-8") -> None:
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.{time.time_ns()}.tmp")
+    descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, stat.S_IRUSR | stat.S_IWUSR)
+    try:
+        harden_private_file(temporary)
+        if is_windows() and not windows_private_file_is_acceptable(temporary):
+            raise OSError("windows_private_acl_verification_failed")
+        with os.fdopen(descriptor, "w", encoding=encoding, newline="") as handle:
+            descriptor = -1
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        temporary.unlink(missing_ok=True)
 
 
 def launchd_status(label: str, timeout: int) -> dict:
@@ -3586,36 +3711,189 @@ def systemd_status(unit: str, timeout: int) -> dict:
         return {"checked": True, "manager": "systemd", "unit": unit, "available": True, "loaded": False, **safe_error(exc)}
 
 
+def windows_task_status(label: str, timeout: int) -> dict:
+    executable = shutil.which("schtasks.exe") or shutil.which("schtasks")
+    if not executable:
+        return {
+            "checked": True,
+            "manager": "windows-task",
+            "label": label,
+            "available": False,
+            "loaded": False,
+            "summary": "Windows Task Scheduler CLI is not available.",
+        }
+    try:
+        proc = subprocess.run(
+            [executable, "/Query", "/TN", label, "/FO", "LIST", "/V"],
+            capture_output=True,
+            text=True,
+            timeout=max(1, min(timeout, 20)),
+            check=False,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+        return {
+            "checked": True,
+            "manager": "windows-task",
+            "label": label,
+            "available": True,
+            "loaded": proc.returncode == 0,
+            "returncode": proc.returncode,
+            "summary": redact_text(proc.stdout or proc.stderr or "", 600),
+        }
+    except Exception as exc:
+        return {"checked": True, "manager": "windows-task", "label": label, "available": True, "loaded": False, **safe_error(exc)}
+
+
+WINDOWS_TASK_NAMESPACE = "http://schemas.microsoft.com/windows/2004/02/mit/task"
+
+
+def parse_windows_command_line(arguments: str) -> list[str]:
+    if not is_windows():
+        return [item[1:-1] if len(item) >= 2 and item[0] == item[-1] == '"' else item for item in shlex.split(arguments, posix=False)]
+    import ctypes
+
+    argc = ctypes.c_int()
+    command_line_to_argv = ctypes.windll.shell32.CommandLineToArgvW
+    command_line_to_argv.argtypes = [ctypes.c_wchar_p, ctypes.POINTER(ctypes.c_int)]
+    command_line_to_argv.restype = ctypes.POINTER(ctypes.c_wchar_p)
+    argv = command_line_to_argv("agentops-worker " + arguments, ctypes.byref(argc))
+    if not argv:
+        return []
+    try:
+        return [argv[index] for index in range(1, argc.value)]
+    finally:
+        ctypes.windll.kernel32.LocalFree(argv)
+
+
+def inspect_windows_task(content: str, args) -> dict:
+    try:
+        root = ET.fromstring(content)
+    except (ET.ParseError, ValueError):
+        return {"valid": False, "error": "windows_task_xml_invalid"}
+    ns = {"task": WINDOWS_TASK_NAMESPACE}
+    if root.tag != f"{{{WINDOWS_TASK_NAMESPACE}}}Task":
+        return {"valid": False, "error": "windows_task_namespace_invalid"}
+    actions_parent = root.find("./task:Actions", ns)
+    principals_parent = root.find("./task:Principals", ns)
+    triggers_parent = root.find("./task:Triggers", ns)
+    action_children = list(actions_parent) if actions_parent is not None else []
+    principal_children = list(principals_parent) if principals_parent is not None else []
+    trigger_children = list(triggers_parent) if triggers_parent is not None else []
+    if (
+        len(action_children) != 1
+        or action_children[0].tag != f"{{{WINDOWS_TASK_NAMESPACE}}}Exec"
+        or len(principal_children) != 1
+        or principal_children[0].tag != f"{{{WINDOWS_TASK_NAMESPACE}}}Principal"
+        or len(trigger_children) != 1
+        or trigger_children[0].tag != f"{{{WINDOWS_TASK_NAMESPACE}}}LogonTrigger"
+    ):
+        return {"valid": False, "error": "windows_task_structure_invalid"}
+    action = action_children[0]
+    principal = principal_children[0]
+    trigger = trigger_children[0]
+    command = (action.findtext("task:Command", default="", namespaces=ns) or "").strip()
+    arguments = action.findtext("task:Arguments", default="", namespaces=ns) or ""
+    argument_list = parse_windows_command_line(arguments)
+    working_directory = (action.findtext("task:WorkingDirectory", default="", namespaces=ns) or "").strip()
+    expected_args = argparse.Namespace(**vars(args))
+    if str(getattr(expected_args, "credential_source", "") or "") == "auto":
+        expected_args.credential_source = "local_config" if "--credential-source" in argument_list else "direct"
+    expected_root = ET.fromstring(render_windows_task_template(expected_args))
+    expected_action = expected_root.find("./task:Actions/task:Exec", ns)
+    expected_principal = expected_root.find("./task:Principals/task:Principal", ns)
+    if expected_action is None or expected_principal is None:
+        return {"valid": False, "error": "windows_task_expected_contract_invalid"}
+    expected_command = (expected_action.findtext("task:Command", default="", namespaces=ns) or "").strip()
+    expected_arguments = expected_action.findtext("task:Arguments", default="", namespaces=ns) or ""
+    expected_argument_list = parse_windows_command_line(expected_arguments)
+    expected_working_directory = (expected_action.findtext("task:WorkingDirectory", default="", namespaces=ns) or "").strip()
+    command_matches = os.path.normcase(os.path.abspath(command)) == os.path.normcase(os.path.abspath(expected_command))
+    argument_bindings_match = argument_list == expected_argument_list and "--api-key" not in argument_list
+    working_directory_matches = working_directory == expected_working_directory
+    task_user = (principal.findtext("task:UserId", default="", namespaces=ns) or "").strip()
+    expected_task_user = (expected_principal.findtext("task:UserId", default="", namespaces=ns) or "").strip()
+    current_sid = windows_current_sid() if is_windows() else ""
+    sid_resolution_ok = not is_windows() or bool(current_sid)
+    principal_matches = bool(
+        task_user
+        and sid_resolution_ok
+        and task_user == expected_task_user
+        and (not is_windows() or task_user == current_sid)
+        and principal.findtext("task:LogonType", default="", namespaces=ns) == "InteractiveToken"
+        and principal.findtext("task:RunLevel", default="", namespaces=ns) == "LeastPrivilege"
+    )
+    trigger_enabled = trigger.findtext("task:Enabled", default="", namespaces=ns) == "true"
+    settings = root.find("./task:Settings", ns)
+    restart = settings.find("task:RestartOnFailure", ns) if settings is not None else None
+    policy_matches = bool(
+        settings is not None
+        and settings.findtext("task:MultipleInstancesPolicy", default="", namespaces=ns) == "IgnoreNew"
+        and settings.findtext("task:ExecutionTimeLimit", default="", namespaces=ns) == "PT0S"
+        and restart is not None
+        and restart.findtext("task:Interval", default="", namespaces=ns) == "PT1M"
+        and restart.findtext("task:Count", default="", namespaces=ns) == "999"
+    )
+    return {
+        "valid": bool(command_matches and argument_bindings_match and working_directory_matches and principal_matches and trigger_enabled and policy_matches),
+        "command": command,
+        "_arguments": arguments,
+        "working_directory": working_directory,
+        "command_matches": command_matches,
+        "entrypoint_matches": command_matches,
+        "argument_bindings_match": argument_bindings_match,
+        "working_directory_matches": working_directory_matches,
+        "sid_resolution_ok": sid_resolution_ok,
+        "principal_matches": principal_matches,
+        "trigger_enabled": trigger_enabled,
+        "policy_matches": policy_matches,
+        "action_count": len(action_children),
+        "raw_content_omitted": True,
+    }
+
+
 def check_service_installation(args) -> dict:
     label = args.label or service_label(args.agent_id)
     service_path = Path(args.service_path).expanduser() if args.service_path else default_service_path(args.manager, args.agent_id, label)
     exists, content = read_service_file(service_path)
-    token_like_detected = bool(re.search(r"(agtok_|agtsess_|sk-|ntn_)", content))
-    placeholder_present = args.api_key_placeholder in content if exists else False
-    command_has_worker = "agentops-worker" in content or "agentops_mis_cli.worker" in content
-    adapter_present = args.adapter in content
-    use_session_present = "--use-session" in content
+    windows_contract = inspect_windows_task(content, args) if args.manager == "windows-task" and exists else {}
+    inspection_content = content + "\n" + str(windows_contract.get("_arguments") or "")
+    token_like_detected = bool(re.search(r"(agtok_|agtsess_|sk-|ntn_)", inspection_content))
+    placeholder_present = args.api_key_placeholder in inspection_content if exists else False
+    command_has_worker = "agentops-worker" in inspection_content or "agentops_mis_cli.worker" in inspection_content
+    adapter_present = args.adapter in inspection_content
+    use_session_present = "--use-session" in inspection_content
     if args.manager == "launchd":
         local_config_reference = bool(
             re.search(r"AGENTOPS_WORKER_CREDENTIAL_SOURCE</key>\s*<string>local_config</string>", content)
             and re.search(r"AGENTOPS_CONFIG</key>\s*<string>[^<]+</string>", content)
             and "AGENTOPS_API_KEY" not in content
         )
-    else:
+    elif args.manager == "systemd":
         local_config_reference = bool(
             re.search(r"(?m)^Environment=.*AGENTOPS_WORKER_CREDENTIAL_SOURCE=local_config", content)
             and re.search(r"(?m)^Environment=.*AGENTOPS_CONFIG=\S+", content)
             and "AGENTOPS_API_KEY" not in content
+        )
+    else:
+        local_config_reference = bool(
+            "--credential-source local_config" in inspection_content
+            and "--config-path" in inspection_content
+            and "AGENTOPS_API_KEY" not in inspection_content
         )
     if args.manager == "launchd":
         local_dev_no_token = bool(
             not re.search(r"AGENTOPS_API_KEY", content)
             and re.search(r"AGENTOPS_BASE_URL</key>\s*<string>http://127\.0\.0\.1:", content)
         )
-    else:
+    elif args.manager == "systemd":
         local_dev_no_token = bool(
             not re.search(r"AGENTOPS_API_KEY", content)
             and re.search(r"(?m)^Environment=AGENTOPS_BASE_URL=http://127\.0\.0\.1:", content)
+        )
+    else:
+        local_dev_no_token = bool(
+            "AGENTOPS_API_KEY" not in inspection_content
+            and re.search(r"--base-url\s+http://127\.0\.0\.1:", inspection_content)
         )
     if args.manager == "launchd":
         launchd_keepalive = bool(re.search(r"<key>KeepAlive</key>\s*<true/>", content))
@@ -3625,7 +3903,7 @@ def check_service_installation(args) -> dict:
             "policy": "KeepAlive=true",
             "raw_content_omitted": True,
         }
-    else:
+    elif args.manager == "systemd":
         systemd_restart_always = bool(re.search(r"(?m)^Restart=always$", content))
         systemd_restart_sec_ok = bool(re.search(r"(?m)^RestartSec=5$", content))
         relaunch_policy = {
@@ -3635,12 +3913,25 @@ def check_service_installation(args) -> dict:
             "restart_sec": "5" if systemd_restart_sec_ok else None,
             "raw_content_omitted": True,
         }
-    confirm_gate_ok = args.adapter == "mock" or "--confirm-run" in content
+    else:
+        restart_interval = bool(re.search(r"<RestartOnFailure>.*?<Interval>PT1M</Interval>.*?</RestartOnFailure>", content, re.DOTALL))
+        restart_count = bool(re.search(r"<RestartOnFailure>.*?<Count>999</Count>.*?</RestartOnFailure>", content, re.DOTALL))
+        logon_trigger = bool(re.search(r"<LogonTrigger>.*?<Enabled>true</Enabled>.*?</LogonTrigger>", content, re.DOTALL))
+        relaunch_policy = {
+            "manager": "windows-task",
+            "enabled": bool(restart_interval and restart_count and logon_trigger),
+            "policy": "LogonTrigger+RestartOnFailure",
+            "restart_interval": "PT1M" if restart_interval else None,
+            "raw_content_omitted": True,
+        }
+    confirm_gate_ok = args.adapter == "mock" or "--confirm-run" in inspection_content
     if args.manager == "launchd":
         service_status = launchd_status(label, args.timeout)
-    else:
+    elif args.manager == "systemd":
         unit = service_path.name
         service_status = systemd_status(unit, args.timeout)
+    else:
+        service_status = windows_task_status(label, args.timeout)
     observed_credential_source = "local_config" if local_config_reference else "direct"
     requested_credential_source = str(getattr(args, "credential_source", "auto") or "auto")
     credential_source_matches = requested_credential_source == "auto" or requested_credential_source == observed_credential_source
@@ -3649,7 +3940,8 @@ def check_service_installation(args) -> dict:
         if local_config_reference
         else (use_session_present or local_dev_no_token)
     )
-    ok = bool(exists and command_has_worker and adapter_present and credential_source_ok and confirm_gate_ok and relaunch_policy["enabled"] and not token_like_detected)
+    windows_contract_ok = args.manager != "windows-task" or windows_contract.get("valid") is True
+    ok = bool(exists and command_has_worker and adapter_present and credential_source_ok and confirm_gate_ok and relaunch_policy["enabled"] and windows_contract_ok and not token_like_detected)
     hints = []
     if not exists:
         hints.append("Render a template with agentops-worker service-template and write it to service_path.")
@@ -3690,9 +3982,15 @@ def check_service_installation(args) -> dict:
             "confirm_gate_ok": confirm_gate_ok,
             "placeholder_present": placeholder_present,
             "token_like_detected": token_like_detected,
+            "windows_contract_ok": windows_contract_ok,
             "raw_content_omitted": True,
         },
         "relaunch_policy": relaunch_policy,
+        "windows_task_contract": (
+            {key: value for key, value in windows_contract.items() if not key.startswith("_")}
+            if args.manager == "windows-task"
+            else None
+        ),
         "service_status": service_status,
         "setup_hints": hints,
         "live_execution_performed": False,
@@ -3701,12 +3999,22 @@ def check_service_installation(args) -> dict:
 
 
 def build_service_check_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Read-only check for an agentops-worker launchd/systemd service file.")
-    parser.add_argument("--manager", choices=["launchd", "systemd"], required=True)
+    parser = argparse.ArgumentParser(description="Read-only check for an agentops-worker OS service file.")
+    parser.add_argument("--manager", choices=["launchd", "systemd", "windows-task"], required=True)
+    parser.add_argument("--base-url", default=os.environ.get("AGENTOPS_BASE_URL", DEFAULT_BASE_URL))
     parser.add_argument("--workspace-id", default=os.environ.get("AGENTOPS_WORKSPACE_ID", DEFAULT_WORKSPACE_ID))
     parser.add_argument("--agent-id", default=os.environ.get("AGENTOPS_AGENT_ID", DEFAULT_AGENT_ID))
     parser.add_argument("--adapter", choices=["mock", "hermes", "openclaw", "codex"], default="mock")
+    parser.add_argument("--confirm-run", action="store_true")
+    parser.add_argument("--use-session", action="store_true")
+    parser.add_argument("--session-ttl-sec", type=int, default=900)
+    parser.add_argument("--session-refresh-margin-sec", type=float, default=60)
+    parser.add_argument("--poll-interval", type=float, default=5.0)
     parser.add_argument("--label", default="")
+    parser.add_argument("--working-directory", default=str(DEFAULT_WORKER_CWD))
+    parser.add_argument("--runtime-dir", default="")
+    parser.add_argument("--worker-command", default="")
+    parser.add_argument("--hermes-gateway-url", default=os.environ.get("HERMES_GATEWAY_URL", ""))
     parser.add_argument("--service-path", default="")
     parser.add_argument("--api-key-placeholder", default=DEFAULT_API_KEY_PLACEHOLDER)
     parser.add_argument("--credential-source", choices=["auto", "direct", "local_config"], default="auto")
@@ -3747,21 +4055,28 @@ def install_service_file(args) -> dict:
             "raw_content_omitted": True,
             "token_omitted": True,
         }
-    token_like_detected = bool(re.search(r"(agtok_|agtsess_|sk-|ntn_)", template))
+    template_contract = inspect_windows_task(template, args) if args.manager == "windows-task" else {}
+    template_inspection = template + "\n" + str(template_contract.get("_arguments") or "")
+    token_like_detected = bool(re.search(r"(agtok_|agtsess_|sk-|ntn_)", template_inspection))
     exists_before = service_path.exists()
-    safe_to_write = not token_like_detected and (not exists_before or bool(args.overwrite))
+    template_contract_ok = args.manager != "windows-task" or template_contract.get("valid") is True
+    safe_to_write = template_contract_ok and not token_like_detected and (not exists_before or bool(args.overwrite))
     wrote = False
     write_error = None
     if args.confirm_install and safe_to_write:
         try:
             service_path.parent.mkdir(parents=True, exist_ok=True)
-            service_path.write_text(template, encoding="utf-8")
-            service_path.chmod(0o600)
+            atomic_write_private_text(
+                service_path,
+                template,
+                encoding="utf-16" if args.manager == "windows-task" else "utf-8",
+            )
             wrote = True
         except Exception as exc:
             write_error = safe_error(exc)
     check_args = argparse.Namespace(
         manager=args.manager,
+        base_url=getattr(args, "base_url", DEFAULT_BASE_URL),
         workspace_id=args.workspace_id,
         agent_id=args.agent_id,
         adapter=args.adapter,
@@ -3771,6 +4086,14 @@ def install_service_file(args) -> dict:
         credential_source=getattr(args, "credential_source", "direct"),
         config_path=getattr(args, "config_path", str(DEFAULT_CONFIG_PATH)),
         worker_command=args.worker_command,
+        confirm_run=args.confirm_run,
+        use_session=args.use_session,
+        session_ttl_sec=args.session_ttl_sec,
+        session_refresh_margin_sec=args.session_refresh_margin_sec,
+        poll_interval=args.poll_interval,
+        working_directory=args.working_directory,
+        runtime_dir=args.runtime_dir,
+        hermes_gateway_url=args.hermes_gateway_url,
         timeout=args.timeout,
     )
     service_check = check_service_installation(check_args) if service_path.exists() else {
@@ -3781,6 +4104,21 @@ def install_service_file(args) -> dict:
             "token_like_detected": token_like_detected,
         },
     }
+    checked_file = service_check.get("service_file") if isinstance(service_check.get("service_file"), dict) else {}
+    credential_contract_ok = bool(
+        checked_file.get("local_config_reference") and checked_file.get("use_session_present")
+        if getattr(args, "credential_source", "direct") == "local_config"
+        else (checked_file.get("use_session_present") or checked_file.get("local_dev_no_token"))
+    )
+    service_file_contract_ok = bool(
+        checked_file.get("exists")
+        and checked_file.get("command_has_worker")
+        and checked_file.get("adapter_present")
+        and checked_file.get("relaunch_policy_ok")
+        and checked_file.get("confirm_gate_ok")
+        and not checked_file.get("token_like_detected")
+        and credential_contract_ok
+    )
     setup_hints = []
     if not args.confirm_install:
         setup_hints.append("Dry-run only. Re-run with --confirm-install to write the service file.")
@@ -3788,11 +4126,13 @@ def install_service_file(args) -> dict:
         setup_hints.append("Service file already exists. Pass --overwrite only after reviewing the current file.")
     if token_like_detected:
         setup_hints.append("Refusing to write a service template containing token-like values.")
+    if not template_contract_ok:
+        setup_hints.append("Refusing to write a Windows task whose structured action contract is invalid.")
     if wrote:
         setup_hints.append("Review the service file locally, configure secrets outside git, then load it manually if desired.")
     if write_error:
         setup_hints.append("Service file write failed; inspect permissions on the target directory.")
-    ok = bool((not args.confirm_install and not token_like_detected) or (wrote and service_check.get("ok") is True))
+    ok = bool((not args.confirm_install and not token_like_detected) or (wrote and service_file_contract_ok))
     if args.confirm_install and (exists_before and not args.overwrite):
         ok = False
     if write_error:
@@ -3812,10 +4152,12 @@ def install_service_file(args) -> dict:
         "adapter": args.adapter,
         "credential_source": getattr(args, "credential_source", "direct"),
         "service_path": str(service_path),
-        "service_file_mode": "0600" if wrote else None,
+        "service_file_mode": ("user_acl" if is_windows() else "0600") if wrote else None,
         "template_hash": stable_hash(template),
         "template_bytes": len(template.encode("utf-8")),
         "service_check": service_check,
+        "service_file_contract_ok": service_file_contract_ok,
+        "template_contract_ok": template_contract_ok,
         "load_commands": service_load_commands(args.manager, service_path, label),
         "setup_hints": setup_hints,
         "write_error": write_error,
@@ -3827,8 +4169,8 @@ def install_service_file(args) -> dict:
 
 
 def build_service_install_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Dry-run or write a safe agentops-worker launchd/systemd service file.")
-    parser.add_argument("--manager", choices=["launchd", "systemd"], required=True)
+    parser = argparse.ArgumentParser(description="Dry-run or write a safe agentops-worker OS service file.")
+    parser.add_argument("--manager", choices=["launchd", "systemd", "windows-task"], required=True)
     parser.add_argument("--base-url", default=os.environ.get("AGENTOPS_BASE_URL", DEFAULT_BASE_URL))
     parser.add_argument("--workspace-id", default=os.environ.get("AGENTOPS_WORKSPACE_ID", DEFAULT_WORKSPACE_ID))
     parser.add_argument("--agent-id", default=os.environ.get("AGENTOPS_AGENT_ID", DEFAULT_AGENT_ID))
@@ -3885,6 +4227,7 @@ def control_service(args) -> dict:
     service_path = Path(args.service_path).expanduser() if args.service_path else default_service_path(args.manager, args.agent_id, label)
     check_args = argparse.Namespace(
         manager=args.manager,
+        base_url=getattr(args, "base_url", DEFAULT_BASE_URL),
         workspace_id=args.workspace_id,
         agent_id=args.agent_id,
         adapter=args.adapter,
@@ -3893,6 +4236,15 @@ def control_service(args) -> dict:
         api_key_placeholder=args.api_key_placeholder,
         credential_source=getattr(args, "credential_source", "auto"),
         config_path=getattr(args, "config_path", str(DEFAULT_CONFIG_PATH)),
+        worker_command=getattr(args, "worker_command", ""),
+        confirm_run=getattr(args, "confirm_run", False),
+        use_session=getattr(args, "use_session", False),
+        session_ttl_sec=getattr(args, "session_ttl_sec", 900),
+        session_refresh_margin_sec=getattr(args, "session_refresh_margin_sec", 60),
+        poll_interval=getattr(args, "poll_interval", 5.0),
+        working_directory=getattr(args, "working_directory", str(DEFAULT_WORKER_CWD)),
+        runtime_dir=getattr(args, "runtime_dir", ""),
+        hermes_gateway_url=getattr(args, "hermes_gateway_url", ""),
         timeout=args.timeout,
     )
     service_check = check_service_installation(check_args)
@@ -3913,9 +4265,16 @@ def control_service(args) -> dict:
         failures.append("refusing to load/restart a service file containing token-like values")
     if args.action in {"load", "restart"} and not confirm_gate_ok:
         failures.append("refusing to load/restart Hermes/OpenClaw service without --confirm-run in the service template")
+    if args.action in {"load", "restart"} and service_check.get("ok") is not True:
+        failures.append("refusing to load/restart a service file that fails the complete service contract")
     dry_run = not bool(args.confirm_control)
     command_results = []
-    loaded_noop = bool(args.action == "load" and already_loaded and not failures)
+    loaded_noop = bool(
+        args.action == "load"
+        and already_loaded
+        and args.manager != "windows-task"
+        and not failures
+    )
     if not dry_run and not failures:
         if loaded_noop:
             command_results.append({
@@ -3923,18 +4282,25 @@ def control_service(args) -> dict:
                 "ok": True,
                 "skipped": True,
                 "reason": "service_already_loaded",
-                "summary": "Service is already loaded; no launchd/systemd load command executed.",
+                "summary": "Service is already loaded; no OS service load command executed.",
             })
         else:
             for command in planned:
                 result = execute_service_command(command, args.timeout)
                 command_results.append(result)
-                if not result.get("ok") and not (args.action == "restart" and len(command_results) == 1):
+                tolerable_first_stop = bool(
+                    len(command_results) == 1
+                    and (
+                        args.action == "restart"
+                        or (args.manager == "windows-task" and args.action == "unload")
+                    )
+                )
+                if not result.get("ok") and not tolerable_first_stop:
                     failures.append(f"service control command failed: {result.get('command')}")
                     break
     setup_hints = []
     if dry_run:
-        setup_hints.append("Preview only. Re-run with --confirm-control on the agent machine to mutate launchd/systemd state.")
+        setup_hints.append("Preview only. Re-run with --confirm-control on the agent machine to mutate OS service state.")
     if loaded_noop:
         setup_hints.append("Service is already loaded; confirmed load is treated as an idempotent no-op.")
     if token_like_detected:
@@ -3969,13 +4335,23 @@ def control_service(args) -> dict:
 
 
 def build_service_control_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Preview or explicitly run launchd/systemd control for an agentops-worker service.")
-    parser.add_argument("--manager", choices=["launchd", "systemd"], required=True)
+    parser = argparse.ArgumentParser(description="Preview or explicitly run OS control for an agentops-worker service.")
+    parser.add_argument("--manager", choices=["launchd", "systemd", "windows-task"], required=True)
     parser.add_argument("--action", choices=["load", "unload", "restart"], required=True)
+    parser.add_argument("--base-url", default=os.environ.get("AGENTOPS_BASE_URL", DEFAULT_BASE_URL))
     parser.add_argument("--workspace-id", default=os.environ.get("AGENTOPS_WORKSPACE_ID", DEFAULT_WORKSPACE_ID))
     parser.add_argument("--agent-id", default=os.environ.get("AGENTOPS_AGENT_ID", DEFAULT_AGENT_ID))
     parser.add_argument("--adapter", choices=["mock", "hermes", "openclaw", "codex"], default="mock")
+    parser.add_argument("--confirm-run", action="store_true")
+    parser.add_argument("--use-session", action="store_true")
+    parser.add_argument("--session-ttl-sec", type=int, default=900)
+    parser.add_argument("--session-refresh-margin-sec", type=float, default=60)
+    parser.add_argument("--poll-interval", type=float, default=5.0)
     parser.add_argument("--label", default="")
+    parser.add_argument("--working-directory", default=str(DEFAULT_WORKER_CWD))
+    parser.add_argument("--runtime-dir", default="")
+    parser.add_argument("--worker-command", default="")
+    parser.add_argument("--hermes-gateway-url", default=os.environ.get("HERMES_GATEWAY_URL", ""))
     parser.add_argument("--service-path", default="")
     parser.add_argument("--api-key-placeholder", default=DEFAULT_API_KEY_PLACEHOLDER)
     parser.add_argument("--credential-source", choices=["auto", "direct", "local_config"], default="auto")

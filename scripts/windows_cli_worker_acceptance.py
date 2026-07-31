@@ -12,10 +12,14 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
+import xml.etree.ElementTree as ET
 import zipfile
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlsplit
+
+from agentops_mis_cli.platform_paths import windows_private_file_is_acceptable
 
 
 DIST_NAME = "agentops-mis-cli"
@@ -198,6 +202,16 @@ def require(condition: bool, message: str) -> None:
         raise AssertionError(message)
 
 
+def task_action(xml: str) -> tuple[str, str]:
+    namespace = {"task": "http://schemas.microsoft.com/windows/2004/02/mit/task"}
+    root = ET.fromstring(xml)
+    actions = root.findall("./task:Actions/task:Exec", namespace)
+    require(len(actions) == 1, "Windows task must contain exactly one Exec action")
+    command = actions[0].findtext("task:Command", default="", namespaces=namespace)
+    arguments = actions[0].findtext("task:Arguments", default="", namespaces=namespace)
+    return command, arguments
+
+
 def run(
     command: list[str],
     *,
@@ -219,7 +233,7 @@ def run(
         "command failed: "
         + subprocess.list2cmdline(command)
         + f"\nexpected={expected_returncode} actual={result.returncode}"
-        + f"\nstdout={result.stdout[-1600:]}\nstderr={result.stderr[-1600:]}",
+        + f"\nstdout={result.stdout[-12000:]}\nstderr={result.stderr[-4000:]}",
     )
     return result
 
@@ -321,6 +335,7 @@ def main() -> int:
     thread = threading.Thread(target=gateway.serve_forever, daemon=True)
     thread.start()
     base_url = f"http://127.0.0.1:{gateway.server_port}"
+    scheduled_label = "local.agentops.worker.agt_windows_acceptance"
 
     try:
         with tempfile.TemporaryDirectory(prefix="agentops-windows-acceptance-") as temporary:
@@ -357,6 +372,10 @@ def main() -> int:
             require(login_payload.get("ok") is True, "agentops login failed")
             require(login_payload.get("has_api_key") is False, "login unexpectedly persisted an API key")
             require(Path(env["AGENTOPS_CONFIG"]).is_file(), "login did not create the isolated config")
+            require(
+                windows_private_file_is_acceptable(Path(env["AGENTOPS_CONFIG"])),
+                "Windows config DACL is not private to the user and OS administrators",
+            )
 
             cli_preflight = run(
                 [
@@ -492,9 +511,11 @@ def main() -> int:
                 cwd=temp_root,
                 env=env,
             )
-            for marker in ("<Task", "LogonTrigger", "RestartOnFailure", "powershell.exe", "agentops-worker"):
+            template_command, template_arguments = task_action(service_template.stdout)
+            for marker in ("<Task", "LogonTrigger", "RestartOnFailure"):
                 require(marker in service_template.stdout, f"Windows service template is missing {marker}")
-            require("AGENTOPS_API_KEY" not in service_template.stdout, "Windows service template contains an API key")
+            require("agentops-worker" in template_command or "agentops_mis_cli.worker" in template_arguments, "Windows service command is missing agentops-worker")
+            require("AGENTOPS_API_KEY" not in service_template.stdout + template_arguments, "Windows service template contains an API key")
 
             service_path = temp_root / "services" / "agentops-worker.xml"
             service_install = run(
@@ -528,9 +549,127 @@ def main() -> int:
             require(service_install_payload.get("live_execution_performed") is False, "service install executed a live runtime")
             require(service_install_payload.get("service_loaded") is False, "service install mutated Task Scheduler")
             require(service_path.is_file(), "isolated Windows service XML is missing")
-            installed_xml = service_path.read_text(encoding="utf-8")
-            require("<Task" in installed_xml and "agentops-worker" in installed_xml, "installed service XML drifted")
-            require("AGENTOPS_API_KEY" not in installed_xml, "installed service XML contains an API key")
+            require(windows_private_file_is_acceptable(service_path), "Windows service XML DACL is not private to the user and OS administrators")
+            installed_xml = service_path.read_text(encoding="utf-16")
+            installed_command, installed_arguments = task_action(installed_xml)
+            require("<Task" in installed_xml and ("agentops-worker" in installed_command or "agentops_mis_cli.worker" in installed_arguments), "installed service XML drifted")
+            require("AGENTOPS_API_KEY" not in installed_xml + installed_arguments, "installed service XML contains an API key")
+
+            service_control = run(
+                [
+                    str(worker),
+                    "service-control",
+                    "--manager",
+                    "windows-task",
+                    "--action",
+                    "load",
+                    "--adapter",
+                    "mock",
+                    "--base-url",
+                    base_url,
+                    "--workspace-id",
+                    "local-demo",
+                    "--agent-id",
+                    "agt_windows_acceptance",
+                    "--working-directory",
+                    str(temp_root),
+                    "--service-path",
+                    str(service_path),
+                ],
+                cwd=temp_root,
+                env=env,
+            )
+            service_control_payload = json_stdout(service_control, "agentops-worker service-control")
+            planned_commands = service_control_payload.get("planned_commands") or []
+            require(service_control_payload.get("ok") is True, "Windows service control preview failed")
+            require(service_control_payload.get("dry_run") is True, "Windows service control mutated Task Scheduler")
+            require(any("/Create" in str(item) for item in planned_commands), "Windows load is missing task convergence")
+            require(any("/Run" in str(item) for item in planned_commands), "Windows load is missing task start")
+
+            scheduled_request_start = len(SmokeGateway.requests)
+            confirmed_load = run(
+                [
+                    str(worker),
+                    "service-control",
+                    "--manager",
+                    "windows-task",
+                    "--action",
+                    "load",
+                    "--adapter",
+                    "mock",
+                    "--base-url",
+                    base_url,
+                    "--workspace-id",
+                    "local-demo",
+                    "--agent-id",
+                    "agt_windows_acceptance",
+                    "--working-directory",
+                    str(temp_root),
+                    "--service-path",
+                    str(service_path),
+                    "--confirm-control",
+                ],
+                cwd=temp_root,
+                env=env,
+            )
+            confirmed_load_payload = json_stdout(confirmed_load, "confirmed Windows task load")
+            require(confirmed_load_payload.get("ok") is True, "confirmed Windows task load failed")
+            require(confirmed_load_payload.get("service_mutated") is True, "confirmed load did not mutate Task Scheduler")
+            scheduled_state_path = temp_root / "runtime" / "agt_windows_acceptance.state.json"
+            scheduled_worker_started = False
+            deadline = time.monotonic() + 30
+            while time.monotonic() < deadline:
+                new_requests = SmokeGateway.requests[scheduled_request_start:]
+                registered = any(
+                    request.get("method") == "POST" and request.get("path") == "/api/agent-gateway/register"
+                    for request in new_requests
+                )
+                if registered and scheduled_state_path.is_file():
+                    try:
+                        scheduled_state = json.loads(scheduled_state_path.read_text(encoding="utf-8"))
+                    except (OSError, json.JSONDecodeError):
+                        scheduled_state = {}
+                    if scheduled_state.get("agent_id") == "agt_windows_acceptance":
+                        scheduled_worker_started = True
+                        break
+                time.sleep(0.25)
+            require(scheduled_worker_started, "Task Scheduler accepted /Run but the Worker did not register and write state")
+
+            confirmed_unload = run(
+                [
+                    str(worker),
+                    "service-control",
+                    "--manager",
+                    "windows-task",
+                    "--action",
+                    "unload",
+                    "--adapter",
+                    "mock",
+                    "--base-url",
+                    base_url,
+                    "--workspace-id",
+                    "local-demo",
+                    "--agent-id",
+                    "agt_windows_acceptance",
+                    "--working-directory",
+                    str(temp_root),
+                    "--service-path",
+                    str(service_path),
+                    "--confirm-control",
+                ],
+                cwd=temp_root,
+                env=env,
+            )
+            confirmed_unload_payload = json_stdout(confirmed_unload, "confirmed Windows task unload")
+            require(confirmed_unload_payload.get("ok") is True, "confirmed Windows task unload failed")
+            task_query = subprocess.run(
+                ["schtasks.exe", "/Query", "/TN", scheduled_label],
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=30,
+            )
+            require(task_query.returncode != 0, "Windows task remained registered after unload")
 
             host = run([str(agentops), "host", "--help"], cwd=temp_root, env=env, expected_returncode=2)
             host_payload = json_stdout(host, "agentops host")
@@ -539,6 +678,13 @@ def main() -> int:
             database_files = [path for path in temp_root.rglob("*") if path.is_file() and ".db" in path.name]
             require(not database_files, f"offline mock acceptance created database files: {database_files}")
     finally:
+        subprocess.run(
+            ["schtasks.exe", "/Delete", "/TN", scheduled_label, "/F"],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=30,
+        )
         gateway.shutdown()
         gateway.server_close()
         thread.join(timeout=5)
@@ -564,7 +710,11 @@ def main() -> int:
                 "evidence_request_order_verified": True,
                 "windows_task_template": True,
                 "windows_task_xml_installed": True,
-                "task_scheduler_mutated": False,
+                "windows_task_control_preview": True,
+                "task_scheduler_real_lifecycle": True,
+                "task_scheduler_worker_started": True,
+                "task_scheduler_mutated": True,
+                "task_scheduler_cleanup_verified": True,
                 "windows_host_fail_closed": True,
                 "gateway_request_count": len(SmokeGateway.requests),
                 "ci_offline_mock": True,
