@@ -429,7 +429,7 @@ function createFakeDriver() {
         return ok();
       }
       if (joined.includes(
-        " exec -T control-plane npm run check:postgres-schema",
+        " exec -T control-plane node /usr/local/lib/agentops/node-secret-entrypoint.mjs --postgres-runtime -- npm run check:postgres-schema",
       )) {
         if (
           state.failTargetReadiness

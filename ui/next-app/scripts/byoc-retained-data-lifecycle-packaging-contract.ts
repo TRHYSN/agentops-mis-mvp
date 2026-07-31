@@ -44,7 +44,11 @@ assert.match(cli, /lifecycle_active_runs_must_be_drained/);
 assert.match(cli, /configurationSnapshot/);
 assert.match(
   cli,
-  /\"exec\",[\s\S]*?\"control-plane\",[\s\S]*?\"check:postgres-schema\"/,
+  /"exec",\s*"-T",\s*"control-plane",\s*"node",\s*"\/usr\/local\/lib\/agentops\/node-secret-entrypoint\.mjs",\s*"--postgres-runtime",\s*"--",\s*"npm",\s*"run",\s*"check:postgres-schema",\s*"--silent"/,
+);
+assert.doesNotMatch(
+  cli,
+  /"exec",\s*"-T",\s*"control-plane",\s*"npm",\s*"run",\s*"check:postgres-schema"/,
 );
 assert.doesNotMatch(
   cli,
@@ -336,6 +340,7 @@ console.log(JSON.stringify({
   fixed_database_advisory_key_packaged: true,
   destructive_database_marker_mode_packaged: true,
   runtime_secret_database_identity_probe_packaged: true,
+  runtime_secret_schema_readiness_probe_packaged: true,
   restore_database_lease_guardian_packaged: true,
   restore_process_stops_before_lease_release: true,
   restore_input_fd_preserved_for_supervision: true,

@@ -331,6 +331,8 @@ runtime-secret preparation and privilege-drop boundary as production startup:
 byoc:database-identity --silent`. Invoking the npm script directly with
 `docker compose exec` is unsupported because that child process would not have
 the temporary file-backed runtime credential prepared by the entrypoint.
+The lifecycle schema-readiness probe uses that same runtime secret entrypoint;
+an independent `docker exec` never relies on the startup process's in-memory DSN.
 
 The restore drill starts a container-side guardian before `pg_restore`. The
 guardian holds advisory key `7157544864185932631` for the complete restore and
