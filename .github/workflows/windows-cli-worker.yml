@@ -1,0 +1,67 @@
+name: Windows CLI and Worker Acceptance
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - "codex/**"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: agentops-mis-windows-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  windows-wheel-cli-worker:
+    name: Windows wheel, CLI, and worker contracts
+    runs-on: windows-2022
+    timeout-minutes: 10
+    env:
+      PIP_DISABLE_PIP_VERSION_CHECK: "1"
+      PIP_NO_INDEX: "1"
+      PYTHONDONTWRITEBYTECODE: "1"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Build dependency-free wheel
+        id: wheel
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $wheelhouse = Join-Path $env:RUNNER_TEMP "agentops-wheelhouse"
+          New-Item -ItemType Directory -Force -Path $wheelhouse | Out-Null
+          $wheelName = python -c "import sys; from agentops_mis_cli._build_backend import build_wheel; print(build_wheel(sys.argv[1]))" $wheelhouse
+          $wheelPath = Join-Path $wheelhouse $wheelName.Trim()
+          if (-not (Test-Path -LiteralPath $wheelPath -PathType Leaf)) {
+            throw "Wheel build did not produce $wheelPath"
+          }
+          "path=$wheelPath" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+
+      - name: Install wheel without dependencies
+        id: install
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $venv = Join-Path $env:RUNNER_TEMP "agentops-wheel-venv"
+          python -m venv $venv
+          $python = Join-Path $venv "Scripts\python.exe"
+          & $python -m pip install --no-index --no-deps "${{ steps.wheel.outputs.path }}"
+          "python=$python" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+
+      - name: Run installed CLI and worker acceptance
+        shell: pwsh
+        working-directory: ${{ runner.temp }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          & "${{ steps.install.outputs.python }}" `
+            "$env:GITHUB_WORKSPACE\scripts\windows_cli_worker_acceptance.py" `
+            --wheel "${{ steps.wheel.outputs.path }}"
