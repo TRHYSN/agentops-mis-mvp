@@ -163,6 +163,15 @@ async function run() {
   );
   assert.match(byoc, /authority_after_rollback[^]*= "1"/);
   assert.match(byoc, /probe_after_rollback[^]*= "0"/);
+  assert.match(
+    byoc,
+    /agentops_byoc_retained_data_lifecycle_postconditions_v1/,
+  );
+  assert.match(byoc, /authority_retained:[^]*post_apply_probe_removed:/);
+  assert.match(byoc, /source_image_restored:[^]*volume_identity_retained:/);
+  assert.match(byoc, /cluster_identity_retained:[^]*final_health_verified:/);
+  assert.match(byoc, /image_identifiers_omitted: true/);
+  assert.match(byoc, /database_identifiers_omitted: true/);
   assert.match(byoc, /volume_identity_before/);
   assert.match(byoc, /cluster_identifier_before/);
   assert.match(byoc, /down --volumes --remove-orphans/);

@@ -366,7 +366,8 @@ jobs:
                 "${RUNNER_TEMP}/agentops-byoc-lifecycle-plan.json" \
                 "${RUNNER_TEMP}/agentops-byoc-lifecycle-apply.json" \
                 "${RUNNER_TEMP}/agentops-byoc-lifecycle-status.json" \
-                "${RUNNER_TEMP}/agentops-byoc-lifecycle-rollback.json"
+                "${RUNNER_TEMP}/agentops-byoc-lifecycle-rollback.json" \
+                "${RUNNER_TEMP}/agentops-byoc-lifecycle-postconditions.json"
               do
                 if [[ -f "${receipt}" && ! -L "${receipt}" ]]; then
                   jq -c '{
@@ -376,7 +377,15 @@ jobs:
                     error_code,
                     failure_stage,
                     state_promoted,
+                    authority_retained,
+                    post_apply_probe_removed,
+                    source_image_restored,
+                    volume_identity_retained,
+                    cluster_identity_retained,
+                    final_health_verified,
                     credentials_omitted,
+                    image_identifiers_omitted,
+                    database_identifiers_omitted,
                     sql_omitted,
                     row_data_omitted
                   }' "${receipt}" >&2 || true
@@ -539,53 +548,120 @@ jobs:
               and .quarantine_cleanup_pending == false
             ' "${rollback_receipt}" > /dev/null
 
-          authority_after_rollback="$(audit_log_count "${AGENTOPS_BYOC_AUTHORITY_ID}")"
-          probe_after_rollback="$(audit_log_count "${AGENTOPS_BYOC_POST_APPLY_PROBE_ID}")"
-          test "${authority_after_rollback}" = "1"
-          test "${probe_after_rollback}" = "0"
+          authority_after_rollback="$(
+            audit_log_count "${AGENTOPS_BYOC_AUTHORITY_ID}" || true
+          )"
+          probe_after_rollback="$(
+            audit_log_count "${AGENTOPS_BYOC_POST_APPLY_PROBE_ID}" || true
+          )"
+          authority_retained=false
+          post_apply_probe_removed=false
+          if [[ "${authority_after_rollback}" = "1" ]]; then
+            authority_retained=true
+          fi
+          if [[ "${probe_after_rollback}" = "0" ]]; then
+            post_apply_probe_removed=true
+          fi
 
           final_control_plane_id="$(
             docker compose \
               --env-file "${AGENTOPS_BYOC_ENV_FILE}" \
               -f "${AGENTOPS_BYOC_COMPOSE_FILE}" \
-              ps -q control-plane
+              ps -q control-plane || true
           )"
-          test "$(docker inspect --format '{{.Image}}' "${final_control_plane_id}")" = \
-            "${AGENTOPS_BYOC_SOURCE_IMAGE_ID}"
-          test "$(
+          final_control_plane_image="$(
+            if [[ -n "${final_control_plane_id}" ]]; then
+              docker inspect \
+                --format '{{.Image}}' \
+                "${final_control_plane_id}" 2>/dev/null || true
+            fi
+          )"
+          final_volume_identity="$(
             docker volume inspect \
               --format '{{.Name}}|{{.Mountpoint}}|{{.CreatedAt}}' \
-              "${volume_name}"
-          )" = "${volume_identity_before}"
-          test "$(
+              "${volume_name}" 2>/dev/null || true
+          )"
+          final_cluster_identifier="$(
             docker compose \
               --env-file "${AGENTOPS_BYOC_ENV_FILE}" \
               -f "${AGENTOPS_BYOC_COMPOSE_FILE}" \
               exec -T postgres sh -ceu \
-              'psql --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" --no-psqlrc --tuples-only --no-align --command "SELECT system_identifier FROM pg_control_system()"'
-          )" = "${cluster_identifier_before}"
+              'psql --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" --no-psqlrc --tuples-only --no-align --command "SELECT system_identifier FROM pg_control_system()"' \
+              2>/dev/null || true
+          )"
+          source_image_restored=false
+          volume_identity_retained=false
+          cluster_identity_retained=false
+          if [[ "${final_control_plane_image}" = "${AGENTOPS_BYOC_SOURCE_IMAGE_ID}" ]]; then
+            source_image_restored=true
+          fi
+          if [[ "${final_volume_identity}" = "${volume_identity_before}" ]]; then
+            volume_identity_retained=true
+          fi
+          if [[ "${final_cluster_identifier}" = "${cluster_identifier_before}" ]]; then
+            cluster_identity_retained=true
+          fi
 
           final_health="${RUNNER_TEMP}/agentops-byoc-lifecycle-final-health.json"
-          curl \
-            --fail \
-            --silent \
-            --show-error \
-            --retry 20 \
-            --retry-all-errors \
-            --retry-delay 2 \
-            --output "${final_health}" \
-            http://127.0.0.1:3001/api/mis/health
-          jq -e '
-            .ok == true
-            and .status == "ready"
-            and .control_plane == "typescript_postgres"
-            and .schema_ready == true
-            and .schema_fingerprint_verified == true
-            and .database_role_boundary_verified == true
-            and .python_proxy_performed == false
-            and .sqlite_used == false
-            and .credentials_omitted == true
-          ' "${final_health}" > /dev/null
+          final_health_verified=false
+          if curl \
+              --fail \
+              --silent \
+              --show-error \
+              --retry 20 \
+              --retry-all-errors \
+              --retry-delay 2 \
+              --output "${final_health}" \
+              http://127.0.0.1:3001/api/mis/health \
+            && jq -e '
+              .ok == true
+              and .status == "ready"
+              and .control_plane == "typescript_postgres"
+              and .schema_ready == true
+              and .schema_fingerprint_verified == true
+              and .database_role_boundary_verified == true
+              and .python_proxy_performed == false
+              and .sqlite_used == false
+              and .credentials_omitted == true
+            ' "${final_health}" > /dev/null
+          then
+            final_health_verified=true
+          fi
+
+          postcondition_receipt="${RUNNER_TEMP}/agentops-byoc-lifecycle-postconditions.json"
+          jq -n \
+            --argjson authority_retained "${authority_retained}" \
+            --argjson post_apply_probe_removed "${post_apply_probe_removed}" \
+            --argjson source_image_restored "${source_image_restored}" \
+            --argjson volume_identity_retained "${volume_identity_retained}" \
+            --argjson cluster_identity_retained "${cluster_identity_retained}" \
+            --argjson final_health_verified "${final_health_verified}" '
+              {
+                contract: "agentops_byoc_retained_data_lifecycle_postconditions_v1",
+                ok: (
+                  $authority_retained
+                  and $post_apply_probe_removed
+                  and $source_image_restored
+                  and $volume_identity_retained
+                  and $cluster_identity_retained
+                  and $final_health_verified
+                ),
+                operation: "rollback_postconditions",
+                authority_retained: $authority_retained,
+                post_apply_probe_removed: $post_apply_probe_removed,
+                source_image_restored: $source_image_restored,
+                volume_identity_retained: $volume_identity_retained,
+                cluster_identity_retained: $cluster_identity_retained,
+                final_health_verified: $final_health_verified,
+                credentials_omitted: true,
+                image_identifiers_omitted: true,
+                database_identifiers_omitted: true,
+                sql_omitted: true,
+                row_data_omitted: true
+              }
+            ' > "${postcondition_receipt}"
+          jq -c . "${postcondition_receipt}"
+          jq -e '.ok == true' "${postcondition_receipt}" > /dev/null
 
           echo "::notice title=BYOC same-schema lifecycle::Two immutable exact-source image digests with identical rootfs layers and distinct image IDs completed real plan/apply/backup-authoritative rollback on one retained PostgreSQL volume; pre-backup authority survived, the post-apply probe disappeared, source image/readiness/role boundaries recovered, and no volume reset occurred."
 
