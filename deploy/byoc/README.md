@@ -318,9 +318,25 @@ database OID. Apply and rollback re-check both values. Database renames preserve
 the bound OID, allowing recovery to distinguish the recorded authority,
 quarantine, and restored objects from unrelated databases that happen to reuse
 the same names. Every destructive rename or drop runs through one helper that
-holds a PostgreSQL session advisory lock, verifies cluster/OID/comment identity,
-terminates target connections, verifies identity again, and then executes DDL
-in that same `psql` session.
+holds the fixed PostgreSQL session advisory key `7157544864185932631`, verifies
+cluster/OID/comment identity, terminates target connections, verifies identity
+again, and then executes DDL in that same `psql` session. The helper requires an
+explicit `marker_mode` of `ignore` or `exact`: authority and quarantine objects
+use `ignore` because customer database comments are not lifecycle identity,
+while a restore object uses `exact` and must match its operation-bound marker.
+
+The running control-plane database identity probe uses the same restricted
+runtime-secret preparation and privilege-drop boundary as production startup:
+`/usr/local/lib/agentops/node-secret-entrypoint.mjs --postgres-runtime -- npm run
+byoc:database-identity --silent`. Invoking the npm script directly with
+`docker compose exec` is unsupported because that child process would not have
+the temporary file-backed runtime credential prepared by the entrypoint.
+
+The restore drill starts a container-side guardian before `pg_restore`. The
+guardian holds advisory key `7157544864185932631` for the complete restore and
+releases it only after `pg_restore` has exited. Because the guardian and restore
+run inside the PostgreSQL container, loss of the host-side Docker client cannot
+make an in-progress restore appear unlocked to lifecycle recovery.
 
 Rollback is destructive and requires the operation ID as explicit confirmation:
 
@@ -383,9 +399,18 @@ metadata, host identity, boot identity, PID, and process-start identity; it
 refuses a live owner, cross-host owner, changed/tampered owner, unsafe path, or
 unverifiable identity. Each external Docker, restore, or SQL command runs in a
 tracked process group with a private child lease under the lock. Recovery also
-refuses while any recorded child process group remains alive. A successful
-recovery removes only the verified stale lock and does not change lifecycle
-state. Never run
+refuses while any recorded child process group remains alive. Even after those
+host-side PID/PGID checks pass, recovery must prove through PostgreSQL that the
+shared advisory lease `7157544864185932631` is available; an active database
+lease refuses recovery. A successful recovery removes only the verified stale
+lock and does not change lifecycle state.
+
+This protocol serializes AgentOps lifecycle, migration, restore, rename, and
+drop operations that honor the shared advisory key. Direct DDL by an external
+DBA or automation that does not acquire this lock is an explicit operational
+trust boundary: operators must exclude such out-of-band DDL for the entire
+lifecycle window. The lifecycle cannot make an uncooperative PostgreSQL
+superuser participate in its lock protocol. Never run
 `docker compose down --volumes` as part of this workflow.
 
 The lifecycle contracts use an offline injected Docker driver to exercise the

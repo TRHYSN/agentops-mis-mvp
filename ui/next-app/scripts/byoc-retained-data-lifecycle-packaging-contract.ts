@@ -58,9 +58,30 @@ assert.match(cli, /authority_database_oid/);
 assert.match(cli, /restore_database_marker/);
 assert.match(cli, /dropBoundDatabase/);
 assert.match(cli, /postgres-destructive-database\.sh/);
+assert.match(
+  cli,
+  /"exec",\s*"-T",\s*"control-plane",\s*"node",\s*"\/usr\/local\/lib\/agentops\/node-secret-entrypoint\.mjs",\s*"--postgres-runtime",\s*"--",\s*"npm",\s*"run",\s*"byoc:database-identity",\s*"--silent"/,
+);
+assert.doesNotMatch(
+  cli,
+  /"exec",\s*"-T",\s*"control-plane",\s*"npm",\s*"run",\s*"byoc:database-identity"/,
+);
 assert.match(cli, /registerLifecycleChildProcess/);
 assert.match(cli, /releaseLifecycleChildProcess/);
 assert.match(cli, /agentops_child_lease_ready_v1/);
+assert.match(cli, /assertDatabaseLifecycleLeaseReleased/);
+assert.match(cli, /pg_try_advisory_lock\(7157544864185932631\)/);
+assert.match(cli, /lifecycle_database_operation_lease_active/);
+const recoverLockImplementation = cli.slice(
+  cli.indexOf("async function recoverLock"),
+  cli.indexOf("async function apply"),
+);
+assert.match(recoverLockImplementation, /assertDatabaseLifecycleLeaseReleased/);
+assert.ok(
+  recoverLockImplementation.indexOf("assertDatabaseLifecycleLeaseReleased")
+    < recoverLockImplementation.indexOf("recoverStaleLifecycleLock"),
+  "recover-lock must prove the database lease is released before removing the host lock",
+);
 assert.match(cli, /rollbackCleanupComplete/);
 assert.match(cli, /databasePresence/);
 assert.match(cli, /restore_intent/);
@@ -136,6 +157,10 @@ assert.match(readme, /retained-data-lifecycle\.mjs recover-lock/);
 assert.match(readme, /--confirm-restore-from-backup/);
 assert.match(readme, /--confirm-operation-id/);
 assert.match(readme, /runtime connection's actual\s+authority database/);
+assert.match(
+  readme,
+  /\/usr\/local\/lib\/agentops\/node-secret-entrypoint\.mjs --postgres-runtime -- npm run\s+byoc:database-identity --silent/,
+);
 assert.match(readme, /stops the\s+control plane/);
 assert.match(readme, /fsyncs a committed backup bundle/);
 assert.match(readme, /production_rename_started/);
@@ -144,6 +169,14 @@ assert.match(readme, /backup restore is authoritative/i);
 assert.match(readme, /quarantine_cleanup_pending=true/);
 assert.match(readme, /does not perform an\s+in-place down migration/i);
 assert.match(readme, /offline injected Docker driver/i);
+assert.match(readme, /fixed PostgreSQL session advisory key `7157544864185932631`/);
+assert.match(readme, /marker_mode` of `ignore` or `exact`/);
+assert.match(readme, /container-side guardian[\s\S]*holds advisory key `7157544864185932631`/);
+assert.match(
+  readme,
+  /host-side PID\/PGID checks pass[\s\S]*prove through PostgreSQL[\s\S]*advisory lease `7157544864185932631` is available/,
+);
+assert.match(readme, /external[\s\S]*DBA[\s\S]*does not acquire this lock[\s\S]*operational\s+trust boundary/i);
 assert.match(
   readme,
   /does not prove a forward\s+upgrade across Schema versions/i,
@@ -160,7 +193,23 @@ assert.match(restore, /COMMENT ON DATABASE/);
 assert.match(restore, /restore_provisioning_completed/);
 assert.doesNotMatch(restore, /\bdropdb\b/);
 assert.match(restore, /postgres-destructive-database\.sh/);
+assert.match(restore, /pg_advisory_lock\(7157544864185932631\)/);
+assert.match(restore, /(?:guardian|lease)_pid/);
+assert.match(restore, /pg_restore/);
+assert.ok(
+  restore.indexOf("pg_advisory_lock(7157544864185932631)")
+    < restore.indexOf("pg_restore"),
+  "the container-side database lease guardian must start before pg_restore",
+);
 assert.match(destructiveDatabase, /pg_try_advisory_lock/);
+assert.match(destructiveDatabase, /pg_try_advisory_lock\(7157544864185932631\)/);
+assert.doesNotMatch(
+  destructiveDatabase,
+  /hashtextextended\('agentops_byoc_retained_data_lifecycle_v1'/,
+);
+assert.match(destructiveDatabase, /marker_mode/);
+assert.match(destructiveDatabase, /case "\$marker_mode" in/);
+assert.match(destructiveDatabase, /ignore\|exact\)/);
 assert.match(destructiveDatabase, /system_identifier/);
 assert.match(destructiveDatabase, /shobj_description/);
 assert.match(destructiveDatabase, /DROP DATABASE/);
@@ -198,6 +247,12 @@ console.log(JSON.stringify({
   postgres_cluster_and_database_oid_binding_packaged: true,
   restore_operation_marker_packaged: true,
   destructive_database_advisory_lock_packaged: true,
+  fixed_database_advisory_key_packaged: true,
+  destructive_database_marker_mode_packaged: true,
+  runtime_secret_database_identity_probe_packaged: true,
+  restore_database_lease_guardian_packaged: true,
+  stale_lock_database_lease_probe_packaged: true,
+  external_dba_ddl_trust_boundary_documented: true,
   lifecycle_child_process_leases_packaged: true,
   strict_cleanup_completion_gate_packaged: true,
   in_place_down_migration_forbidden: true,
