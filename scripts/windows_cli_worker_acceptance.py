@@ -555,6 +555,62 @@ def main() -> int:
             require("<Task" in installed_xml and ("agentops-worker" in installed_command or "agentops_mis_cli.worker" in installed_arguments), "installed service XML drifted")
             require("AGENTOPS_API_KEY" not in installed_xml + installed_arguments, "installed service XML contains an API key")
 
+            wrapper_service_check = run(
+                [
+                    str(agentops),
+                    "--base-url",
+                    base_url,
+                    "--workspace-id",
+                    "local-demo",
+                    "worker",
+                    "service-check",
+                    "--manager",
+                    "windows-task",
+                    "--adapter",
+                    "mock",
+                    "--agent-id",
+                    "agt_windows_acceptance",
+                    "--working-directory",
+                    str(temp_root),
+                    "--service-path",
+                    str(service_path),
+                ],
+                cwd=temp_root,
+                env=env,
+            )
+            wrapper_service_check_payload = json_stdout(wrapper_service_check, "agentops worker service-check")
+            require(wrapper_service_check_payload.get("ok") is True, "agentops wrapper did not validate the Windows task")
+            require(wrapper_service_check_payload.get("manager") == "windows-task", "agentops wrapper manager drifted")
+
+            wrapper_service_control = run(
+                [
+                    str(agentops),
+                    "--base-url",
+                    base_url,
+                    "--workspace-id",
+                    "local-demo",
+                    "worker",
+                    "service-control",
+                    "--manager",
+                    "windows-task",
+                    "--action",
+                    "load",
+                    "--adapter",
+                    "mock",
+                    "--agent-id",
+                    "agt_windows_acceptance",
+                    "--working-directory",
+                    str(temp_root),
+                    "--service-path",
+                    str(service_path),
+                ],
+                cwd=temp_root,
+                env=env,
+            )
+            wrapper_service_control_payload = json_stdout(wrapper_service_control, "agentops worker service-control")
+            require(wrapper_service_control_payload.get("ok") is True, "agentops wrapper Windows control preview failed")
+            require(wrapper_service_control_payload.get("dry_run") is True, "agentops wrapper preview mutated Task Scheduler")
+
             service_control = run(
                 [
                     str(worker),
@@ -710,6 +766,7 @@ def main() -> int:
                 "evidence_request_order_verified": True,
                 "windows_task_template": True,
                 "windows_task_xml_installed": True,
+                "agentops_windows_task_wrapper": True,
                 "windows_task_control_preview": True,
                 "task_scheduler_real_lifecycle": True,
                 "task_scheduler_worker_started": True,

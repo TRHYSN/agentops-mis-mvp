@@ -5427,10 +5427,20 @@ def cmd_worker_service_check(args, client: AgentOpsClient) -> dict:
 
     check_args = argparse.Namespace(
         manager=args.manager,
+        base_url=client.base_url,
         workspace_id=client.workspace_id,
         agent_id=args.agent_id or client.agent_id or worker_mod.DEFAULT_AGENT_ID,
         adapter=args.adapter,
+        confirm_run=bool(args.confirm_run),
+        use_session=bool(args.use_session),
+        session_ttl_sec=args.session_ttl_sec,
+        session_refresh_margin_sec=args.session_refresh_margin_sec,
+        poll_interval=args.poll_interval,
         label=args.label or "",
+        working_directory=args.working_directory or str(worker_mod.DEFAULT_WORKER_CWD),
+        runtime_dir=args.runtime_dir or "",
+        worker_command=args.worker_command or "",
+        hermes_gateway_url=args.hermes_gateway_url or "",
         service_path=args.service_path or "",
         api_key_placeholder=args.api_key_placeholder,
         credential_source=args.credential_source,
@@ -5481,10 +5491,20 @@ def cmd_worker_service_control(args, client: AgentOpsClient) -> dict:
     control_args = argparse.Namespace(
         manager=args.manager,
         action=args.service_action,
+        base_url=client.base_url,
         workspace_id=client.workspace_id,
         agent_id=args.agent_id or client.agent_id or worker_mod.DEFAULT_AGENT_ID,
         adapter=args.adapter,
+        confirm_run=bool(args.confirm_run),
+        use_session=bool(args.use_session),
+        session_ttl_sec=args.session_ttl_sec,
+        session_refresh_margin_sec=args.session_refresh_margin_sec,
+        poll_interval=args.poll_interval,
         label=args.label or "",
+        working_directory=args.working_directory or str(worker_mod.DEFAULT_WORKER_CWD),
+        runtime_dir=args.runtime_dir or "",
+        worker_command=args.worker_command or "",
+        hermes_gateway_url=args.hermes_gateway_url or "",
         service_path=args.service_path or "",
         api_key_placeholder=args.api_key_placeholder,
         credential_source=args.credential_source,
@@ -6761,19 +6781,28 @@ def build_parser() -> argparse.ArgumentParser:
     worker_preflight.add_argument("--openclaw-bin", default=os.environ.get("OPENCLAW_BIN", "/opt/homebrew/bin/openclaw"))
     worker_preflight.add_argument("--codex-bin", default=os.environ.get("CODEX_BIN", ""))
     worker_preflight.set_defaults(handler="worker_preflight")
-    worker_service_check = worker_sub.add_parser("service-check", help="Read-only check for a launchd/systemd worker service file.")
-    worker_service_check.add_argument("--manager", choices=["launchd", "systemd"], required=True)
+    worker_service_check = worker_sub.add_parser("service-check", help="Read-only check for a launchd/systemd/Windows Task Scheduler worker service file.")
+    worker_service_check.add_argument("--manager", choices=["launchd", "systemd", "windows-task"], required=True)
     worker_service_check.add_argument("--agent-id", default=None)
     worker_service_check.add_argument("--adapter", choices=["mock", "hermes", "openclaw", "codex"], default="mock")
+    worker_service_check.add_argument("--confirm-run", action="store_true")
+    worker_service_check.add_argument("--use-session", action="store_true")
+    worker_service_check.add_argument("--session-ttl-sec", type=int, default=900)
+    worker_service_check.add_argument("--session-refresh-margin-sec", type=float, default=60)
+    worker_service_check.add_argument("--poll-interval", type=float, default=5.0)
     worker_service_check.add_argument("--label", default="")
+    worker_service_check.add_argument("--working-directory", default="")
+    worker_service_check.add_argument("--runtime-dir", default="")
+    worker_service_check.add_argument("--worker-command", default="")
+    worker_service_check.add_argument("--hermes-gateway-url", default=os.environ.get("HERMES_GATEWAY_URL", ""))
     worker_service_check.add_argument("--service-path", default="")
     worker_service_check.add_argument("--api-key-placeholder", default="<paste one-time token here>")
     worker_service_check.add_argument("--credential-source", choices=["auto", "direct", "local_config"], default="auto")
     worker_service_check.add_argument("--config-path", default=str(CONFIG_PATH))
     worker_service_check.add_argument("--timeout", type=int, default=5)
     worker_service_check.set_defaults(handler="worker_service_check")
-    worker_service_install = worker_sub.add_parser("service-install", help="Dry-run or write a safe launchd/systemd worker service file.")
-    worker_service_install.add_argument("--manager", choices=["launchd", "systemd"], required=True)
+    worker_service_install = worker_sub.add_parser("service-install", help="Dry-run or write a safe launchd/systemd/Windows Task Scheduler worker service file.")
+    worker_service_install.add_argument("--manager", choices=["launchd", "systemd", "windows-task"], required=True)
     worker_service_install.add_argument("--agent-id", default=None)
     worker_service_install.add_argument("--adapter", choices=["mock", "hermes", "openclaw", "codex"], default="mock")
     worker_service_install.add_argument("--confirm-run", action="store_true")
@@ -6795,18 +6824,27 @@ def build_parser() -> argparse.ArgumentParser:
     worker_service_install.add_argument("--overwrite", action="store_true")
     worker_service_install.add_argument("--timeout", type=int, default=5)
     worker_service_install.set_defaults(handler="worker_service_install")
-    worker_service_control = worker_sub.add_parser("service-control", help="Preview or explicitly run launchd/systemd load, unload, or restart for a worker service.")
-    worker_service_control.add_argument("--manager", choices=["launchd", "systemd"], required=True)
+    worker_service_control = worker_sub.add_parser("service-control", help="Preview or explicitly run OS service load, unload, or restart for a worker service.")
+    worker_service_control.add_argument("--manager", choices=["launchd", "systemd", "windows-task"], required=True)
     worker_service_control.add_argument("--action", dest="service_action", choices=["load", "unload", "restart"], required=True)
     worker_service_control.add_argument("--agent-id", default=None)
     worker_service_control.add_argument("--adapter", choices=["mock", "hermes", "openclaw", "codex"], default="mock")
+    worker_service_control.add_argument("--confirm-run", action="store_true")
+    worker_service_control.add_argument("--use-session", action="store_true")
+    worker_service_control.add_argument("--session-ttl-sec", type=int, default=900)
+    worker_service_control.add_argument("--session-refresh-margin-sec", type=float, default=60)
+    worker_service_control.add_argument("--poll-interval", type=float, default=5.0)
     worker_service_control.add_argument("--label", default="")
+    worker_service_control.add_argument("--working-directory", default="")
+    worker_service_control.add_argument("--runtime-dir", default="")
+    worker_service_control.add_argument("--worker-command", default="")
+    worker_service_control.add_argument("--hermes-gateway-url", default=os.environ.get("HERMES_GATEWAY_URL", ""))
     worker_service_control.add_argument("--service-path", default="")
     worker_service_control.add_argument("--api-key-placeholder", default="<paste one-time token here>")
     worker_service_control.add_argument("--credential-source", choices=["auto", "direct", "local_config"], default="auto")
     worker_service_control.add_argument("--config-path", default=str(CONFIG_PATH))
     worker_service_control.add_argument("--timeout", type=int, default=10)
-    worker_service_control.add_argument("--confirm-control", action="store_true", help="Actually call launchctl/systemctl. Default is preview only.")
+    worker_service_control.add_argument("--confirm-control", action="store_true", help="Actually call the selected OS service manager. Default is preview only.")
     worker_service_control.set_defaults(handler="worker_service_control")
     worker_start = worker_sub.add_parser("start", help="Start a local worker daemon through the MIS supervisor.")
     worker_start.add_argument("--adapter", choices=["mock", "hermes", "openclaw"], default="mock")

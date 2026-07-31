@@ -279,6 +279,59 @@ def main() -> int:
         require(unsafe.returncode == 1, f"unsafe service control should fail: {unsafe_payload}", failures)
         require(any("token-like" in item for item in unsafe_payload.get("failures") or []), f"token-like failure missing: {unsafe_payload}", failures)
 
+        windows_path = tmp_path / "agentops-worker.xml"
+        windows_common = [
+            "--base-url", "http://127.0.0.1:8787",
+            "--workspace-id", "local-demo",
+            "worker",
+        ]
+        windows_install = run([
+            sys.executable,
+            "-m",
+            "agentops_mis_cli.agentops",
+            *windows_common,
+            "service-install",
+            "--manager", "windows-task",
+            "--adapter", "mock",
+            "--agent-id", "agt_windows_wrapper_smoke",
+            "--working-directory", str(ROOT),
+            "--service-path", str(windows_path),
+            "--confirm-install",
+        ])
+        windows_install_payload = parse_json(windows_install)
+        require(windows_install.returncode == 0 and windows_install_payload.get("wrote") is True, f"agentops Windows install wrapper failed: {windows_install_payload}", failures)
+
+        windows_check = run([
+            sys.executable,
+            "-m",
+            "agentops_mis_cli.agentops",
+            *windows_common,
+            "service-check",
+            "--manager", "windows-task",
+            "--adapter", "mock",
+            "--agent-id", "agt_windows_wrapper_smoke",
+            "--working-directory", str(ROOT),
+            "--service-path", str(windows_path),
+        ])
+        windows_check_payload = parse_json(windows_check)
+        require(windows_check.returncode == 0 and windows_check_payload.get("manager") == "windows-task", f"agentops Windows check wrapper failed: {windows_check_payload}", failures)
+
+        windows_control = run([
+            sys.executable,
+            "-m",
+            "agentops_mis_cli.agentops",
+            *windows_common,
+            "service-control",
+            "--manager", "windows-task",
+            "--action", "load",
+            "--adapter", "mock",
+            "--agent-id", "agt_windows_wrapper_smoke",
+            "--working-directory", str(ROOT),
+            "--service-path", str(windows_path),
+        ])
+        windows_control_payload = parse_json(windows_control)
+        require(windows_control.returncode == 0 and windows_control_payload.get("dry_run") is True, f"agentops Windows control wrapper failed: {windows_control_payload}", failures)
+
         serialized = json.dumps({
             "direct": direct_payload,
             "wrapper": wrapper_payload,
@@ -300,6 +353,7 @@ def main() -> int:
         "openclaw_confirm_gate_blocked": openclaw_payload.get("ok") is False,
         "unsafe_blocked": unsafe_payload.get("ok") is False,
         "loaded_noop_ok": loaded_noop_payload.get("ok") is True and loaded_noop_payload.get("service_control_skipped") is True,
+        "windows_agentops_wrapper_ok": windows_control_payload.get("ok") is True,
         "windows_stop_settle_ok": windows_settle_payload.get("ok") is True,
         "failures": failures,
     }, ensure_ascii=False, indent=2, sort_keys=True))
