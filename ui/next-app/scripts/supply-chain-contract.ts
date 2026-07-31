@@ -17,6 +17,10 @@ async function run() {
       "../../../.github/workflows/research-lab-incubator.yml",
       import.meta.url,
     ),
+    new URL(
+      "../../../.github/workflows/byoc-compose-acceptance.yml",
+      import.meta.url,
+    ),
   ];
   const workflows = await Promise.all(
     workflowUrls.map(async (url) => ({
@@ -26,6 +30,16 @@ async function run() {
   );
   let actionReferenceCount = 0;
   for (const workflow of workflows) {
+    assert.match(
+      workflow.source,
+      /^permissions:\n\s+contents:\s+read$/m,
+      `workflow permissions are not read-only: ${workflow.path}`,
+    );
+    assert.doesNotMatch(
+      workflow.source,
+      /^\s*pull_request_target:\s*$/m,
+      `workflow uses pull_request_target: ${workflow.path}`,
+    );
     const references = [
       ...workflow.source.matchAll(
         /^\s*uses:\s*([^\s#]+)(?:\s+#.*)?$/gm,
@@ -50,8 +64,11 @@ async function run() {
     workflow.path.endsWith("/ci.yml"))?.source || "";
   assert(ci.includes(`image: ${POSTGRES_IMAGE}`));
   assert.doesNotMatch(ci, /^\s*image:\s*postgres:[^\s@]+\s*$/m);
-  assert.match(ci, /^permissions:\n\s+contents:\s+read$/m);
   assert.match(ci, /npm ci --ignore-scripts/);
+  assert.match(
+    ci,
+    /node-version: "22"\n\s+cache: npm\n\s+cache-dependency-path: ui\/start-building-app\/package-lock\.json/,
+  );
   assert.match(ci, /npm prune --omit=dev --ignore-scripts/);
   assert.match(ci, /npm audit --omit=dev --audit-level=high/);
   assert.match(ci, /npm sbom --omit=dev --sbom-format cyclonedx/);
@@ -59,6 +76,17 @@ async function run() {
   assert.match(ci, /test:schema-fingerprint-postgres-contract/);
   assert.match(ci, /test:commercial-health-postgres-contract/);
   assert.match(ci, /test:byoc-backup-restore-behavior-contract/);
+
+  const byoc = workflows.find((workflow) =>
+    workflow.path.endsWith("/byoc-compose-acceptance.yml"))?.source || "";
+  assert.match(byoc, /persist-credentials:\s+false/);
+  assert.match(byoc, /timeout-minutes:\s+45/);
+  assert.match(byoc, /docker compose[\s\S]+build --pull migrate/);
+  assert.match(byoc, /up --detach --no-build --wait --wait-timeout 300 control-plane/);
+  assert.match(byoc, /deploy\/byoc\/backup\.sh/);
+  assert.match(byoc, /deploy\/byoc\/restore-drill\.sh/);
+  assert.match(byoc, /down --volumes --remove-orphans/);
+  assert.match(byoc, /does not validate image upgrade or rollback/);
 
   console.log(JSON.stringify({
     ok: true,
@@ -74,6 +102,8 @@ async function run() {
     production_audit: true,
     cyclonedx_sbom_artifact: true,
     commercial_contracts_in_ci: true,
+    real_byoc_compose_acceptance_in_ci: true,
+    byoc_upgrade_rollback_claimed: false,
     credentials_omitted: true,
   }));
 }
