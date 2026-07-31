@@ -325,6 +325,11 @@ jobs:
           echo "::add-mask::$dsn"
           printf 'AGENTOPS_POSTGRES_DSN=%s\n' "$dsn" >> "$GITHUB_ENV"
 
+      - name: Verify real restore guardian failure behavior
+        run: >-
+          timeout 180s python3
+          scripts/byoc_restore_guardian_real_postgres_smoke.py
+
       - name: Verify TypeScript control-plane mode
         working-directory: ui/next-app
         run: |

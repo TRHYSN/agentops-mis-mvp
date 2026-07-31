@@ -14,7 +14,10 @@ const [
   readme,
   backup,
   restore,
+  restoreGuardian,
   destructiveDatabase,
+  ciWorkflow,
+  guardianRealPostgresSmoke,
 ] =
   await Promise.all([
     source("../../../deploy/byoc/retained-data-lifecycle.mjs"),
@@ -25,7 +28,10 @@ const [
     source("../../../deploy/byoc/README.md"),
     source("../../../deploy/byoc/backup.sh"),
     source("../../../deploy/byoc/restore-drill.sh"),
+    source("../../../deploy/byoc/postgres-restore-guardian.sh"),
     source("../../../deploy/byoc/postgres-destructive-database.sh"),
+    source("../../../.github/workflows/ci.yml"),
+    source("../../../scripts/byoc_restore_guardian_real_postgres_smoke.py"),
   ]);
 
 assert.match(cli, /"recover-lock"/);
@@ -221,33 +227,64 @@ assert.match(restore, /COMMENT ON DATABASE/);
 assert.match(restore, /restore_provisioning_completed/);
 assert.doesNotMatch(restore, /\bdropdb\b/);
 assert.match(restore, /postgres-destructive-database\.sh/);
-assert.match(restore, /pg_advisory_lock\(7157544864185932631\)/);
-assert.match(restore, /(?:guardian|lease)_pid/);
-assert.match(restore, /restore_pid/);
-assert.match(restore, /kill "\$restore_pid"/);
-assert.match(restore, /exec 3<&0/);
-assert.match(restore, /pg_restore[\s\S]*<&3 &/);
-assert.match(restore, /wait_for_lease_release/);
-assert.match(restore, /SELECT pg_backend_pid\(\)/);
-assert.match(restore, /SELECT pg_terminate_backend\(pid\)/);
+assert.match(restore, /postgres-restore-guardian\.sh/);
+assert.match(restore, /restore_guardian_script_invalid/);
+assert.match(restore, /sh -ceu "\$restore_guardian_script"/);
+assert.match(restoreGuardian, /lease_key=7157544864185932631/);
+assert.match(restoreGuardian, /(?:guardian|lease)_pid/);
+assert.match(restoreGuardian, /restore_pid/);
+assert.match(restoreGuardian, /kill "\$restore_pid"/);
+assert.match(restoreGuardian, /exec 3<&0/);
+assert.match(restoreGuardian, /pg_restore[\s\S]*<&3 4>&- &/);
+assert.match(restoreGuardian, /wait_for_lease_release/);
+assert.match(restoreGuardian, /SELECT pg_backend_pid\(\)/);
+assert.match(restoreGuardian, /SELECT pg_terminate_backend\(pid, 5000\)/);
 assert.match(
-  restore,
-  /PGAPPNAME=agentops_byoc_restore_guardian psql/,
+  restoreGuardian,
+  /guardian_application_name="agentops_restore_guardian_\$\{lease_nonce\}"/,
 );
 assert.match(
-  restore,
-  /application_name='agentops_byoc_restore_guardian'/,
+  restoreGuardian,
+  /PGAPPNAME="\$guardian_application_name" psql/,
 );
-assert.match(restore, /lease_backend_pid=\$\(cat "\$lease_ready"\)/);
+assert.match(
+  restoreGuardian,
+  /application_name=:'guardian_application_name'/,
+);
+assert.match(restoreGuardian, /guardian_record=\$\(cat "\$lease_ready"\)/);
+assert.match(restoreGuardian, /guardian_identity=\$\(/);
+assert.match(restoreGuardian, /guardian_backend_start/);
+assert.match(
+  restoreGuardian,
+  /backend_start=:'guardian_backend_start'::timestamptz/,
+);
+assert.match(restoreGuardian, /backend_type='client backend'/);
+assert.match(restoreGuardian, /pg_terminate_backend\(pid, 5000\)/);
+assert.match(restoreGuardian, /mkfifo "\$lease_control"/);
+assert.match(restoreGuardian, /exec 4>"\$lease_control"/);
+assert.match(restoreGuardian, /exec 4>&-/);
+assert.match(restoreGuardian, /guardian_watch_pid/);
+assert.match(restoreGuardian, /restore_database_lease_guardian_lost/);
+assert.match(restoreGuardian, /cleanup_done/);
+assert.doesNotMatch(restoreGuardian, /pg_sleep\(86400\)/);
+assert.match(
+  ciWorkflow,
+  /Verify real restore guardian failure behavior[\s\S]*byoc_restore_guardian_real_postgres_smoke\.py/,
+);
+assert.match(
+  guardianRealPostgresSmoke,
+  /wrapper_sigkill_released_fifo_lease/,
+);
+assert.match(guardianRealPostgresSmoke, /wrong_identity_preserved_guardian/);
 assert.ok(
-  restore.indexOf('kill "$restore_pid"')
-    < restore.indexOf('kill "$lease_pid"'),
+  restoreGuardian.indexOf('kill "$restore_pid"')
+    < restoreGuardian.indexOf('kill "$lease_pid"'),
   "signal cleanup must stop pg_restore before releasing the database lease",
 );
-assert.match(restore, /pg_restore/);
+assert.match(restoreGuardian, /pg_restore/);
 assert.ok(
-  restore.indexOf("pg_advisory_lock(7157544864185932631)")
-    < restore.indexOf("pg_restore"),
+  restoreGuardian.indexOf("lease_key=7157544864185932631")
+    < restoreGuardian.indexOf("pg_restore"),
   "the container-side database lease guardian must start before pg_restore",
 );
 assert.match(destructiveDatabase, /pg_try_advisory_lock/);

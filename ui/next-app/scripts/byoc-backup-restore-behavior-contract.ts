@@ -50,6 +50,7 @@ const dsnSentinel = [
   "@database.invalid/authority",
 ].join("");
 let activeCheck = "fixture_setup";
+let activeDiagnostic = "not_recorded";
 
 function startShell(
   script: string,
@@ -160,6 +161,14 @@ function assertFailed(result: ShellResult, expectedError?: RegExp) {
 }
 
 function assertSucceeded(result: ShellResult) {
+  const codes = `${result.stdout}\n${result.stderr}`.match(
+    /\b(?:backup|fake|restore)_[a-z0-9_]+\b/g,
+  ) || [];
+  activeDiagnostic = JSON.stringify({
+    code: result.code,
+    signal: result.signal,
+    codes: [...new Set(codes)].sort(),
+  });
   assert.equal(result.code, 0);
   assert.equal(result.signal, null);
   assert.match(result.stdout, /"ok":true/);
@@ -257,7 +266,7 @@ async function run() {
       "      done",
       "    fi",
       "    ;;",
-      "  *pg_restore*)",
+      "  *AGENTOPS_RESTORE_GUARDIAN_SCRIPT_BEGIN*|*pg_restore*)",
       '    if [ -n "${FAKE_RESTORE_INPUT:-}" ]; then',
       '      cat > "$FAKE_RESTORE_INPUT"',
       "    else",
@@ -532,6 +541,14 @@ async function run() {
     );
     await writeFile(`${createdbGate}.release`, "", { mode: 0o600 });
     const stableRestoreResult = await stableRestore.result;
+    if (stableRestoreResult.code !== 0) {
+      activeDiagnostic = JSON.stringify({
+        code: stableRestoreResult.code,
+        signal: stableRestoreResult.signal,
+        docker_log_tail: (await logLines(dockerLog)).slice(-8),
+      });
+      assert.fail("stable_restore_command_failed");
+    }
     assertSucceeded(stableRestoreResult);
     assert.match(
       stableRestoreResult.stdout,
@@ -1253,12 +1270,18 @@ async function run() {
   }
 }
 
-run().catch(() => {
+run().catch((error: unknown) => {
+  const stack = error instanceof Error ? error.stack || "" : "";
+  const failureLocation =
+    stack.match(/byoc-backup-restore-behavior-contract\.ts:\d+:\d+/)?.[0]
+    || "unavailable";
   console.error(JSON.stringify({
     ok: false,
     contract: "agentops_byoc_backup_restore_behavior_v1",
     error: "byoc_backup_restore_behavior_contract_failed",
     failed_check: activeCheck,
+    failure_diagnostic: activeDiagnostic,
+    failure_location: failureLocation,
     credentials_omitted: true,
   }));
   process.exitCode = 1;
