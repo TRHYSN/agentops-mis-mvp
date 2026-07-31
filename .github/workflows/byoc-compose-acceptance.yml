@@ -383,6 +383,7 @@ jobs:
                     volume_identity_retained,
                     cluster_identity_retained,
                     final_health_verified,
+                    final_schema_readiness_verified,
                     credentials_omitted,
                     image_identifiers_omitted,
                     database_identifiers_omitted,
@@ -619,13 +620,36 @@ jobs:
               and .control_plane == "typescript_postgres"
               and .schema_ready == true
               and .schema_fingerprint_verified == true
-              and .database_role_boundary_verified == true
               and .python_proxy_performed == false
               and .sqlite_used == false
               and .credentials_omitted == true
             ' "${final_health}" > /dev/null
           then
             final_health_verified=true
+          fi
+
+          final_schema_readiness="${RUNNER_TEMP}/agentops-byoc-lifecycle-final-schema-readiness.json"
+          final_schema_readiness_verified=false
+          if docker compose \
+              --env-file "${AGENTOPS_BYOC_ENV_FILE}" \
+              -f "${AGENTOPS_BYOC_COMPOSE_FILE}" \
+              exec -T control-plane \
+              node /usr/local/lib/agentops/node-secret-entrypoint.mjs \
+              --postgres-runtime \
+              -- \
+              npm run check:postgres-schema --silent \
+              > "${final_schema_readiness}" \
+              2>/dev/null \
+            && jq -e '
+              .contract == "agentops_postgres_schema_readiness_v1"
+              and .ok == true
+              and .operation == "check"
+              and .schema_fingerprint_verified == true
+              and .database_role_boundary_verified == true
+              and .credentials_omitted == true
+            ' "${final_schema_readiness}" > /dev/null
+          then
+            final_schema_readiness_verified=true
           fi
 
           postcondition_receipt="${RUNNER_TEMP}/agentops-byoc-lifecycle-postconditions.json"
@@ -635,7 +659,8 @@ jobs:
             --argjson source_image_restored "${source_image_restored}" \
             --argjson volume_identity_retained "${volume_identity_retained}" \
             --argjson cluster_identity_retained "${cluster_identity_retained}" \
-            --argjson final_health_verified "${final_health_verified}" '
+            --argjson final_health_verified "${final_health_verified}" \
+            --argjson final_schema_readiness_verified "${final_schema_readiness_verified}" '
               {
                 contract: "agentops_byoc_retained_data_lifecycle_postconditions_v1",
                 ok: (
@@ -645,6 +670,7 @@ jobs:
                   and $volume_identity_retained
                   and $cluster_identity_retained
                   and $final_health_verified
+                  and $final_schema_readiness_verified
                 ),
                 operation: "rollback_postconditions",
                 authority_retained: $authority_retained,
@@ -653,6 +679,8 @@ jobs:
                 volume_identity_retained: $volume_identity_retained,
                 cluster_identity_retained: $cluster_identity_retained,
                 final_health_verified: $final_health_verified,
+                final_schema_readiness_verified:
+                  $final_schema_readiness_verified,
                 credentials_omitted: true,
                 image_identifiers_omitted: true,
                 database_identifiers_omitted: true,
