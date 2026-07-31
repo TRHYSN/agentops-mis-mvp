@@ -180,6 +180,7 @@ async function run() {
     healthRoute,
     backupScript,
     restoreScript,
+    restoreGuardianScript,
     restoreProvisionScript,
     behaviorContract,
     secretEntrypoint,
@@ -195,6 +196,7 @@ async function run() {
     source("../app/api/mis/health/route.ts"),
     source("../../../deploy/byoc/backup.sh"),
     source("../../../deploy/byoc/restore-drill.sh"),
+    source("../../../deploy/byoc/postgres-restore-guardian.sh"),
     source("../../../deploy/byoc/restore-provision.sh"),
     source("./byoc-backup-restore-behavior-contract.ts"),
     source("../../../deploy/byoc/node-secret-entrypoint.mjs"),
@@ -552,7 +554,13 @@ async function run() {
     restoreScript,
     /restore_entitlement_admin_role_boundary_failed/,
   );
-  assert.match(restoreScript, /pg_restore/);
+  assert.match(restoreScript, /postgres-restore-guardian\.sh/);
+  assert.match(restoreScript, /restore_guardian_script=\$\(cat/);
+  assert.match(restoreGuardianScript, /pg_restore/);
+  assert.match(restoreGuardianScript, /AGENTOPS_RESTORE_GUARDIAN_SCRIPT_BEGIN/);
+  assert.match(restoreGuardianScript, /guardian_application_name=/);
+  assert.match(restoreGuardianScript, /guardian_backend_start/);
+  assert.match(restoreGuardianScript, /pg_terminate_backend/);
   assert.match(restoreScript, /restore-provision\.sh/);
   assert.match(
     restoreProvisionScript,

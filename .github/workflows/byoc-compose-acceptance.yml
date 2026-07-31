@@ -358,6 +358,34 @@ jobs:
       - name: Run real same-schema retained-data lifecycle
         run: |
           set -euo pipefail
+          report_lifecycle_failure() {
+            status=$?
+            trap - EXIT
+            if [[ "${status}" -ne 0 ]]; then
+              for receipt in \
+                "${RUNNER_TEMP}/agentops-byoc-lifecycle-plan.json" \
+                "${RUNNER_TEMP}/agentops-byoc-lifecycle-apply.json" \
+                "${RUNNER_TEMP}/agentops-byoc-lifecycle-status.json" \
+                "${RUNNER_TEMP}/agentops-byoc-lifecycle-rollback.json"
+              do
+                if [[ -f "${receipt}" && ! -L "${receipt}" ]]; then
+                  jq -c '{
+                    contract,
+                    ok,
+                    operation,
+                    error_code,
+                    failure_stage,
+                    state_promoted,
+                    credentials_omitted,
+                    sql_omitted,
+                    row_data_omitted
+                  }' "${receipt}" >&2 || true
+                fi
+              done
+            fi
+            exit "${status}"
+          }
+          trap report_lifecycle_failure EXIT
           lifecycle_dir="${AGENTOPS_BYOC_LIFECYCLE_STATE_DIR}"
           install -d -m 700 "${lifecycle_dir}"
 
