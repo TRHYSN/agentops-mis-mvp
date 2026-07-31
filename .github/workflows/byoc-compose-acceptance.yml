@@ -358,6 +358,35 @@ jobs:
       - name: Run real same-schema retained-data lifecycle
         run: |
           set -euo pipefail
+          lifecycle_failure_stage="initialize"
+          report_lifecycle_failure() {
+            status=$?
+            trap - ERR
+            set +e
+            for receipt_path in \
+              "${plan_receipt:-}" \
+              "${apply_receipt:-}" \
+              "${status_receipt:-}" \
+              "${rollback_receipt:-}"
+            do
+              if [[ -n "${receipt_path}" && -s "${receipt_path}" ]]; then
+                jq -c '{
+                  contract,
+                  ok,
+                  operation,
+                  error_code,
+                  failure_stage,
+                  state_promoted,
+                  credentials_omitted,
+                  sql_omitted,
+                  row_data_omitted
+                }' "${receipt_path}" || true
+              fi
+            done
+            echo "::error title=BYOC lifecycle failed::stage=${lifecycle_failure_stage}"
+            exit "${status}"
+          }
+          trap report_lifecycle_failure ERR
           lifecycle_dir="${AGENTOPS_BYOC_LIFECYCLE_STATE_DIR}"
           install -d -m 700 "${lifecycle_dir}"
 
@@ -401,8 +430,10 @@ jobs:
           SQL
 
           plan_receipt="${RUNNER_TEMP}/agentops-byoc-lifecycle-plan.json"
+          lifecycle_failure_stage="plan"
           timeout 5m deploy/byoc/retained-data-lifecycle.mjs plan \
             --to-image "${AGENTOPS_BYOC_TARGET_IMAGE}" > "${plan_receipt}"
+          lifecycle_failure_stage="validate_plan_receipt"
           jq -e \
             --arg source_image "${AGENTOPS_BYOC_SOURCE_IMAGE}" \
             --arg source_id "${AGENTOPS_BYOC_SOURCE_IMAGE_ID}" \
@@ -423,8 +454,10 @@ jobs:
           operation_id="$(jq -er '.operation_id' "${plan_receipt}")"
 
           apply_receipt="${RUNNER_TEMP}/agentops-byoc-lifecycle-apply.json"
+          lifecycle_failure_stage="apply"
           timeout 20m deploy/byoc/retained-data-lifecycle.mjs apply \
             --plan-id "${operation_id}" > "${apply_receipt}"
+          lifecycle_failure_stage="validate_apply_receipt"
           jq -e \
             --arg operation_id "${operation_id}" \
             --arg target_id "${AGENTOPS_BYOC_TARGET_IMAGE_ID}" '
@@ -476,7 +509,9 @@ jobs:
           SQL
 
           status_receipt="${RUNNER_TEMP}/agentops-byoc-lifecycle-status.json"
+          lifecycle_failure_stage="status"
           deploy/byoc/retained-data-lifecycle.mjs status > "${status_receipt}"
+          lifecycle_failure_stage="validate_status_receipt"
           jq -e \
             --arg operation_id "${operation_id}" \
             --arg target_id "${AGENTOPS_BYOC_TARGET_IMAGE_ID}" '
@@ -490,8 +525,10 @@ jobs:
             ' "${status_receipt}" > /dev/null
 
           rollback_receipt="${RUNNER_TEMP}/agentops-byoc-lifecycle-rollback.json"
+          lifecycle_failure_stage="rollback"
           timeout 20m deploy/byoc/retained-data-lifecycle.mjs rollback \
             --confirm-restore-from-backup "${operation_id}" > "${rollback_receipt}"
+          lifecycle_failure_stage="validate_rollback_receipt"
           jq -e \
             --arg operation_id "${operation_id}" \
             --arg source_id "${AGENTOPS_BYOC_SOURCE_IMAGE_ID}" '
