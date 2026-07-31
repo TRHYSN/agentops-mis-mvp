@@ -4,9 +4,18 @@ from __future__ import annotations
 
 import json
 import http.client
+import subprocess
+from pathlib import Path
 from unittest.mock import patch
 
 from github_ci_evidence import (
+    BYOC_COMPOSE_REUSABLE_JOB,
+    BYOC_COMPOSE_WORKFLOW,
+    BYOC_CROSS_SCHEMA_WORKFLOW,
+    MAIN_CI_WORKFLOW,
+    ci_from_gh,
+    ci_status,
+    commercial_workflow_evidence,
     extract_action_run_ids,
     fetch_url,
     parse_run_page_for_head_success,
@@ -15,6 +24,7 @@ from github_ci_evidence import (
 
 
 HEAD = "1bdcf5bdab3cd5656febca40cbf30efc70027275"
+REGRESSION_HEAD = "87ee537a8c1470dc625d3e8118db27d18cfb6f11"
 
 
 class IncompleteResponse:
@@ -48,23 +58,134 @@ def main() -> int:
       </body>
     </html>
     """
-    success = parse_run_page_for_head_success(success_html, head_sha=HEAD)
+    success = parse_run_page_for_head_success(
+        success_html,
+        head_sha=HEAD,
+        workflow_name=MAIN_CI_WORKFLOW,
+    )
     if not (success.get("head_matches") is True and success.get("status") == "completed" and success.get("conclusion") == "success"):
         failures.append(f"success parse failed: {success}")
 
-    short_only = parse_run_page_for_head_success("<div>1bdcf5b</div><div>Status Success</div>", head_sha=HEAD)
+    short_only = parse_run_page_for_head_success(
+        f"<div>{MAIN_CI_WORKFLOW}</div><div>1bdcf5b</div><div>Status Success</div>",
+        head_sha=HEAD,
+    )
     if short_only.get("head_matches") is not False:
         failures.append(f"short sha must not prove exact-head CI: {short_only}")
 
-    failure_html = f"<div>{HEAD}</div><div>Status Failure</div>"
+    failure_html = f"<title>{MAIN_CI_WORKFLOW}</title><div>{HEAD}</div><div>Status Failure</div>"
     failed = parse_run_page_for_head_success(failure_html, head_sha=HEAD)
     if not (failed.get("head_matches") is True and failed.get("conclusion") is None):
         failures.append(f"failed run must not parse as success: {failed}")
 
-    completed_without_success_html = f"<script>{{\"headSha\":\"{HEAD}\",\"status\":\"completed\",\"conclusion\":\"failure\"}}</script>"
+    completed_without_success_html = (
+        f"<title>{MAIN_CI_WORKFLOW}</title>"
+        f'<script>{{"headSha":"{HEAD}","status":"completed","conclusion":"failure"}}</script>'
+    )
     completed_without_success = parse_run_page_for_head_success(completed_without_success_html, head_sha=HEAD)
     if completed_without_success.get("conclusion") == "success":
         failures.append(f"completed failure must not parse as success: {completed_without_success}")
+
+    cross_schema_success_html = f"""
+    <title>{BYOC_CROSS_SCHEMA_WORKFLOW}</title>
+    <span>{HEAD}</span>
+    <div>Status Success</div>
+    """
+    wrong_workflow = parse_run_page_for_head_success(
+        cross_schema_success_html,
+        head_sha=HEAD,
+        workflow_name=MAIN_CI_WORKFLOW,
+    )
+    if wrong_workflow.get("head_matches") is not False:
+        failures.append(f"wrong workflow must not prove main CI: {wrong_workflow}")
+    sidebar_only_main = parse_run_page_for_head_success(
+        f"<title>{BYOC_CROSS_SCHEMA_WORKFLOW}</title><aside>{MAIN_CI_WORKFLOW}</aside>"
+        f"<span>{HEAD}</span><div>Status Success</div>",
+        head_sha=HEAD,
+        workflow_name=MAIN_CI_WORKFLOW,
+    )
+    if sidebar_only_main.get("head_matches") is not False:
+        failures.append(f"sidebar workflow text must not prove main CI: {sidebar_only_main}")
+
+    regression_runs = [
+        {
+            "conclusion": "success",
+            "createdAt": "2026-07-31T12:02:54Z",
+            "databaseId": 30629180752,
+            "headSha": REGRESSION_HEAD,
+            "name": BYOC_CROSS_SCHEMA_WORKFLOW,
+            "status": "completed",
+            "url": "https://github.com/example/repo/actions/runs/30629180752",
+            "workflowName": BYOC_CROSS_SCHEMA_WORKFLOW,
+        },
+        {
+            "conclusion": "cancelled",
+            "createdAt": "2026-07-31T12:02:54Z",
+            "databaseId": 30629180908,
+            "headSha": REGRESSION_HEAD,
+            "name": MAIN_CI_WORKFLOW,
+            "status": "completed",
+            "url": "https://github.com/example/repo/actions/runs/30629180908",
+            "workflowName": MAIN_CI_WORKFLOW,
+        },
+    ]
+    parent_view = {
+        "conclusion": "cancelled",
+        "createdAt": "2026-07-31T12:02:54Z",
+        "databaseId": 30629180908,
+        "headSha": REGRESSION_HEAD,
+        "jobs": [
+            {
+                "conclusion": "failure",
+                "databaseId": 91151385123,
+                "name": BYOC_COMPOSE_REUSABLE_JOB,
+                "status": "completed",
+                "url": "https://github.com/example/repo/actions/runs/30629180908/job/91151385123",
+            }
+        ],
+        "status": "completed",
+        "url": "https://github.com/example/repo/actions/runs/30629180908",
+        "workflowName": MAIN_CI_WORKFLOW,
+    }
+
+    def fake_gh_run(_root: Path, args: list[str], *, timeout: int = 15) -> subprocess.CompletedProcess[str]:
+        del timeout
+        if args[1:3] == ["run", "list"]:
+            return subprocess.CompletedProcess(args, 0, json.dumps(regression_runs), "")
+        if args[1:3] == ["run", "view"]:
+            return subprocess.CompletedProcess(args, 0, json.dumps(parent_view), "")
+        return subprocess.CompletedProcess(args, 1, "", "unexpected gh command")
+
+    with (
+        patch("github_ci_evidence.shutil.which", return_value="/usr/bin/gh"),
+        patch("github_ci_evidence.run", side_effect=fake_gh_run),
+        patch(
+            "github_ci_evidence.ci_from_public_html",
+            return_value={
+                "source": "github_public_html",
+                "status": "not_found_for_head",
+                "conclusion": None,
+                "head_matches": False,
+            },
+        ),
+    ):
+        selected_main = ci_from_gh(Path.cwd(), REGRESSION_HEAD, "commercial", workflow_name=MAIN_CI_WORKFLOW)
+        default_main = ci_status(Path.cwd(), REGRESSION_HEAD, "commercial")
+        workflow_evidence = commercial_workflow_evidence(Path.cwd(), REGRESSION_HEAD, "commercial")
+
+    if selected_main.get("workflow") != MAIN_CI_WORKFLOW or selected_main.get("conclusion") != "cancelled":
+        failures.append(f"87ee537 main CI selector regression: {selected_main}")
+    if default_main.get("workflow") != MAIN_CI_WORKFLOW or default_main.get("conclusion") != "cancelled":
+        failures.append(f"87ee537 default ci_status regression: {default_main}")
+    regression_evidence = workflow_evidence["evidence"]
+    if regression_evidence["agentops_mis_ci"].get("conclusion") != "cancelled":
+        failures.append(f"87ee537 main CI must remain cancelled: {regression_evidence}")
+    if regression_evidence["byoc_compose"].get("conclusion") != "failure":
+        failures.append(f"87ee537 Compose reusable job must remain failed: {regression_evidence}")
+    if regression_evidence["byoc_cross_schema_v9_to_v11"].get("conclusion") != "success":
+        failures.append(f"87ee537 cross-schema evidence must remain independently successful: {regression_evidence}")
+    if workflow_evidence.get("ready") is not False:
+        failures.append(f"87ee537 must not be promotion-ready: {workflow_evidence}")
 
     redacted = redact("Authorization: placeholder-token-value")
     if "Authorization:" in redacted:
@@ -89,6 +210,14 @@ def main() -> int:
             "short_sha_rejected": short_only.get("head_matches") is False,
             "failed_status_rejected": failed.get("conclusion") is None,
             "completed_without_success_rejected": completed_without_success.get("conclusion") is None,
+            "wrong_workflow_rejected": wrong_workflow.get("head_matches") is False,
+            "sidebar_workflow_text_rejected": sidebar_only_main.get("head_matches") is False,
+            "regression_87ee537": {
+                "agentops_mis_ci": regression_evidence["agentops_mis_ci"].get("conclusion"),
+                "byoc_compose": regression_evidence["byoc_compose"].get("conclusion"),
+                "byoc_cross_schema_v9_to_v11": regression_evidence["byoc_cross_schema_v9_to_v11"].get("conclusion"),
+                "promotion_ready": workflow_evidence.get("ready"),
+            },
             "incomplete_http_response_failed_closed": (
                 incomplete_body is None
                 and "IncompleteRead" in str(incomplete_error)

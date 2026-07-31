@@ -9,7 +9,7 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
-from github_ci_evidence import ci_status as shared_ci_status
+from github_ci_evidence import commercial_workflow_evidence
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -285,7 +285,7 @@ def main() -> int:
 
     head_sha = git_text(["rev-parse", "HEAD"])
     branch = current_branch()
-    ci = shared_ci_status(ROOT, head_sha, branch, required_before_ready=True)
+    promotion_workflows = commercial_workflow_evidence(ROOT, head_sha, branch)
     packets = [
         {"packet": packet, "status": status, "source": "docs/COMMERCIAL_EVIDENCE_PACKET_INDEX.md"}
         for packet, status in PACKET_STATUS.items()
@@ -302,7 +302,8 @@ def main() -> int:
             "upstream_sync": upstream_sync(),
             "working_tree_entries": len(status_entries()),
         },
-        "ci": ci,
+        "ci": promotion_workflows["evidence"]["agentops_mis_ci"],
+        "promotion_workflows": promotion_workflows,
         "source_docs": [str(path.relative_to(ROOT)) for path in SOURCE_DOCS],
         "clean_room_lanes": lane_status(),
         "packet_status": packets,
