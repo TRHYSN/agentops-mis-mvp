@@ -26,9 +26,14 @@ then
 fi
 
 derived_dsn_files=
+migration_receipt=
 remove_derived_dsn_files() {
   status=$?
   trap - 0 1 2 15
+  if [ -n "$migration_receipt" ]; then
+    rm -f "$migration_receipt" || status=75
+    migration_receipt=
+  fi
   for derived_dsn_file in $derived_dsn_files; do
     rm -f "$derived_dsn_file" || status=75
   done
@@ -125,7 +130,31 @@ unset AGENTOPS_POSTGRES_ENTITLEMENT_ADMIN_DATABASE
 unset AGENTOPS_POSTGRES_ENTITLEMENT_ADMIN_USER
 
 cd "$next_app_root"
-npm run migrate:postgres >/dev/null 2>&1 || exit 71
+if ! migration_receipt=$(
+  mktemp "${TMPDIR:-/tmp}/agentops-restore-migration.XXXXXXXX"
+); then
+  printf '%s\n' "restore_provision_migration_failed:receipt_unavailable" >&2
+  exit 71
+fi
+chmod 600 "$migration_receipt"
+if ! npm run migrate:postgres >"$migration_receipt" 2>&1; then
+  migration_code=$(
+    sed -n \
+      's/.*"error_code":"\([a-z0-9_][a-z0-9_]*\)".*/\1/p' \
+      "$migration_receipt" |
+      tail -n 1
+  )
+  case "$migration_code" in
+    ""|*[!a-z0-9_]*) migration_code=unknown ;;
+  esac
+  printf '%s\n' \
+    "restore_provision_migration_failed:$migration_code" >&2
+  rm -f "$migration_receipt" || exit 75
+  migration_receipt=
+  exit 71
+fi
+rm -f "$migration_receipt" || exit 75
+migration_receipt=
 unset AGENTOPS_POSTGRES_MIGRATOR_DSN_FILE
 rm -f "$migrator_restore_dsn" || exit 75
 derived_dsn_files="$runtime_restore_dsn $admin_restore_dsn"

@@ -259,6 +259,8 @@ async function run() {
       '    log "provision_source:migrator_components:$last"',
       '    log "migrate:$last"',
       '    if [ "${FAKE_MIGRATE_FAIL:-false}" = true ]; then',
+      "      printf '%s\\n' 'restore_provision_migration_failed:schema_fixture_failed' >&2",
+      '      printf "%s\\n" "$POSTGRES_PASSWORD $AGENTOPS_POSTGRES_DSN" >&2',
       "      exit 71",
       "    fi",
       '    [ -d "$FAKE_DB_STATE/$last" ] || exit 45',
@@ -1019,6 +1021,10 @@ async function run() {
       FAKE_MIGRATE_FAIL: "true",
     });
     assertFailed(failedProvision, /restore_provisioning_failed/);
+    assert.match(
+      failedProvision.stderr,
+      /restore_provision_migration_failed:schema_fixture_failed/,
+    );
     assert.equal(
       await pathExists(join(databaseState, failedProvisionDatabase)),
       false,

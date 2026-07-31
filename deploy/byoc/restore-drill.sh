@@ -24,6 +24,14 @@ for required_file in "$backup" "$checksum_file" "$commit_file"; do
 done
 
 staging=
+validation_log=
+remove_validation_log() {
+  if [ -n "$validation_log" ]; then
+    rm -f "$validation_log" || return 1
+    validation_log=
+  fi
+}
+
 remove_restore_staging() {
   if [ -n "$staging" ]; then
     if [ -d "$staging" ] && [ ! -L "$staging" ]; then
@@ -37,6 +45,7 @@ remove_restore_staging() {
 cleanup_staging_on_exit() {
   status=$?
   trap - 0 1 2 15
+  remove_validation_log || status=1
   remove_restore_staging || status=1
   exit "$status"
 }
@@ -176,6 +185,10 @@ cleanup_on_exit() {
     printf '%s\n' "restore_staging_cleanup_failed" >&2
     status=1
   fi
+  if ! remove_validation_log; then
+    printf '%s\n' "restore_validation_log_cleanup_failed" >&2
+    status=1
+  fi
   exit "$status"
 }
 trap 'cleanup_on_exit "$?"' 0
@@ -191,10 +204,34 @@ docker compose --env-file "$env_file" -f "$compose_file" exec -T postgres \
   sh -ceu 'pg_restore --username "$POSTGRES_USER" --dbname "$1" --no-owner --no-privileges --exit-on-error' sh "$restore_database" \
   < "$backup"
 
+if ! validation_log=$(
+  mktemp "${TMPDIR:-/tmp}/agentops-byoc-restore-validation.XXXXXXXX"
+); then
+  printf '%s\n' "restore_validation_log_failed" >&2
+  exit 1
+fi
+chmod 600 "$validation_log"
 validation_status=0
 docker compose --env-file "$env_file" -f "$compose_file" run --rm \
   migrate sh /usr/local/lib/agentops/restore-provision.sh \
-  "$restore_database" >/dev/null 2>&1 || validation_status=$?
+  "$restore_database" >/dev/null 2>"$validation_log" || validation_status=$?
+validation_detail=$(
+  awk '
+    /^restore_provision_migration_failed:[a-z0-9_]+$/ {
+      value = $0
+    }
+    END {
+      if (value != "") print value
+    }
+  ' "$validation_log"
+)
+if ! remove_validation_log; then
+  printf '%s\n' "restore_validation_log_cleanup_failed" >&2
+  exit 1
+fi
+if [ -n "$validation_detail" ]; then
+  printf '%s\n' "$validation_detail" >&2
+fi
 
 case "$validation_status" in
   0) ;;
