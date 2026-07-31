@@ -124,6 +124,7 @@ function createFakeDriver() {
     failRestorePromotionRenameOnce: false,
     failAfterProductionRenameOnce: false,
     failAfterRestorePromotionRenameOnce: false,
+    failRestoreDrillAfterCreate: false,
     failRestoreDatabaseDrop: false,
     failQuarantineDrop: false,
     controlPlaneRunning: true,
@@ -320,6 +321,10 @@ function createFakeDriver() {
       assert.match(restoreDatabase, /^agentops_restore_[0-9a-f]{12}$/);
       state.restoreDatabases.add(restoreDatabase);
       state.databases.add(restoreDatabase);
+      if (state.failRestoreDrillAfterCreate) {
+        state.failRestoreDrillAfterCreate = false;
+        return failed("restore_drill_interrupted");
+      }
       return ok(JSON.stringify({
         ok: true,
         contract: "agentops_byoc_restore_drill_v4",
@@ -674,6 +679,48 @@ async function proveRollbackPostRenameCrashResume(root: string) {
   assert.equal(promotionResumed.phase, "rolled_back");
 }
 
+async function proveRestoreIntentOrphanRecovery(root: string) {
+  const stateDirectory = join(root, "restore-intent-orphan-state");
+  const driver = createFakeDriver();
+  const options = await lifecycleOptions(root, stateDirectory, driver);
+  const planned = await runLifecycle(
+    ["plan", "--to-image", TO_REFERENCE],
+    options,
+  );
+  await runLifecycle(
+    ["apply", "--plan-id", planned.operation_id],
+    options,
+  );
+  driver.state.failRestoreDrillAfterCreate = true;
+  driver.state.failRestoreDatabaseDrop = true;
+  await expectFailure(
+    () => runLifecycle([
+      "rollback",
+      "--confirm-restore-from-backup",
+      planned.operation_id,
+    ], options),
+    "lifecycle_backup_restore_verification_failed",
+  );
+  let status = await runLifecycle(["status"], options);
+  assert.equal(status.state.operation.database_swap.phase, "restore_intent");
+  assert.equal(status.state.operation.recovery_required, true);
+  assert.ok(
+    [...driver.state.databases].some((database) =>
+      database.startsWith("agentops_restore_")),
+  );
+
+  driver.state.failRestoreDatabaseDrop = false;
+  const resumed = await runLifecycle([
+    "rollback",
+    "--confirm-restore-from-backup",
+    planned.operation_id,
+  ], options);
+  assert.equal(resumed.phase, "rolled_back");
+  status = await runLifecycle(["status"], options);
+  assert.equal(status.state.operation.database_swap.phase, "cleanup_complete");
+  assert.equal(status.state.operation.quarantine_cleanup_pending, false);
+}
+
 async function proveQuarantineCleanupIsRecoverable(root: string) {
   const stateDirectory = join(root, "quarantine-cleanup-state");
   const driver = createFakeDriver();
@@ -696,6 +743,30 @@ async function proveQuarantineCleanupIsRecoverable(root: string) {
     status.state.operation.quarantine_database,
     /^agentops_quarantine_[0-9a-f]{12}$/,
   );
+  await expectFailure(
+    () => runLifecycle([
+      "cleanup",
+      "--confirm-operation-id",
+      "byoc_lifecycle_00000000000000000000",
+    ], options),
+    "lifecycle_cleanup_confirmation_required",
+  );
+  driver.state.failQuarantineDrop = false;
+  const cleaned = await runLifecycle([
+    "cleanup",
+    "--confirm-operation-id",
+    planned.operation_id,
+  ], options);
+  assert.equal(cleaned.phase, "rolled_back");
+  assert.equal(cleaned.quarantine_removed, true);
+  assert.equal(cleaned.quarantine_cleanup_pending, false);
+  assert.equal(cleaned.cleanup_idempotent, false);
+  const repeated = await runLifecycle([
+    "cleanup",
+    "--confirm-operation-id",
+    planned.operation_id,
+  ], options);
+  assert.equal(repeated.cleanup_idempotent, true);
 }
 
 async function proveFailureDoesNotPromote(root: string) {
@@ -777,10 +848,11 @@ try {
   await proveClosedLoop(root);
   await proveApplyCompensation(root);
   await provePostMigrationFailureStopsTarget(root);
-    await proveRollbackPreSwapCheckpointResume(root);
-    await proveRollbackRenameCheckpointResume(root);
-    await proveRollbackPostRenameCrashResume(root);
-    await proveQuarantineCleanupIsRecoverable(root);
+  await proveRollbackPreSwapCheckpointResume(root);
+  await proveRollbackRenameCheckpointResume(root);
+  await proveRollbackPostRenameCrashResume(root);
+  await proveRestoreIntentOrphanRecovery(root);
+  await proveQuarantineCleanupIsRecoverable(root);
   await proveFailureDoesNotPromote(root);
   await proveAuthorityDatabaseBinding(root);
   await proveConfigurationDriftFailsClosed(root);
@@ -798,13 +870,15 @@ try {
     pre_migration_compensation_verified: true,
     compensation_failure_marks_recovery_required: true,
     post_migration_failure_stops_target: true,
-      rollback_pre_swap_checkpoint_resume_verified: true,
-      rollback_rename_checkpoint_resume_verified: true,
-      rollback_post_rename_crash_resume_verified: true,
+    rollback_pre_swap_checkpoint_resume_verified: true,
+    rollback_rename_checkpoint_resume_verified: true,
+    rollback_post_rename_crash_resume_verified: true,
+    restore_intent_orphan_recovery_verified: true,
     authority_database_binding_verified: true,
     stopped_backup_order_verified: true,
     cleanup_failure_does_not_block_restart: true,
     quarantine_cleanup_pending_is_recoverable: true,
+    explicit_cleanup_retry_verified: true,
     backup_restore_rollback_verified: true,
     explicit_rollback_confirmation_verified: true,
     in_place_down_migration_forbidden: true,

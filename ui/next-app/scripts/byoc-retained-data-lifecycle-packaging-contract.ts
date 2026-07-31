@@ -26,8 +26,9 @@ const [
     source("../../../deploy/byoc/restore-drill.sh"),
   ]);
 
-assert.match(cli, /plan", "status", "apply", "rollback"/);
+assert.match(cli, /plan", "status", "apply", "rollback", "cleanup"/);
 assert.match(cli, /--confirm-restore-from-backup/);
+assert.match(cli, /--confirm-operation-id/);
 assert.match(cli, /lifecycle_plan_id_required/);
 assert.match(cli, /lifecycle_active_runs_must_be_drained/);
 assert.match(cli, /configurationSnapshot/);
@@ -47,6 +48,7 @@ assert.match(cli, /down_migration_performed: false/);
 assert.match(cli, /quarantine_cleanup_pending: true/);
 assert.match(cli, /boundAuthorityDatabase/);
 assert.match(cli, /databasePresence/);
+assert.match(cli, /restore_intent/);
 assert.match(cli, /production_rename_started/);
 assert.match(cli, /production_quarantined/);
 assert.match(cli, /restore_promotion_started/);
@@ -104,18 +106,21 @@ assert.match(readme, /retained-data-lifecycle\.mjs plan/);
 assert.match(readme, /retained-data-lifecycle\.mjs status/);
 assert.match(readme, /retained-data-lifecycle\.mjs apply/);
 assert.match(readme, /retained-data-lifecycle\.mjs rollback/);
+assert.match(readme, /retained-data-lifecycle\.mjs cleanup/);
 assert.match(readme, /--confirm-restore-from-backup/);
+assert.match(readme, /--confirm-operation-id/);
 assert.match(readme, /runtime connection's actual\s+authority database/);
 assert.match(readme, /stops the\s+control plane/);
 assert.match(readme, /fsyncs a committed backup bundle/);
 assert.match(readme, /production_rename_started/);
+assert.match(readme, /restore_intent/);
 assert.match(readme, /backup restore is authoritative/i);
 assert.match(readme, /quarantine_cleanup_pending=true/);
 assert.match(readme, /does not perform an\s+in-place down migration/i);
-assert.match(readme, /offline behavior and packaging evidence/i);
+assert.match(readme, /offline injected Docker driver/i);
 assert.match(
   readme,
-  /do not prove a real Docker\/Compose upgrade or rollback/i,
+  /does not prove a forward\s+upgrade across Schema versions/i,
 );
 
 assert.match(backup, /COMMITTED\.pending/);
@@ -140,6 +145,8 @@ console.log(JSON.stringify({
   schema_identity_binding_packaged: true,
   backup_commit_binding_packaged: true,
   restore_authoritative_rollback_packaged: true,
+  orphan_restore_recovery_packaged: true,
+  explicit_cleanup_retry_packaged: true,
   in_place_down_migration_forbidden: true,
   runtime_claims_omitted: true,
   credentials_omitted: true,

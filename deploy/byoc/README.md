@@ -318,26 +318,36 @@ Rollback is destructive and requires the operation ID as explicit confirmation:
 ```bash
 deploy/byoc/retained-data-lifecycle.mjs rollback \
   --confirm-restore-from-backup byoc_lifecycle_<20-hex-id>
+
+deploy/byoc/retained-data-lifecycle.mjs cleanup \
+  --confirm-operation-id byoc_lifecycle_<20-hex-id>
 ```
 
 For rollback, backup restore is authoritative. The command validates the exact
 committed bundle, runs the existing isolated restore/provisioning drill with the
 recorded source image, and promotes that verified database through a
 production/quarantine database-name swap. The state checkpoints
-`restore_verified`, `production_rename_started`, `production_quarantined`,
-`restore_promotion_started`, `restore_promoted`, and `rollback_verified`. After
-a host interruption, rerunning the same confirmed rollback reads `pg_database`
-and resumes from the persisted checkpoint instead of guessing from process
-memory. It starts the recorded source image and verifies health, Schema
-readiness, role boundaries, and the authority database before recording
+`restore_intent`, `restore_verified`, `production_rename_started`,
+`production_quarantined`, `restore_promotion_started`, `restore_promoted`, and
+`rollback_verified`. A restore database is never created before its
+deterministic name is durable. If an interruption leaves that database behind
+before verification is recorded, the next confirmed rollback deletes it and
+rebuilds it from the bound backup instead of adopting an unverified orphan.
+After a host interruption, rerunning the same confirmed rollback reads
+`pg_database` and resumes from the persisted checkpoint instead of guessing
+from process memory. It starts the recorded source image and verifies health,
+Schema readiness, role boundaries, and the authority database before recording
 `rolled_back`. The durable state first records the quarantine database with
 `quarantine_cleanup_pending=true`; only then does the command try to delete it
 and persist cleanup confirmation. A crash or cleanup failure therefore leaves a
 recoverable quarantine named in `status` instead of creating a false rollback
-receipt. It does not perform an in-place down migration and does not claim that
-a forward-migrated database is compatible with the old image. A failure after a
-rename checkpoint keeps the service stopped and marks recovery required;
-rerunning the same explicit rollback continues the verified database swap.
+receipt. Rerun the explicit `cleanup --confirm-operation-id` command to verify
+the restored installation, delete the recorded quarantine if it remains, and
+persist `cleanup_complete`. It does not perform an in-place down migration and
+does not claim that a forward-migrated database is compatible with the old
+image. A failure after a rename checkpoint keeps the service stopped and marks
+recovery required; rerunning the same explicit rollback continues the verified
+database swap.
 
 Do not remove the lifecycle state directory or its backup bundle while an
 operation is active. An operation lock left by process or host failure is not
@@ -346,10 +356,12 @@ the state and backup before a Human operator performs recovery. Never run
 `docker compose down --volumes` as part of this workflow.
 
 The lifecycle contracts use an offline injected Docker driver to exercise the
-state machine and packaging. They are offline behavior and packaging evidence
-only. They do not prove a real Docker/Compose upgrade or rollback; clean-host
-forward upgrade, failure injection, backup-authoritative rollback, and retained
-authority-data verification remain mandatory release gates.
+state machine, failure windows, and packaging. They are offline behavior and
+packaging evidence only. The reusable GitHub workflow separately runs a real
+Docker/Compose clean install and same-Schema image lifecycle with immutable
+digests, retained PostgreSQL volume and cluster identity, pre-backup authority,
+post-apply data, and backup-authoritative rollback. It does not prove a forward
+upgrade across Schema versions; that release gate remains open.
 
 The repository contracts exercise these fail-closed paths without a Docker
 daemon. They are packaging and offline behavior evidence only; a real

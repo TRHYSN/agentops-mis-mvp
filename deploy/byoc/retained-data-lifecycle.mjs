@@ -27,6 +27,16 @@ const SHA256 = /^[0-9a-f]{64}$/;
 const SAFE_DATABASE_IDENTIFIER = /^[a-z][a-z0-9_]{0,62}$/;
 const OPERATION_ID = /^byoc_lifecycle_[0-9a-f]{20}$/;
 const TERMINAL_PHASES = new Set(["applied", "rolled_back"]);
+const DATABASE_SWAP_PHASES = new Set([
+  "restore_intent",
+  "restore_verified",
+  "production_rename_started",
+  "production_quarantined",
+  "restore_promotion_started",
+  "restore_promoted",
+  "rollback_verified",
+  "cleanup_complete",
+]);
 const moduleDirectory = dirname(fileURLToPath(import.meta.url));
 const defaultRepositoryRoot = resolve(moduleDirectory, "../..");
 
@@ -120,7 +130,7 @@ function appendEvent(operation, stage, outcome, now) {
 
 function parseArguments(arguments_) {
   const [command, ...tokens] = arguments_;
-  if (!new Set(["plan", "status", "apply", "rollback"]).has(command)) {
+  if (!new Set(["plan", "status", "apply", "rollback", "cleanup"]).has(command)) {
     throw new LifecycleError("lifecycle_command_invalid", "arguments");
   }
   const values = {};
@@ -141,6 +151,8 @@ function parseArguments(arguments_) {
       ? new Set(["--plan-id"])
       : command === "rollback"
         ? new Set(["--confirm-restore-from-backup"])
+        : command === "cleanup"
+          ? new Set(["--confirm-operation-id"])
         : new Set();
   if (Object.keys(values).some((key) => !allowed.has(key))) {
     throw new LifecycleError("lifecycle_arguments_invalid", "arguments");
@@ -804,7 +816,7 @@ function validatedDatabaseSwap(operation) {
     || !SAFE_DATABASE_IDENTIFIER.test(String(swap.authority_database || ""))
     || !SAFE_DATABASE_IDENTIFIER.test(String(swap.restore_database || ""))
     || !SAFE_DATABASE_IDENTIFIER.test(String(swap.quarantine_database || ""))
-    || !/^[a-z_]+$/.test(String(swap.phase || ""))
+    || !DATABASE_SWAP_PHASES.has(String(swap.phase || ""))
   ) {
     throw new LifecycleError(
       "lifecycle_database_swap_checkpoint_invalid",
@@ -1250,49 +1262,80 @@ async function rollback(context, values) {
         const suffix = state.operation.operation_id.slice(-12);
         const restoreDatabase = `agentops_restore_${suffix}`;
         const quarantineDatabase = `agentops_quarantine_${suffix}`;
-        const beforeRestore = await databasePresence(context, [
+        const beforeIntent = await databasePresence(context, [
           authorityDatabase,
           restoreDatabase,
           quarantineDatabase,
         ]);
         if (
-          !beforeRestore.has(authorityDatabase)
-          || beforeRestore.has(restoreDatabase)
-          || beforeRestore.has(quarantineDatabase)
+          !beforeIntent.has(authorityDatabase)
+          || beforeIntent.has(restoreDatabase)
+          || beforeIntent.has(quarantineDatabase)
         ) {
           throw new LifecycleError(
             "lifecycle_database_swap_state_invalid",
             "rollback_restore_preflight",
           );
         }
+        swap = {
+          authority_database: authorityDatabase,
+          restore_database: restoreDatabase,
+          quarantine_database: quarantineDatabase,
+          phase: "restore_intent",
+          updated_at: context.now().toISOString(),
+        };
+        state = await recordDatabaseSwapPhase(
+          context,
+          state,
+          swap,
+          "restore_intent",
+        );
+        swap = validatedDatabaseSwap(state.operation);
+      }
+
+      if (swap.phase === "restore_intent") {
+        const beforeRestore = await databasePresence(context, [
+          authorityDatabase,
+          swap.restore_database,
+          swap.quarantine_database,
+        ]);
+        if (
+          !beforeRestore.has(authorityDatabase)
+          || beforeRestore.has(swap.quarantine_database)
+        ) {
+          throw new LifecycleError(
+            "lifecycle_database_swap_state_invalid",
+            "rollback_restore_preflight",
+          );
+        }
+        if (beforeRestore.has(swap.restore_database)) {
+          await dropDatabase(
+            context,
+            swap.restore_database,
+            "rollback_orphan_restore_cleanup",
+          );
+        }
         await runRestoreDrill(
           context,
           state.operation.backup.path,
           state.operation.from.image_id,
-          restoreDatabase,
+          swap.restore_database,
         );
         const afterRestore = await databasePresence(context, [
           authorityDatabase,
-          restoreDatabase,
-          quarantineDatabase,
+          swap.restore_database,
+          swap.quarantine_database,
         ]);
         if (
           !afterRestore.has(authorityDatabase)
-          || !afterRestore.has(restoreDatabase)
-          || afterRestore.has(quarantineDatabase)
+          || !afterRestore.has(swap.restore_database)
+          || afterRestore.has(swap.quarantine_database)
         ) {
           throw new LifecycleError(
             "lifecycle_database_swap_state_invalid",
             "rollback_restore_verification",
           );
         }
-        swap = {
-          authority_database: authorityDatabase,
-          restore_database: restoreDatabase,
-          quarantine_database: quarantineDatabase,
-          phase: "restore_verified",
-          updated_at: context.now().toISOString(),
-        };
         state = await recordDatabaseSwapPhase(
           context,
           state,
@@ -1550,6 +1593,140 @@ async function rollback(context, values) {
   });
 }
 
+async function cleanup(context, values) {
+  return withLifecycleLock(context.stateDirectory, async () => {
+    let state = await readLifecycleState(context.stateDirectory);
+    const confirmation = String(
+      values["--confirm-operation-id"] || "",
+    ).trim();
+    if (
+      !state?.operation
+      || state.operation.phase !== "rolled_back"
+      || !OPERATION_ID.test(confirmation)
+      || confirmation !== state.operation.operation_id
+    ) {
+      throw new LifecycleError(
+        "lifecycle_cleanup_confirmation_required",
+        "cleanup_preflight",
+      );
+    }
+    const swap = validatedDatabaseSwap(state.operation);
+    if (
+      !swap
+      || swap.authority_database !== state.operation.authority_database
+      || swap.quarantine_database !== state.operation.quarantine_database
+      || !new Set(["rollback_verified", "cleanup_complete"]).has(swap.phase)
+    ) {
+      throw new LifecycleError(
+        "lifecycle_cleanup_state_invalid",
+        "cleanup_preflight",
+      );
+    }
+    const configuration = await configurationSnapshot(context);
+    if (JSON.stringify(configuration) !== JSON.stringify(state.operation.configuration)) {
+      throw new LifecycleError(
+        "lifecycle_configuration_changed",
+        "configuration_preflight",
+      );
+    }
+    const running = await runningInstallation(context);
+    if (running.image_id !== state.installation.image_id) {
+      throw new LifecycleError(
+        "lifecycle_running_image_changed",
+        "cleanup_preflight",
+      );
+    }
+    await schemaReadiness(
+      context,
+      state.installation.image_id,
+      state.installation.schema,
+      "cleanup_current",
+    );
+    await assertBoundAuthorityDatabase(
+      context,
+      state.operation.authority_database,
+    );
+    let present = await databasePresence(context, [
+      swap.authority_database,
+      swap.restore_database,
+      swap.quarantine_database,
+    ]);
+    if (
+      !present.has(swap.authority_database)
+      || present.has(swap.restore_database)
+    ) {
+      throw new LifecycleError(
+        "lifecycle_cleanup_state_invalid",
+        "cleanup_preflight",
+      );
+    }
+    const quarantinePresent = present.has(swap.quarantine_database);
+    if (
+      state.operation.quarantine_cleanup_pending !== true
+      && quarantinePresent
+    ) {
+      throw new LifecycleError(
+        "lifecycle_cleanup_state_invalid",
+        "cleanup_preflight",
+      );
+    }
+    if (quarantinePresent) {
+      await dropDatabase(
+        context,
+        swap.quarantine_database,
+        "rollback_quarantine_cleanup",
+      );
+    }
+    present = await databasePresence(context, [
+      swap.authority_database,
+      swap.restore_database,
+      swap.quarantine_database,
+    ]);
+    if (
+      !present.has(swap.authority_database)
+      || present.has(swap.restore_database)
+      || present.has(swap.quarantine_database)
+    ) {
+      throw new LifecycleError(
+        "lifecycle_cleanup_incomplete",
+        "cleanup_verification",
+      );
+    }
+    const completedAt = context.now().toISOString();
+    if (
+      state.operation.quarantine_cleanup_pending === true
+      || swap.phase !== "cleanup_complete"
+    ) {
+      state = {
+        ...state,
+        generation: state.generation + 1,
+        operation: appendEvent({
+          ...state.operation,
+          quarantine_cleanup_pending: false,
+          quarantine_removed_at:
+            state.operation.quarantine_removed_at || completedAt,
+          database_swap: {
+            ...swap,
+            phase: "cleanup_complete",
+            updated_at: completedAt,
+          },
+          last_failure: null,
+        }, "rollback_quarantine_cleanup", "succeeded", context.now),
+        updated_at: completedAt,
+      };
+      await writeLifecycleState(context.stateDirectory, state);
+    }
+    return receipt("cleanup", {
+      operation_id: state.operation.operation_id,
+      phase: state.operation.phase,
+      quarantine_removed: true,
+      quarantine_cleanup_pending: false,
+      cleanup_idempotent: !quarantinePresent,
+      state_generation: state.generation,
+    });
+  });
+}
+
 export async function runLifecycle(arguments_, options = {}) {
   const parsed = parseArguments(arguments_);
   const environment = { ...process.env, ...(options.environment || {}) };
@@ -1578,7 +1755,8 @@ export async function runLifecycle(arguments_, options = {}) {
   if (parsed.command === "plan") return plan(context, parsed.values);
   if (parsed.command === "status") return status(context);
   if (parsed.command === "apply") return apply(context, parsed.values);
-  return rollback(context, parsed.values);
+  if (parsed.command === "rollback") return rollback(context, parsed.values);
+  return cleanup(context, parsed.values);
 }
 
 const invokedAsMain = process.argv[1]
