@@ -27,6 +27,7 @@ RUNTIME_FILES = {
     "docs/AGENT_WORK_METHOD_BLOCK.md",
     "docs/PRIVATE_HOST_OPERATOR_RUNBOOK.md",
     "docs/PRIVATE_HOST_WORKER_SERVICE_ACCEPTANCE.md",
+    "docs/DEEP_LEARNING_EXPERIMENT_QUICKSTART.md",
     "docs/RELEASE_PROVENANCE.md",
     "docs/REMOTE_WORKER_OPERATIONS_RUNBOOK.md",
     "docs/SBOM_MINIMAL.md",
@@ -50,6 +51,8 @@ RUNTIME_PREFIXES = (
     "agentops_mis_core/",
     "agentops_mis_runtime/",
     "config/",
+    "incubator/research-lab/examples/",
+    "incubator/research-lab/research_lab/",
     "knowledge/",
     "static/",
 )
