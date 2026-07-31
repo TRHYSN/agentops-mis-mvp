@@ -10,8 +10,12 @@ COPY ui/next-app/ ./
 RUN npm run build
 
 FROM node:22-bookworm-slim@sha256:6c74791e557ce11fc957704f6d4fe134a7bc8d6f5ca4403205b2966bd488f6b3 AS runtime
+ARG AGENTOPS_BUILD_IDENTITY=local
+ARG AGENTOPS_SOURCE_REVISION=unknown
 ENV NODE_ENV=production \
     NEXT_TELEMETRY_DISABLED=1
+LABEL org.opencontainers.image.revision="${AGENTOPS_SOURCE_REVISION}" \
+    io.agentops.byoc.build-identity="${AGENTOPS_BUILD_IDENTITY}"
 RUN test "$(id -u node)" = "1000" \
     && test "$(id -g node)" = "1000"
 WORKDIR /opt/agentops

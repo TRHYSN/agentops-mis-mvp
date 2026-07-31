@@ -26,6 +26,9 @@ services:
     build:
       context: ../..
       dockerfile: deploy/byoc/Dockerfile
+      args:
+        AGENTOPS_BUILD_IDENTITY: ${AGENTOPS_BUILD_IDENTITY:-local}
+        AGENTOPS_SOURCE_REVISION: ${AGENTOPS_SOURCE_REVISION:-unknown}
     image: ${AGENTOPS_IMAGE:-agentops-mis-byoc:local}
     restart: "no"
     user: "0:0"
