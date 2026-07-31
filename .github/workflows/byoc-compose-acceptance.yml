@@ -1,7 +1,7 @@
 name: BYOC Docker Compose Acceptance
 
 on:
-  pull_request:
+  workflow_call:
   workflow_dispatch:
 
 permissions:
@@ -28,6 +28,9 @@ jobs:
         with:
           fetch-depth: 1
           persist-credentials: false
+
+      - name: Verify exact caller commit
+        run: test "$(git rev-parse HEAD)" = "${GITHUB_SHA}"
 
       - name: Declare acceptance scope
         run: |

@@ -7,6 +7,9 @@ const EXPECTED_ACTION_REFS = new Set([
   "actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065",
   "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02",
 ]);
+const EXPECTED_LOCAL_WORKFLOW_REFS = new Set([
+  "./.github/workflows/byoc-compose-acceptance.yml",
+]);
 const POSTGRES_IMAGE =
   "postgres:16-alpine@sha256:57c72fd2a128e416c7fcc499958864df5301e940bca0a56f58fddf30ffc07777";
 
@@ -29,6 +32,7 @@ async function run() {
     })),
   );
   let actionReferenceCount = 0;
+  let localWorkflowReferenceCount = 0;
   for (const workflow of workflows) {
     assert.match(
       workflow.source,
@@ -46,6 +50,14 @@ async function run() {
       ),
     ].map((match) => String(match[1] || ""));
     for (const reference of references) {
+      if (reference.startsWith("./")) {
+        localWorkflowReferenceCount += 1;
+        assert(
+          EXPECTED_LOCAL_WORKFLOW_REFS.has(reference),
+          `local reusable workflow ref is not reviewed: ${workflow.path}`,
+        );
+        continue;
+      }
       actionReferenceCount += 1;
       assert.match(
         reference,
@@ -59,6 +71,7 @@ async function run() {
     }
   }
   assert(actionReferenceCount > 0);
+  assert.equal(localWorkflowReferenceCount, EXPECTED_LOCAL_WORKFLOW_REFS.size);
 
   const ci = workflows.find((workflow) =>
     workflow.path.endsWith("/ci.yml"))?.source || "";
@@ -76,10 +89,19 @@ async function run() {
   assert.match(ci, /test:schema-fingerprint-postgres-contract/);
   assert.match(ci, /test:commercial-health-postgres-contract/);
   assert.match(ci, /test:byoc-backup-restore-behavior-contract/);
+  assert.match(
+    ci,
+    /uses:\s+\.\/\.github\/workflows\/byoc-compose-acceptance\.yml/,
+  );
 
   const byoc = workflows.find((workflow) =>
     workflow.path.endsWith("/byoc-compose-acceptance.yml"))?.source || "";
+  assert.match(byoc, /^\s+workflow_call:\s*$/m);
   assert.match(byoc, /persist-credentials:\s+false/);
+  assert.match(
+    byoc,
+    /test "\$\(git rev-parse HEAD\)" = "\$\{GITHUB_SHA\}"/,
+  );
   assert.match(byoc, /timeout-minutes:\s+45/);
   assert.match(byoc, /docker compose[\s\S]+build --pull migrate/);
   assert.match(byoc, /up --detach --no-build --wait --wait-timeout 300 control-plane/);
@@ -93,8 +115,11 @@ async function run() {
     contract: "agentops_supply_chain_contract_v1",
     workflow_count: workflows.length,
     action_reference_count: actionReferenceCount,
+    local_workflow_reference_count: localWorkflowReferenceCount,
     actions_commit_pinned: true,
     actions_allowlisted: true,
+    local_reusable_workflows_allowlisted: true,
+    byoc_exact_caller_commit_verified: true,
     postgres_image_digest_pinned: true,
     workflow_permissions_read_only: true,
     locked_install: true,

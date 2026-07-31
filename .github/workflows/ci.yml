@@ -436,3 +436,7 @@ jobs:
 
       - name: Verify tracked source stayed unchanged
         run: git diff --exit-code
+
+  byoc-compose-acceptance:
+    name: BYOC Docker Compose acceptance
+    uses: ./.github/workflows/byoc-compose-acceptance.yml
