@@ -184,9 +184,30 @@ assert.match(
   /host-side PID\/PGID checks pass[\s\S]*prove through PostgreSQL[\s\S]*advisory lease `7157544864185932631` is available/,
 );
 assert.match(readme, /external[\s\S]*DBA[\s\S]*does not acquire this lock[\s\S]*operational\s+trust boundary/i);
-assert.match(
+assert.doesNotMatch(
   readme,
   /does not prove a forward\s+upgrade across Schema versions/i,
+);
+assert.match(
+  readme,
+  /byoc-cross-schema-v9-v11-acceptance\.yml[\s\S]*fixed historical v9 ancestor[\s\S]*Node 22/i,
+);
+assert.match(
+  readme,
+  /same PostgreSQL volume[\s\S]*exactly three manifest migrations[\s\S]*v11-only\s+probe/i,
+);
+assert.match(
+  readme,
+  /committed pre-upgrade backup as rollback authority[\s\S]*restarts the historical image/i,
+);
+assert.match(readme, /does not run a down migration/i);
+assert.match(
+  readme,
+  /execution evidence\s+belongs to the exact source commit and GitHub workflow run/i,
+);
+assert.match(
+  readme,
+  /Final BYOC promotion[\s\S]*green exact-head workflow results[\s\S]*same candidate/i,
 );
 
 assert.match(backup, /COMMITTED\.pending/);
