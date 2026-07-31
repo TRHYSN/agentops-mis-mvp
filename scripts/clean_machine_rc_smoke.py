@@ -37,11 +37,27 @@ DEFAULT_COMMANDS = [
     [PYTHON, "scripts/migration_rollback_smoke.py"],
     [PYTHON, "scripts/safe_closure_evidence_packet_smoke.py"],
 ]
-FORBIDDEN_TRACKED_PATTERNS = [
+FORBIDDEN_TRACKED_DIRECTORY_PATTERNS = [
     re.compile(r"(^|/)(node_modules|\.next|dist|__pycache__|\.pytest_cache|\.agentops_runtime)(/|$)"),
+]
+FORBIDDEN_TRACKED_FILE_PATTERNS = [
     re.compile(r"(^|/)(agentops_mis\.db|.*\.sqlite3?|.*\.db(?:-wal|-shm)?|\.env$|\.env\..*|.*\.log$|.*\.pid$|.*\.sock$|.*\.pem$|.*\.key$|.*\.jsonl$)"),
 ]
-ALLOWED_TRACKED = {".env.example"}
+ALLOWED_TRACKED_BASENAMES = {".env.example"}
+TRACKED_PATH_POLICY_CASES = {
+    ".env.example": False,
+    "deploy/byoc/.env.example": False,
+    "nested/customer/config/.env.example": False,
+    "node_modules/.env.example": True,
+    "dist/.env.example": True,
+    ".next/.env.example": True,
+    ".env": True,
+    "deploy/byoc/.env": True,
+    ".env.local": True,
+    "deploy/byoc/.env.local": True,
+    "deploy/byoc/.env.production": True,
+    "deploy/byoc/.env.example.local": True,
+}
 SECRET_PATTERNS = [
     re.compile(r"Authorization:", re.IGNORECASE),
     re.compile(r"Bearer\s+[A-Za-z0-9._~+/=-]+"),
@@ -77,14 +93,28 @@ def tracked_files(cwd: Path) -> list[str]:
     return [item for item in (proc.stdout or "").split("\0") if item]
 
 
+def is_forbidden_tracked_path(path: str) -> bool:
+    if any(pattern.search(path) for pattern in FORBIDDEN_TRACKED_DIRECTORY_PATTERNS):
+        return True
+    if Path(path).name in ALLOWED_TRACKED_BASENAMES:
+        return False
+    return any(pattern.search(path) for pattern in FORBIDDEN_TRACKED_FILE_PATTERNS)
+
+
+def tracked_path_policy_failures() -> list[str]:
+    failures: list[str] = []
+    for path, expected_forbidden in TRACKED_PATH_POLICY_CASES.items():
+        actual_forbidden = is_forbidden_tracked_path(path)
+        if actual_forbidden != expected_forbidden:
+            failures.append(
+                f"tracked path policy classified {path!r} as forbidden={actual_forbidden}, "
+                f"expected forbidden={expected_forbidden}"
+            )
+    return failures
+
+
 def forbidden_tracked(files: list[str]) -> list[str]:
-    result: list[str] = []
-    for path in files:
-        if path in ALLOWED_TRACKED:
-            continue
-        if any(pattern.search(path) for pattern in FORBIDDEN_TRACKED_PATTERNS):
-            result.append(path)
-    return sorted(result)
+    return sorted(path for path in files if is_forbidden_tracked_path(path))
 
 
 def redact(text: str) -> str:
@@ -178,6 +208,7 @@ def run_reset_delivery_board(clone_dir: Path, tmp_path: Path, env: dict[str, str
 
 def main() -> int:
     failures: list[str] = []
+    failures.extend(tracked_path_policy_failures())
     current_head = git_text(["rev-parse", "HEAD"])
     source_url = os.environ.get("AGENTOPS_CLEAN_RC_SOURCE", str(ROOT))
     command_results: list[dict[str, Any]] = []
