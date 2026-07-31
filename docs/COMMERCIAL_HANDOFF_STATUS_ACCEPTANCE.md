@@ -34,7 +34,8 @@ claims, introduce Postgres requirements, or merge PR #22.
 ## Known Limitations
 
 - This is handoff status only. Promotion preflight, promotion packet, receipt
-  plan, receipt recording and rerun bundle preview are separate
+  plan, receipt recording and rerun bundle preview remain separate
   generator-smoke guarded packets.
-- Strict promotion remains false until a dedicated promotion preflight gate is
-  implemented and current-head CI is green for that branch.
+- Strict promotion remains false until the exact source commit passes
+  current-head CI, the final real Hermes/OpenClaw acceptance, clean-customer
+  installation, retained-data upgrade/rollback, and the external restore gate.

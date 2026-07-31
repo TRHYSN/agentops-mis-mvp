@@ -168,8 +168,14 @@ def validate_sources(texts: dict[Path, str], failures: list[str]) -> None:
             failures,
         )
     require("Do not merge PR #22 directly." in breakdown_text, "PR #22 direct-merge block missing", failures)
+    normalized_breakdown = " ".join(breakdown_text.split())
     require(
-        "finish Lane 1 startup readiness and Lane 3 customer" in breakdown_text,
+        "final same-SHA dual-runtime acceptance and exact-head CI" in normalized_breakdown
+        and (
+            "Lane 7 clean-customer image installation, retained-data "
+            "upgrade/rollback, and an external restore drill before promotion"
+        )
+        in normalized_breakdown,
         "recommended current migration slices missing",
         failures,
     )
@@ -194,50 +200,50 @@ def lane_status() -> list[dict[str, str]]:
         {
             "lane": "Lane 0",
             "name": "Runtime Boundary",
-            "status": "accepted_locally",
-            "evidence": "production Next build and no-Python fail-closed boundary are smoke guarded.",
+            "status": "implemented_pending_promotion_evidence",
+            "evidence": "production Next and shared Vite builds fail closed on Python, SQLite, unsafe transport, and unknown production routes.",
         },
         {
             "lane": "Lane 1",
             "name": "PostgreSQL Schema And Startup",
-            "status": "in_progress",
-            "evidence": "explicit current-main baseline and v1-v5 bridge are present; startup readiness remains open.",
+            "status": "implemented_pending_promotion_evidence",
+            "evidence": "schema v11, thirteen pinned migrations, catalog fingerprinting, restricted runtime/admin roles, and PostgreSQL 16 contracts are implemented.",
         },
         {
             "lane": "Lane 2",
             "name": "Agent Identity And Plans",
-            "status": "in_progress",
-            "evidence": "fresh-main TypeScript identity, plan and evidence owners remain incomplete.",
+            "status": "implemented_pending_promotion_evidence",
+            "evidence": "TypeScript/PostgreSQL owns Agent identity, sessions, tasks, plans, runs, manifests, and governed evidence.",
         },
         {
             "lane": "Lane 3",
             "name": "Customer Delivery And Human Review",
-            "status": "in_progress",
-            "evidence": "Worker opt-in exists; production approval owner and fresh-main Human review remain open.",
+            "status": "implemented_pending_promotion_evidence",
+            "evidence": "TypeScript owns delivery requests and Human Session review with workspace, CSRF, replay, and sealed-evidence gates.",
         },
         {
             "lane": "Lane 4",
             "name": "Prepared Actions",
-            "status": "in_progress",
-            "evidence": "current action_id authority exists; commercial Postgres lease and receipt closure remains open.",
+            "status": "implemented_pending_promotion_evidence",
+            "evidence": "PostgreSQL owns immutable approval bindings, execution leases, terminal receipts, and response-loss reconciliation.",
         },
         {
             "lane": "Lane 5",
             "name": "Read Models And Supervision",
-            "status": "queued",
-            "evidence": "workspace read and Human supervision owners require selective fresh-main replay.",
+            "status": "implemented_pending_promotion_evidence",
+            "evidence": "TypeScript owns Human and Agent task, run, artifact, evidence-graph, and supervision reads.",
         },
         {
             "lane": "Lane 6",
             "name": "Enrollment And Entitlements",
-            "status": "queued",
-            "evidence": "production enrollment issue and entitlement owners remain open.",
+            "status": "implemented_pending_promotion_evidence",
+            "evidence": "TypeScript/PostgreSQL owns approval-gated enrollment, sessions, entitlements, quotas, cost reservations, and fail-closed denial audits.",
         },
         {
             "lane": "Lane 7",
             "name": "Deployment And Promotion",
-            "status": "queued",
-            "evidence": "customer install, upgrade, rollback and frozen-source runtime acceptance remain open.",
+            "status": "in_progress",
+            "evidence": "BYOC packaging, backup, and isolated restore contracts exist; exact-head CI, clean installation, retained-data upgrade/rollback, and final promotion remain open.",
         },
     ]
 
@@ -270,7 +276,7 @@ def main() -> int:
         "source_docs": [str(path.relative_to(ROOT)) for path in SOURCE_DOCS],
         "clean_room_lanes": lane_status(),
         "packet_status": packets,
-        "next_recommended_generator": "operator_confirmed_receipt_recording",
+        "next_recommended_generator": "final_same_sha_runtime_and_ci_acceptance",
         "commercial_limits": {
             "hosted_ready": False,
             "billing_ready": False,
