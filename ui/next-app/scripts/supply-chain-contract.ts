@@ -12,6 +12,8 @@ const EXPECTED_LOCAL_WORKFLOW_REFS = new Set([
 ]);
 const POSTGRES_IMAGE =
   "postgres:16-alpine@sha256:57c72fd2a128e416c7fcc499958864df5301e940bca0a56f58fddf30ffc07777";
+const REGISTRY_IMAGE =
+  "registry:2@sha256:a3d8aaa63ed8681a604f1dea0aa03f100d5895b6a58ace528858a7b332415373";
 
 async function run() {
   const workflowUrls = [
@@ -91,6 +93,14 @@ async function run() {
   assert.match(ci, /test:byoc-backup-restore-behavior-contract/);
   assert.match(
     ci,
+    /test:byoc-retained-data-lifecycle-packaging-contract/,
+  );
+  assert.match(
+    ci,
+    /test:byoc-retained-data-lifecycle-behavior-contract/,
+  );
+  assert.match(
+    ci,
     /uses:\s+\.\/\.github\/workflows\/byoc-compose-acceptance\.yml/,
   );
 
@@ -103,12 +113,28 @@ async function run() {
     /test "\$\(git rev-parse HEAD\)" = "\$\{GITHUB_SHA\}"/,
   );
   assert.match(byoc, /timeout-minutes:\s+45/);
+  assert(byoc.includes(REGISTRY_IMAGE));
+  assert.doesNotMatch(byoc, /^\s+registry:2\s*$/m);
   assert.match(byoc, /docker compose[\s\S]+build --pull migrate/);
   assert.match(byoc, /up --detach --no-build --wait --wait-timeout 300 control-plane/);
   assert.match(byoc, /deploy\/byoc\/backup\.sh/);
   assert.match(byoc, /deploy\/byoc\/restore-drill\.sh/);
+  assert.match(byoc, /retained-data-lifecycle\.mjs plan/);
+  assert.match(byoc, /retained-data-lifecycle\.mjs apply/);
+  assert.match(byoc, /retained-data-lifecycle\.mjs rollback/);
+  assert.match(byoc, /from_schema_contract == \.to_schema_contract/);
+  assert.match(byoc, /authority_database_bound == true/);
+  assert.match(byoc, /backup_restore_authoritative == true/);
+  assert.match(byoc, /quarantine_cleanup_pending == false/);
+  assert.match(byoc, /authority_after_rollback[^]*= "1"/);
+  assert.match(byoc, /probe_after_rollback[^]*= "0"/);
+  assert.match(byoc, /volume_identity_before/);
+  assert.match(byoc, /cluster_identifier_before/);
   assert.match(byoc, /down --volumes --remove-orphans/);
-  assert.match(byoc, /does not validate image upgrade or rollback/);
+  assert.match(
+    byoc,
+    /does not validate image upgrade or rollback across (?:schema|Schema) versions/,
+  );
 
   console.log(JSON.stringify({
     ok: true,
@@ -121,6 +147,7 @@ async function run() {
     local_reusable_workflows_allowlisted: true,
     byoc_exact_caller_commit_verified: true,
     postgres_image_digest_pinned: true,
+    registry_image_digest_pinned: true,
     workflow_permissions_read_only: true,
     locked_install: true,
     production_prune_ignores_scripts: true,
@@ -128,6 +155,10 @@ async function run() {
     cyclonedx_sbom_artifact: true,
     commercial_contracts_in_ci: true,
     real_byoc_compose_acceptance_in_ci: true,
+    real_byoc_same_schema_lifecycle_in_ci: true,
+    retained_postgres_volume_verified: true,
+    rollback_data_authority_verified: true,
+    cross_schema_upgrade_gate_open: true,
     byoc_upgrade_rollback_claimed: false,
     credentials_omitted: true,
   }));

@@ -17,6 +17,7 @@
     "migrate:postgres": "tsx scripts/migrate-postgres.ts",
     "check:postgres-schema": "tsx scripts/migrate-postgres.ts --check",
     "byoc:schema-identity": "tsx scripts/byoc-schema-identity.ts",
+    "byoc:database-identity": "tsx scripts/byoc-database-identity.ts",
     "typecheck": "tsc --noEmit",
     "test:supply-chain-contract": "tsx scripts/supply-chain-contract.ts",
     "test:control-plane-mode-contract": "tsx scripts/control-plane-mode-contract.ts",

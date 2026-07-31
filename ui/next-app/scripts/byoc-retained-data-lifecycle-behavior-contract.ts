@@ -67,6 +67,19 @@ function schemaIdentity(schema: SchemaIdentity) {
   });
 }
 
+function databaseIdentity(database: string) {
+  return JSON.stringify({
+    contract: "agentops_byoc_database_identity_v1",
+    ok: true,
+    authority_database: database,
+    runtime_role_verified: true,
+    database_contacted: true,
+    credentials_omitted: true,
+    sql_omitted: true,
+    row_data_omitted: true,
+  });
+}
+
 function readiness(schema: SchemaIdentity, operation = "check") {
   return JSON.stringify({
     contract: "agentops_postgres_schema_readiness_v1",
@@ -104,8 +117,17 @@ function createFakeDriver() {
     currentImageId: FROM_IMAGE_ID,
     failMigration: false,
     failMigrationWithCanary: false,
+    failPostStopActiveRunCheck: false,
+    failTargetReadiness: false,
+    failControlPlaneStart: false,
+    failDatabaseTerminationOnce: false,
+    failRestorePromotionRenameOnce: false,
+    failRestoreDatabaseDrop: false,
+    failQuarantineDrop: false,
     controlPlaneRunning: true,
     productionDatabase: "agentops",
+    runtimeDatabase: "agentops",
+    databases: new Set(["agentops"]),
     restoreDatabases: new Set<string>(),
     sql: [] as string[],
   };
@@ -156,7 +178,17 @@ function createFakeDriver() {
       if (joined.includes(" exec -T control-plane npm run byoc:schema-identity")) {
         return ok(`${schemaIdentity(schemaFor(state.currentImageId))}\n`);
       }
+      if (joined.includes(" exec -T control-plane npm run byoc:database-identity")) {
+        return ok(`${databaseIdentity(state.runtimeDatabase)}\n`);
+      }
       if (joined.includes(" exec -T postgres") && joined.includes("SELECT count(*)")) {
+        if (
+          state.failPostStopActiveRunCheck
+          && !state.controlPlaneRunning
+        ) {
+          state.failPostStopActiveRunCheck = false;
+          return failed("active_run_check_failed");
+        }
         return ok(`${state.activeRuns}\n`);
       }
       if (joined.includes(" exec -T postgres") && joined.includes("printf '%s'")) {
@@ -165,6 +197,57 @@ function createFakeDriver() {
       if (joined.includes(" exec -T postgres") && joined.includes("--command \"$1\"")) {
         const sql = args.at(-1) || "";
         state.sql.push(sql);
+        if (
+          state.failDatabaseTerminationOnce
+          && sql.includes("pg_terminate_backend")
+        ) {
+          state.failDatabaseTerminationOnce = false;
+          return failed("database_termination_failed");
+        }
+        if (
+          state.failQuarantineDrop
+          && sql.includes("DROP DATABASE IF EXISTS \"agentops_quarantine_")
+        ) {
+          return failed("quarantine_drop_failed");
+        }
+        if (
+          state.failRestorePromotionRenameOnce
+          && sql.includes("ALTER DATABASE \"agentops_restore_")
+          && sql.endsWith(" RENAME TO \"agentops\"")
+        ) {
+          state.failRestorePromotionRenameOnce = false;
+          return failed("restore_promotion_failed");
+        }
+        if (
+          state.failRestoreDatabaseDrop
+          && sql.includes("DROP DATABASE IF EXISTS \"agentops_restore_")
+        ) {
+          return failed("restore_cleanup_failed");
+        }
+        if (sql.startsWith("SELECT datname FROM pg_database")) {
+          return ok(
+            [...state.databases].filter((database) => sql.includes(`'${database}'`))
+              .sort()
+              .join("\n") + "\n",
+          );
+        }
+        const rename = sql.match(
+          /^ALTER DATABASE "([^"]+)" RENAME TO "([^"]+)"$/,
+        );
+        if (rename) {
+          const [, from, to] = rename;
+          if (!state.databases.has(from) || state.databases.has(to)) {
+            return failed("rename_state_invalid");
+          }
+          state.databases.delete(from);
+          state.databases.add(to);
+          return ok();
+        }
+        const drop = sql.match(/^DROP DATABASE IF EXISTS "([^"]+)"$/);
+        if (drop) {
+          state.databases.delete(drop[1]);
+          return ok();
+        }
         return ok();
       }
       if (joined.includes(" stop control-plane")) {
@@ -172,6 +255,7 @@ function createFakeDriver() {
         return ok();
       }
       if (joined.includes(" up --detach")) {
+        if (state.failControlPlaneStart) return failed("start_failed");
         const id = imageIdFor(image);
         if (!id) return failed();
         state.currentReference = image;
@@ -179,8 +263,16 @@ function createFakeDriver() {
         state.controlPlaneRunning = true;
         return ok();
       }
-      if (joined.includes(" run --rm --no-deps migrate npm run check:postgres-schema")) {
-        return ok(`${readiness(schemaFor(image))}\n`);
+      if (joined.includes(
+        " exec -T control-plane npm run check:postgres-schema",
+      )) {
+        if (
+          state.failTargetReadiness
+          && state.currentImageId === TO_IMAGE_ID
+        ) {
+          return failed("target_readiness_failed");
+        }
+        return ok(`${readiness(schemaFor(state.currentImageId))}\n`);
       }
       if (joined.includes(" run --rm --no-deps migrate")) {
         if (state.failMigration) {
@@ -209,6 +301,7 @@ function createFakeDriver() {
       const restoreDatabase = String(options.env?.AGENTOPS_RESTORE_DATABASE || "");
       assert.match(restoreDatabase, /^agentops_restore_[0-9a-f]{12}$/);
       state.restoreDatabases.add(restoreDatabase);
+      state.databases.add(restoreDatabase);
       return ok(JSON.stringify({
         ok: true,
         contract: "agentops_byoc_restore_drill_v4",
@@ -284,6 +377,10 @@ async function proveClosedLoop(root: string) {
   assert.equal(status.state.operation.recovery_required, false);
 
   driver.state.activeRuns = 0;
+  await expectFailure(
+    () => runLifecycle(["apply"], options),
+    "lifecycle_plan_id_required",
+  );
   const applied = await runLifecycle(
     ["apply", "--plan-id", planned.operation_id],
     options,
@@ -294,6 +391,18 @@ async function proveClosedLoop(root: string) {
   assert.equal(applied.backup_commit_marker, "agentops_byoc_backup_bundle_v2");
   assert.equal(applied.active_run_preflight_passed, true);
   assert.equal(applied.configuration_preflight_passed, true);
+  const stopIndex = driver.calls.findIndex(
+    (call) => call.args.join(" ").includes(" stop control-plane"),
+  );
+  const backupIndex = driver.calls.findIndex(
+    (call) => call.args[0]?.endsWith("/backup.sh"),
+  );
+  const migrationIndex = driver.calls.findIndex(
+    (call) => call.args.join(" ").includes(" run --rm --no-deps migrate"),
+  );
+  assert.ok(stopIndex >= 0);
+  assert.ok(stopIndex < backupIndex);
+  assert.ok(backupIndex < migrationIndex);
 
   await expectFailure(
     () => runLifecycle(["rollback"], options),
@@ -320,6 +429,8 @@ async function proveClosedLoop(root: string) {
   assert.equal(rolledBack.backup_restore_authoritative, true);
   assert.equal(rolledBack.down_migration_performed, false);
   assert.equal(rolledBack.explicit_confirmation_verified, true);
+  assert.equal(rolledBack.quarantine_removed, true);
+  assert.equal(rolledBack.quarantine_cleanup_pending, false);
   assert.ok(driver.state.sql.some((sql) => sql.includes("ALTER DATABASE")));
 
   status = await runLifecycle(["status"], options);
@@ -333,6 +444,144 @@ async function proveClosedLoop(root: string) {
   assert.deepEqual(
     (await readdir(stateDirectory)).filter((name) => name.endsWith(".tmp")),
     [],
+  );
+}
+
+async function proveApplyCompensation(root: string) {
+  const stateDirectory = join(root, "apply-compensation-state");
+  const driver = createFakeDriver();
+  const options = await lifecycleOptions(root, stateDirectory, driver);
+  const planned = await runLifecycle(["plan", "--to-image", TO_REFERENCE], options);
+  driver.state.failPostStopActiveRunCheck = true;
+  await expectFailure(
+    () => runLifecycle(["apply", "--plan-id", planned.operation_id], options),
+    "lifecycle_active_run_preflight_failed",
+  );
+  let status = await runLifecycle(["status"], options);
+  assert.equal(driver.state.controlPlaneRunning, true);
+  assert.equal(driver.state.currentImageId, FROM_IMAGE_ID);
+  assert.equal(status.state.operation.recovery_required, false);
+
+  driver.state.failPostStopActiveRunCheck = true;
+  driver.state.failControlPlaneStart = true;
+  await expectFailure(
+    () => runLifecycle(["apply", "--plan-id", planned.operation_id], options),
+    "lifecycle_active_run_preflight_failed",
+  );
+  status = await runLifecycle(["status"], options);
+  assert.equal(driver.state.controlPlaneRunning, false);
+  assert.equal(status.state.operation.recovery_required, true);
+}
+
+async function provePostMigrationFailureStopsTarget(root: string) {
+  const stateDirectory = join(root, "post-migration-failure-state");
+  const driver = createFakeDriver();
+  const options = await lifecycleOptions(root, stateDirectory, driver);
+  const planned = await runLifecycle(["plan", "--to-image", TO_REFERENCE], options);
+  driver.state.failTargetReadiness = true;
+  await expectFailure(
+    () => runLifecycle(["apply", "--plan-id", planned.operation_id], options),
+    "lifecycle_schema_readiness_failed",
+  );
+  const status = await runLifecycle(["status"], options);
+  assert.equal(driver.state.controlPlaneRunning, false);
+  assert.equal(status.state.operation.phase, "backup_ready");
+  assert.equal(status.state.operation.database_change_started, true);
+  assert.equal(status.state.operation.recovery_required, true);
+}
+
+async function proveRollbackPreSwapCheckpointResume(root: string) {
+  const stateDirectory = join(root, "rollback-pre-swap-checkpoint-state");
+  const driver = createFakeDriver();
+  const options = await lifecycleOptions(root, stateDirectory, driver);
+  const planned = await runLifecycle(["plan", "--to-image", TO_REFERENCE], options);
+  await runLifecycle(["apply", "--plan-id", planned.operation_id], options);
+  driver.state.failDatabaseTerminationOnce = true;
+  await expectFailure(
+    () => runLifecycle([
+      "rollback",
+      "--confirm-restore-from-backup",
+      planned.operation_id,
+    ], options),
+    "lifecycle_database_connection_termination_failed",
+  );
+  let status = await runLifecycle(["status"], options);
+  assert.equal(driver.state.controlPlaneRunning, false);
+  assert.equal(driver.state.currentImageId, TO_IMAGE_ID);
+  assert.equal(status.state.operation.phase, "applied");
+  assert.equal(status.state.operation.recovery_required, true);
+  assert.equal(
+    status.state.operation.database_swap.phase,
+    "production_rename_started",
+  );
+  const resumed = await runLifecycle([
+    "rollback",
+    "--confirm-restore-from-backup",
+    planned.operation_id,
+  ], options);
+  assert.equal(resumed.phase, "rolled_back");
+  status = await runLifecycle(["status"], options);
+  assert.equal(status.state.operation.phase, "rolled_back");
+}
+
+async function proveRollbackRenameCheckpointResume(root: string) {
+  const stateDirectory = join(root, "rollback-rename-checkpoint-state");
+  const driver = createFakeDriver();
+  const options = await lifecycleOptions(root, stateDirectory, driver);
+  const planned = await runLifecycle(["plan", "--to-image", TO_REFERENCE], options);
+  await runLifecycle(["apply", "--plan-id", planned.operation_id], options);
+  driver.state.failRestorePromotionRenameOnce = true;
+  await expectFailure(
+    () => runLifecycle([
+      "rollback",
+      "--confirm-restore-from-backup",
+      planned.operation_id,
+    ], options),
+    "lifecycle_database_rename_failed",
+  );
+  let status = await runLifecycle(["status"], options);
+  assert.equal(driver.state.controlPlaneRunning, false);
+  assert.equal(driver.state.currentImageId, TO_IMAGE_ID);
+  assert.equal(status.state.operation.phase, "applied");
+  assert.equal(status.state.operation.recovery_required, true);
+  assert.equal(
+    status.state.operation.database_swap.phase,
+    "restore_promotion_started",
+  );
+  assert.equal(driver.state.databases.has("agentops"), false);
+  const resumed = await runLifecycle([
+    "rollback",
+    "--confirm-restore-from-backup",
+    planned.operation_id,
+  ], options);
+  assert.equal(resumed.phase, "rolled_back");
+  status = await runLifecycle(["status"], options);
+  assert.equal(driver.state.controlPlaneRunning, true);
+  assert.equal(driver.state.currentImageId, FROM_IMAGE_ID);
+  assert.equal(status.state.operation.phase, "rolled_back");
+}
+
+async function proveQuarantineCleanupIsRecoverable(root: string) {
+  const stateDirectory = join(root, "quarantine-cleanup-state");
+  const driver = createFakeDriver();
+  const options = await lifecycleOptions(root, stateDirectory, driver);
+  const planned = await runLifecycle(["plan", "--to-image", TO_REFERENCE], options);
+  await runLifecycle(["apply", "--plan-id", planned.operation_id], options);
+  driver.state.failQuarantineDrop = true;
+  const rolledBack = await runLifecycle([
+    "rollback",
+    "--confirm-restore-from-backup",
+    planned.operation_id,
+  ], options);
+  assert.equal(rolledBack.phase, "rolled_back");
+  assert.equal(rolledBack.quarantine_removed, false);
+  assert.equal(rolledBack.quarantine_cleanup_pending, true);
+  const status = await runLifecycle(["status"], options);
+  assert.equal(status.state.operation.phase, "rolled_back");
+  assert.equal(status.state.operation.quarantine_cleanup_pending, true);
+  assert.match(
+    status.state.operation.quarantine_database,
+    /^agentops_quarantine_[0-9a-f]{12}$/,
   );
 }
 
@@ -352,8 +601,46 @@ async function proveFailureDoesNotPromote(root: string) {
   assert.equal(status.state.operation.database_change_started, true);
   assert.equal(status.state.operation.recovery_required, true);
   assert.equal(status.state.installation.image_id, FROM_IMAGE_ID);
+  await expectFailure(
+    () => runLifecycle(["apply", "--plan-id", planned.operation_id], options),
+    "lifecycle_rollback_required",
+  );
   const serialized = JSON.stringify(status);
   assert.doesNotMatch(serialized, /raw_secret_canary|postgres:\/\//);
+}
+
+async function proveAuthorityDatabaseBinding(root: string) {
+  const mismatchState = join(root, "authority-plan-mismatch-state");
+  const mismatchDriver = createFakeDriver();
+  const mismatchOptions = await lifecycleOptions(
+    root,
+    mismatchState,
+    mismatchDriver,
+  );
+  mismatchDriver.state.runtimeDatabase = "other_authority";
+  await expectFailure(
+    () => runLifecycle(["plan", "--to-image", TO_REFERENCE], mismatchOptions),
+    "lifecycle_authority_database_mismatch",
+  );
+
+  const driftState = join(root, "authority-apply-drift-state");
+  const driftDriver = createFakeDriver();
+  const driftOptions = await lifecycleOptions(root, driftState, driftDriver);
+  const planned = await runLifecycle(
+    ["plan", "--to-image", TO_REFERENCE],
+    driftOptions,
+  );
+  driftDriver.state.runtimeDatabase = "other_authority";
+  await expectFailure(
+    () => runLifecycle(
+      ["apply", "--plan-id", planned.operation_id],
+      driftOptions,
+    ),
+    "lifecycle_authority_database_mismatch",
+  );
+  const status = await runLifecycle(["status"], driftOptions);
+  assert.equal(status.state.operation.phase, "planned");
+  assert.equal(status.state.operation.backup, null);
 }
 
 async function proveConfigurationDriftFailsClosed(root: string) {
@@ -375,7 +662,13 @@ const root = await mkdtemp(join(tmpdir(), "agentops-byoc-lifecycle-contract-"));
 try {
   await chmod(root, 0o700);
   await proveClosedLoop(root);
+  await proveApplyCompensation(root);
+  await provePostMigrationFailureStopsTarget(root);
+  await proveRollbackPreSwapCheckpointResume(root);
+  await proveRollbackRenameCheckpointResume(root);
+  await proveQuarantineCleanupIsRecoverable(root);
   await proveFailureDoesNotPromote(root);
+  await proveAuthorityDatabaseBinding(root);
   await proveConfigurationDriftFailsClosed(root);
   console.log(JSON.stringify({
     contract: "agentops_byoc_retained_data_lifecycle_behavior_contract_v1",
@@ -388,6 +681,15 @@ try {
     atomic_state_verified: true,
     image_and_schema_bindings_verified: true,
     failure_state_not_promoted: true,
+    pre_migration_compensation_verified: true,
+    compensation_failure_marks_recovery_required: true,
+    post_migration_failure_stops_target: true,
+    rollback_pre_swap_checkpoint_resume_verified: true,
+    rollback_rename_checkpoint_resume_verified: true,
+    authority_database_binding_verified: true,
+    stopped_backup_order_verified: true,
+    cleanup_failure_does_not_block_restart: true,
+    quarantine_cleanup_pending_is_recoverable: true,
     backup_restore_rollback_verified: true,
     explicit_rollback_confirmation_verified: true,
     in_place_down_migration_forbidden: true,

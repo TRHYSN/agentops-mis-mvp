@@ -336,6 +336,8 @@ jobs:
           npm run test:postgres-role-boundary-contract
           npm run test:byoc-packaging-contract
           npm run test:byoc-backup-restore-behavior-contract
+          npm run test:byoc-retained-data-lifecycle-packaging-contract
+          npm run test:byoc-retained-data-lifecycle-behavior-contract
           npm run test:postgres-schema-contract
           npm run test:schema-fingerprint-postgres-contract
           npm run test:commercial-health-postgres-contract

@@ -112,12 +112,40 @@ fi
 printf '%s  database.dump\n' "$hash" > "$staging/SHA256SUMS"
 printf '%s\n' "agentops_byoc_backup_bundle_v2" > "$staging/COMMITTED.pending"
 
+fsync_path() {
+  node -e '
+    const fs = require("node:fs");
+    const descriptor = fs.openSync(process.argv[1], "r");
+    try {
+      fs.fsyncSync(descriptor);
+    } finally {
+      fs.closeSync(descriptor);
+    }
+  ' "$1"
+}
+
+if ! fsync_path "$staging/database.dump" ||
+  ! fsync_path "$staging/SHA256SUMS" ||
+  ! fsync_path "$staging/COMMITTED.pending"
+then
+  printf '%s\n' "backup_fsync_failed" >&2
+  exit 1
+fi
+
 mv "$staging/database.dump" "$output/database.dump"
 mv "$staging/SHA256SUMS" "$output/SHA256SUMS"
+if ! fsync_path "$output"; then
+  printf '%s\n' "backup_fsync_failed" >&2
+  exit 1
+fi
 mv "$staging/COMMITTED.pending" "$output/COMMITTED"
-published=true
 rmdir "$staging"
 staging=
+if ! fsync_path "$output" || ! fsync_path "$output_parent"; then
+  printf '%s\n' "backup_fsync_failed" >&2
+  exit 1
+fi
+published=true
 trap - 0 1 2 15
 
 printf '{"ok":true,"contract":"agentops_byoc_backup_v2","bundle_committed":true,"backup_created":true,"checksum_created":true,"credentials_omitted":true}\n'

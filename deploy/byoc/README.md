@@ -279,7 +279,7 @@ and `0600`; each update is fsynced to a new file and atomically renamed while
 an exclusive operation lock is held.
 
 Pull or otherwise load the target image first. The target must be addressed by
-an immutable registry digest, not a floating tag:
+an immutable registry digest, never a floating tag:
 
 ```bash
 deploy/byoc/retained-data-lifecycle.mjs plan \
@@ -295,20 +295,23 @@ deploy/byoc/retained-data-lifecycle.mjs apply \
 running container and PostgreSQL readiness, reads the static Schema identity
 from both images, binds the source and target image references and local image
 IDs, binds the Schema contract, expected catalog fingerprint, migration count,
-and migration-manifest hash, hashes the resolved Compose configuration, and
-reports whether active Runs still block apply. The current running image must
-already contain the v1 Schema identity command; upgrading an older image that
-lacks it requires a separately reviewed bootstrap procedure.
+and migration-manifest hash, and verifies that the runtime connection's actual
+authority database equals the PostgreSQL service's configured database. It
+hashes the resolved Compose configuration and reports whether active Runs still
+block apply. Both source and target images must package the v1 Schema identity
+command; older images require a separately reviewed bootstrap procedure.
 
 `apply` re-verifies all plan bindings and fails if Compose or `.env` resolution
-changed. It requires zero `running` or `waiting_approval` Runs, creates and
-validates a committed backup bundle, stops the control plane, checks active
-Runs again, and only then invokes the target image's one-shot forward migrator.
-The state advances to `applied` only after the target control plane is healthy
-and its manifest, catalog fingerprint, and database-role boundary pass. A
-failure after migration starts leaves the service stopped, keeps the state at
-`backup_ready`, and marks `recovery_required=true`; it never reports the target
-as installed.
+changed. It requires zero `running` or `waiting_approval` Runs, stops the
+control plane, checks active Runs and the bound database again, then creates and
+fsyncs a committed backup bundle while writes are impossible. The same durable
+state update binds that backup and arms recovery before invoking the target
+image's one-shot forward migrator, so a stopped-system backup is never reused
+after service writes resume. The state advances to `applied` only after the
+target control plane is healthy and its manifest, catalog fingerprint, and
+database-role boundary pass. A failure after recovery is armed leaves the
+service stopped, keeps the state at `backup_ready`, and marks
+`recovery_required=true`; it never reports the target as installed.
 
 Rollback is destructive and requires the operation ID as explicit confirmation:
 
@@ -319,14 +322,22 @@ deploy/byoc/retained-data-lifecycle.mjs rollback \
 
 For rollback, backup restore is authoritative. The command validates the exact
 committed bundle, runs the existing isolated restore/provisioning drill with the
-recorded source image, stops the control plane, and promotes that verified
-database through a production/quarantine database-name swap. It starts the
-recorded source image and verifies health and Schema readiness before deleting
-the quarantine database and recording `rolled_back`. It does not perform an
-in-place down migration and does not claim that a forward-migrated database is
-compatible with the old image. If post-swap verification fails, it attempts to
-restore the quarantined pre-rollback database and leaves the lifecycle state
-unpromoted; a failed compensation is explicitly marked for manual recovery.
+recorded source image, and promotes that verified database through a
+production/quarantine database-name swap. The state checkpoints
+`restore_verified`, `production_rename_started`, `production_quarantined`,
+`restore_promotion_started`, `restore_promoted`, and `rollback_verified`. After
+a host interruption, rerunning the same confirmed rollback reads `pg_database`
+and resumes from the persisted checkpoint instead of guessing from process
+memory. It starts the recorded source image and verifies health, Schema
+readiness, role boundaries, and the authority database before recording
+`rolled_back`. The durable state first records the quarantine database with
+`quarantine_cleanup_pending=true`; only then does the command try to delete it
+and persist cleanup confirmation. A crash or cleanup failure therefore leaves a
+recoverable quarantine named in `status` instead of creating a false rollback
+receipt. It does not perform an in-place down migration and does not claim that
+a forward-migrated database is compatible with the old image. A failure after a
+rename checkpoint keeps the service stopped and marks recovery required;
+rerunning the same explicit rollback continues the verified database swap.
 
 Do not remove the lifecycle state directory or its backup bundle while an
 operation is active. An operation lock left by process or host failure is not

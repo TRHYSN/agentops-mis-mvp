@@ -525,6 +525,9 @@ async function run() {
   assert.match(backupScript, /pg_dump/);
   assert.match(backupScript, /SHA256SUMS/);
   assert.match(backupScript, /COMMITTED\.pending/);
+  assert.match(backupScript, /fs\.fsyncSync/);
+  assert.match(backupScript, /fsync_path "\$output"/);
+  assert.match(backupScript, /fsync_path "\$output_parent"/);
   assert.match(backupScript, /mktemp -d/);
   assert.match(backupScript, /mkdir -m 700/);
   assert.match(backupScript, /backup_output_exists/);

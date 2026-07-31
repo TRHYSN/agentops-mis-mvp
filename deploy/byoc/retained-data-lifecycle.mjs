@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import { randomBytes } from "node:crypto";
-import { lstat, readFile } from "node:fs/promises";
+import { lstat, readFile, rm } from "node:fs/promises";
 import { spawnSync } from "node:child_process";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -19,6 +19,7 @@ import {
 
 const RECEIPT_CONTRACT = "agentops_byoc_retained_data_lifecycle_v1";
 const SCHEMA_IDENTITY_CONTRACT = "agentops_byoc_schema_identity_v1";
+const DATABASE_IDENTITY_CONTRACT = "agentops_byoc_database_identity_v1";
 const SCHEMA_READINESS_CONTRACT = "agentops_postgres_schema_readiness_v1";
 const IMAGE_DIGEST_REFERENCE = /@sha256:[0-9a-f]{64}$/;
 const IMAGE_ID = /^sha256:[0-9a-f]{64}$/;
@@ -332,6 +333,46 @@ async function runningSchemaIdentity(context) {
   );
 }
 
+async function runningAuthorityDatabase(context) {
+  const stage = "running_database_identity";
+  const output = checked(
+    await context.runner(
+      "docker",
+      composeArguments(context, [
+        "exec",
+        "-T",
+        "control-plane",
+        "npm",
+        "run",
+        "byoc:database-identity",
+        "--silent",
+      ]),
+      { cwd: context.repositoryRoot, env: commandEnvironment(context) },
+    ),
+    "lifecycle_running_database_identity_unavailable",
+    stage,
+  );
+  const parsed = jsonReceipt(
+    output,
+    DATABASE_IDENTITY_CONTRACT,
+    "lifecycle_running_database_identity_invalid",
+    stage,
+  );
+  const database = String(parsed.authority_database || "");
+  if (
+    !SAFE_DATABASE_IDENTIFIER.test(database)
+    || database === "postgres"
+    || parsed.runtime_role_verified !== true
+    || parsed.database_contacted !== true
+  ) {
+    throw new LifecycleError(
+      "lifecycle_running_database_identity_invalid",
+      stage,
+    );
+  }
+  return database;
+}
+
 async function imageSchemaIdentity(context, image, stage) {
   const output = checked(
     await context.runner(
@@ -364,14 +405,18 @@ async function imageSchemaIdentity(context, image, stage) {
 
 async function schemaReadiness(context, image, expected, operation) {
   const stage = `${operation}_schema_readiness`;
+  const expectedImageId = await imageId(context, image, stage);
+  const running = await runningInstallation(context);
+  if (running.image_id !== expectedImageId) {
+    throw new LifecycleError("lifecycle_running_image_mismatch", stage);
+  }
   const output = checked(
     await context.runner(
       "docker",
       composeArguments(context, [
-        "run",
-        "--rm",
-        "--no-deps",
-        "migrate",
+        "exec",
+        "-T",
+        "control-plane",
         "npm",
         "run",
         "check:postgres-schema",
@@ -379,7 +424,7 @@ async function schemaReadiness(context, image, expected, operation) {
       ]),
       {
         cwd: context.repositoryRoot,
-        env: commandEnvironment(context, image),
+        env: commandEnvironment(context),
       },
     ),
     "lifecycle_schema_readiness_failed",
@@ -595,6 +640,33 @@ async function productionDatabase(context) {
   return output;
 }
 
+async function boundAuthorityDatabase(context) {
+  const [serviceDatabase, runtimeDatabase] = await Promise.all([
+    productionDatabase(context),
+    runningAuthorityDatabase(context),
+  ]);
+  if (serviceDatabase !== runtimeDatabase) {
+    throw new LifecycleError(
+      "lifecycle_authority_database_mismatch",
+      "database_identity_preflight",
+    );
+  }
+  return runtimeDatabase;
+}
+
+async function assertBoundAuthorityDatabase(context, expected) {
+  if (
+    !SAFE_DATABASE_IDENTIFIER.test(String(expected || ""))
+    || expected === "postgres"
+    || await boundAuthorityDatabase(context) !== expected
+  ) {
+    throw new LifecycleError(
+      "lifecycle_authority_database_changed",
+      "database_identity_preflight",
+    );
+  }
+}
+
 function quoteDatabaseIdentifier(value) {
   if (!SAFE_DATABASE_IDENTIFIER.test(value)) {
     throw new LifecycleError("lifecycle_database_identifier_invalid", "database_swap");
@@ -628,6 +700,49 @@ async function postgresSql(context, sql, code, stage) {
     code,
     stage,
   );
+}
+
+async function postgresQuery(context, sql, code, stage) {
+  return checked(
+    await context.runner(
+      "docker",
+      composeArguments(context, [
+        "exec",
+        "-T",
+        "postgres",
+        "sh",
+        "-ceu",
+        "psql --username \"$POSTGRES_USER\" --dbname postgres --no-psqlrc --set ON_ERROR_STOP=1 --tuples-only --no-align --command \"$1\"",
+        "sh",
+        sql,
+      ]),
+      { cwd: context.repositoryRoot, env: commandEnvironment(context) },
+    ),
+    code,
+    stage,
+  );
+}
+
+async function databasePresence(context, databases) {
+  const expected = new Set(databases);
+  const output = await postgresQuery(
+    context,
+    `SELECT datname FROM pg_database WHERE datname IN (${
+      databases.map(quoteDatabaseLiteral).join(",")
+    }) ORDER BY datname`,
+    "lifecycle_database_presence_failed",
+    "database_swap_recovery",
+  );
+  const present = new Set(
+    output.split(/\r?\n/).map((line) => line.trim()).filter(Boolean),
+  );
+  if ([...present].some((database) => !expected.has(database))) {
+    throw new LifecycleError(
+      "lifecycle_database_presence_invalid",
+      "database_swap_recovery",
+    );
+  }
+  return present;
 }
 
 async function terminateDatabaseConnections(context, databases) {
@@ -678,6 +793,46 @@ async function runRestoreDrill(context, bundle, image, restoreDatabase) {
     "lifecycle_backup_restore_verification_failed",
     "rollback_restore_verification",
   );
+}
+
+function validatedDatabaseSwap(operation) {
+  const swap = operation.database_swap;
+  if (swap === null || swap === undefined) return null;
+  if (
+    typeof swap !== "object"
+    || swap.authority_database !== operation.authority_database
+    || !SAFE_DATABASE_IDENTIFIER.test(String(swap.authority_database || ""))
+    || !SAFE_DATABASE_IDENTIFIER.test(String(swap.restore_database || ""))
+    || !SAFE_DATABASE_IDENTIFIER.test(String(swap.quarantine_database || ""))
+    || !/^[a-z_]+$/.test(String(swap.phase || ""))
+  ) {
+    throw new LifecycleError(
+      "lifecycle_database_swap_checkpoint_invalid",
+      "database_swap_recovery",
+    );
+  }
+  return swap;
+}
+
+async function recordDatabaseSwapPhase(context, state, swap, phase) {
+  const recordedAt = context.now().toISOString();
+  const next = {
+    ...state,
+    generation: state.generation + 1,
+    operation: appendEvent({
+      ...state.operation,
+      database_swap: {
+        ...swap,
+        phase,
+        updated_at: recordedAt,
+      },
+      recovery_required: true,
+      last_failure: null,
+    }, `database_swap_${phase}`, "checkpointed", context.now),
+    updated_at: recordedAt,
+  };
+  await writeLifecycleState(context.stateDirectory, next);
+  return next;
 }
 
 function installation(image, schema, verifiedAt) {
@@ -733,6 +888,7 @@ async function plan(context, values) {
     const configuration = await configurationSnapshot(context);
     const currentImage = await runningInstallation(context);
     const currentSchema = await runningSchemaIdentity(context);
+    const authorityDatabase = await boundAuthorityDatabase(context);
     await schemaReadiness(
       context,
       currentImage.image_id,
@@ -768,6 +924,7 @@ async function plan(context, values) {
         null,
       ),
       configuration,
+      authority_database: authorityDatabase,
       plan_preflight: {
         active_run_count: activeRuns,
         apply_blocked: activeRuns !== 0,
@@ -775,6 +932,7 @@ async function plan(context, values) {
         target_image_present: true,
       },
       backup: null,
+      database_swap: null,
       database_change_started: false,
       recovery_required: false,
       last_failure: null,
@@ -805,6 +963,7 @@ async function plan(context, values) {
       to_schema_contract: targetSchema.contract,
       active_run_count: activeRuns,
       apply_blocked: activeRuns !== 0,
+      authority_database_bound: true,
       state_generation: state.generation,
     });
   });
@@ -823,16 +982,22 @@ async function apply(context, values) {
   return withLifecycleLock(context.stateDirectory, async () => {
     let state = await readLifecycleState(context.stateDirectory);
     const requestedPlan = String(values["--plan-id"] || "").trim();
-    if (!state?.operation || !new Set(["planned", "backup_ready"]).has(state.operation.phase)) {
+    if (!state?.operation) {
       throw new LifecycleError("lifecycle_apply_not_planned", "apply_preflight");
-    }
-    if (requestedPlan && requestedPlan !== state.operation.operation_id) {
-      throw new LifecycleError("lifecycle_plan_id_mismatch", "apply_preflight");
     }
     if (state.operation.database_change_started) {
       throw new LifecycleError("lifecycle_rollback_required", "apply_preflight");
     }
-    let controlPlaneStopped = false;
+    if (state.operation.phase !== "planned") {
+      throw new LifecycleError("lifecycle_apply_not_planned", "apply_preflight");
+    }
+    if (!OPERATION_ID.test(requestedPlan)) {
+      throw new LifecycleError("lifecycle_plan_id_required", "apply_preflight");
+    }
+    if (requestedPlan !== state.operation.operation_id) {
+      throw new LifecycleError("lifecycle_plan_id_mismatch", "apply_preflight");
+    }
+    let controlPlaneStopAttempted = false;
     try {
       const configuration = await configurationSnapshot(context);
       if (JSON.stringify(configuration) !== JSON.stringify(state.operation.configuration)) {
@@ -842,6 +1007,10 @@ async function apply(context, values) {
       if (current.image_id !== state.operation.from.image_id) {
         throw new LifecycleError("lifecycle_running_image_changed", "apply_preflight");
       }
+      await assertBoundAuthorityDatabase(
+        context,
+        state.operation.authority_database,
+      );
       await schemaReadiness(
         context,
         state.operation.from.image_id,
@@ -862,40 +1031,38 @@ async function apply(context, values) {
       }
       await assertNoActiveRuns(context);
 
-      if (state.operation.phase === "planned") {
-        const backupPath = plannedBackupPath(context, state.operation);
-        await runBackup(context, backupPath);
-        const backup = await validateBackupBundle(backupPath);
-        state = {
-          ...state,
-          generation: state.generation + 1,
-          operation: appendEvent({
-            ...state.operation,
-            phase: "backup_ready",
-            backup: {
-              ...backup,
-              created_at: context.now().toISOString(),
-              source_image_id: state.operation.from.image_id,
-              source_schema_contract: state.operation.from.schema.contract,
-            },
-            last_failure: null,
-          }, "backup", "succeeded", context.now),
-          updated_at: context.now().toISOString(),
-        };
-        await writeLifecycleState(context.stateDirectory, state);
-      } else {
-        plannedBackupPath(context, state.operation);
-        await validateBackupBundle(state.operation.backup.path);
-      }
-
+      controlPlaneStopAttempted = true;
       await stopControlPlane(context);
-      controlPlaneStopped = true;
       await assertNoActiveRuns(context);
+      if (
+        await productionDatabase(context)
+        !== state.operation.authority_database
+      ) {
+        throw new LifecycleError(
+          "lifecycle_authority_database_changed",
+          "database_identity_preflight",
+        );
+      }
+      const backupPath = plannedBackupPath(context, state.operation);
+      await runBackup(context, backupPath);
+      const backup = await validateBackupBundle(backupPath);
+      const backupRecorded = appendEvent({
+        ...state.operation,
+        phase: "backup_ready",
+        backup: {
+          ...backup,
+          created_at: context.now().toISOString(),
+          source_image_id: state.operation.from.image_id,
+          source_schema_contract: state.operation.from.schema.contract,
+          authority_database: state.operation.authority_database,
+        },
+        last_failure: null,
+      }, "backup", "succeeded", context.now);
       state = {
         ...state,
         generation: state.generation + 1,
         operation: appendEvent({
-          ...state.operation,
+          ...backupRecorded,
           database_change_started: true,
           recovery_required: true,
           last_failure: null,
@@ -957,14 +1124,39 @@ async function apply(context, values) {
       });
     } catch (error) {
       const databaseChanged = state?.operation?.database_change_started === true;
-      if (controlPlaneStopped && !databaseChanged) {
-        await startControlPlane(
-          context,
-          state.operation.from.image_id,
-          "apply_compensation_start",
-        ).catch(() => undefined);
+      let compensationFailed = false;
+      if (databaseChanged) {
+        await stopControlPlane(context).catch(() => {
+          compensationFailed = true;
+        });
+      } else if (controlPlaneStopAttempted) {
+        const backupPath = plannedBackupPath(context, state.operation);
+        try {
+          await rm(backupPath, { recursive: true, force: true });
+        } catch {
+          compensationFailed = true;
+        }
+        try {
+          await startControlPlane(
+            context,
+            state.operation.from.image_id,
+            "apply_compensation_start",
+          );
+          await waitForHealth(
+            context,
+            state.operation.from.image_id,
+            "apply_compensation_health",
+          );
+        } catch {
+          compensationFailed = true;
+        }
       }
-      await recordFailure(context, state, error, databaseChanged);
+      await recordFailure(
+        context,
+        state,
+        error,
+        databaseChanged || compensationFailed,
+      );
       throw error;
     }
   });
@@ -991,12 +1183,8 @@ async function rollback(context, values) {
         "rollback_preflight",
       );
     }
-    let stopped = false;
-    let originalRenamed = false;
-    let restoredPromoted = false;
-    let production;
-    let restoreDatabase;
-    let quarantineDatabase;
+    let controlPlaneStopAttempted = false;
+    let swapMutationArmed = false;
     try {
       const configuration = await configurationSnapshot(context);
       if (JSON.stringify(configuration) !== JSON.stringify(state.operation.configuration)) {
@@ -1004,6 +1192,15 @@ async function rollback(context, values) {
       }
       plannedBackupPath(context, state.operation);
       await validateBackupBundle(state.operation.backup.path);
+      if (
+        state.operation.backup.authority_database
+        !== state.operation.authority_database
+      ) {
+        throw new LifecycleError(
+          "lifecycle_backup_database_binding_invalid",
+          "rollback_preflight",
+        );
+      }
       if (await imageId(context, state.operation.from.image_id, "rollback_preflight")
         !== state.operation.from.image_id) {
         throw new LifecycleError("lifecycle_rollback_image_changed", "rollback_preflight");
@@ -1016,7 +1213,8 @@ async function rollback(context, values) {
       if (!sameSchema(fromSchema, state.operation.from.schema)) {
         throw new LifecycleError("lifecycle_rollback_schema_changed", "rollback_preflight");
       }
-      if (state.operation.phase === "applied") {
+      let swap = validatedDatabaseSwap(state.operation);
+      if (!swap && state.operation.phase === "applied") {
         const current = await runningInstallation(context);
         if (current.image_id !== state.installation.image_id) {
           throw new LifecycleError("lifecycle_running_image_changed", "rollback_preflight");
@@ -1027,39 +1225,175 @@ async function rollback(context, values) {
           state.installation.schema,
           "rollback_current",
         );
+        await assertBoundAuthorityDatabase(
+          context,
+          state.operation.authority_database,
+        );
         await assertNoActiveRuns(context);
       }
-      production = await productionDatabase(context);
-      const suffix = state.operation.operation_id.slice(-12);
-      restoreDatabase = `agentops_restore_${suffix}`;
-      quarantineDatabase = `agentops_quarantine_${suffix}`;
-
-      await runRestoreDrill(
-        context,
-        state.operation.backup.path,
-        state.operation.from.image_id,
-        restoreDatabase,
-      );
-      state = {
-        ...state,
-        generation: state.generation + 1,
-        operation: appendEvent({
-          ...state.operation,
-          recovery_required: true,
-          last_failure: null,
-        }, "rollback_restore_verification", "succeeded", context.now),
-        updated_at: context.now().toISOString(),
-      };
-      await writeLifecycleState(context.stateDirectory, state);
-
+      const authorityDatabase = state.operation.authority_database;
+      if (
+        !SAFE_DATABASE_IDENTIFIER.test(String(authorityDatabase || ""))
+        || authorityDatabase === "postgres"
+        || await productionDatabase(context) !== authorityDatabase
+      ) {
+        throw new LifecycleError(
+          "lifecycle_authority_database_changed",
+          "rollback_database_preflight",
+        );
+      }
+      controlPlaneStopAttempted = true;
       await stopControlPlane(context);
-      stopped = true;
-      await assertNoActiveRuns(context);
-      await terminateDatabaseConnections(context, [production, restoreDatabase]);
-      await renameDatabase(context, production, quarantineDatabase);
-      originalRenamed = true;
-      await renameDatabase(context, restoreDatabase, production);
-      restoredPromoted = true;
+
+      if (!swap) {
+        await assertNoActiveRuns(context);
+        const suffix = state.operation.operation_id.slice(-12);
+        const restoreDatabase = `agentops_restore_${suffix}`;
+        const quarantineDatabase = `agentops_quarantine_${suffix}`;
+        const beforeRestore = await databasePresence(context, [
+          authorityDatabase,
+          restoreDatabase,
+          quarantineDatabase,
+        ]);
+        if (
+          !beforeRestore.has(authorityDatabase)
+          || beforeRestore.has(restoreDatabase)
+          || beforeRestore.has(quarantineDatabase)
+        ) {
+          throw new LifecycleError(
+            "lifecycle_database_swap_state_invalid",
+            "rollback_restore_preflight",
+          );
+        }
+        await runRestoreDrill(
+          context,
+          state.operation.backup.path,
+          state.operation.from.image_id,
+          restoreDatabase,
+        );
+        const afterRestore = await databasePresence(context, [
+          authorityDatabase,
+          restoreDatabase,
+          quarantineDatabase,
+        ]);
+        if (
+          !afterRestore.has(authorityDatabase)
+          || !afterRestore.has(restoreDatabase)
+          || afterRestore.has(quarantineDatabase)
+        ) {
+          throw new LifecycleError(
+            "lifecycle_database_swap_state_invalid",
+            "rollback_restore_verification",
+          );
+        }
+        swap = {
+          authority_database: authorityDatabase,
+          restore_database: restoreDatabase,
+          quarantine_database: quarantineDatabase,
+          phase: "restore_verified",
+          updated_at: context.now().toISOString(),
+        };
+        state = await recordDatabaseSwapPhase(
+          context,
+          state,
+          swap,
+          "restore_verified",
+        );
+        swap = validatedDatabaseSwap(state.operation);
+      }
+
+      const production = swap.authority_database;
+      const restoreDatabase = swap.restore_database;
+      const quarantineDatabase = swap.quarantine_database;
+      let present = await databasePresence(context, [
+        production,
+        restoreDatabase,
+        quarantineDatabase,
+      ]);
+      const beforeProductionRename = present.has(production)
+        && present.has(restoreDatabase)
+        && !present.has(quarantineDatabase);
+      const productionQuarantined = !present.has(production)
+        && present.has(restoreDatabase)
+        && present.has(quarantineDatabase);
+      const restorePromoted = present.has(production)
+        && !present.has(restoreDatabase)
+        && present.has(quarantineDatabase);
+      if (
+        !beforeProductionRename
+        && !productionQuarantined
+        && !restorePromoted
+      ) {
+        throw new LifecycleError(
+          "lifecycle_database_swap_state_invalid",
+          "database_swap_recovery",
+        );
+      }
+
+      if (beforeProductionRename) {
+        state = await recordDatabaseSwapPhase(
+          context,
+          state,
+          swap,
+          "production_rename_started",
+        );
+        swap = validatedDatabaseSwap(state.operation);
+        swapMutationArmed = true;
+        await terminateDatabaseConnections(context, [production]);
+        await renameDatabase(context, production, quarantineDatabase);
+        state = await recordDatabaseSwapPhase(
+          context,
+          state,
+          swap,
+          "production_quarantined",
+        );
+        swap = validatedDatabaseSwap(state.operation);
+        present = await databasePresence(context, [
+          production,
+          restoreDatabase,
+          quarantineDatabase,
+        ]);
+      } else {
+        swapMutationArmed = true;
+      }
+
+      if (
+        !present.has(production)
+        && present.has(restoreDatabase)
+        && present.has(quarantineDatabase)
+      ) {
+        state = await recordDatabaseSwapPhase(
+          context,
+          state,
+          swap,
+          "restore_promotion_started",
+        );
+        swap = validatedDatabaseSwap(state.operation);
+        await renameDatabase(context, restoreDatabase, production);
+        state = await recordDatabaseSwapPhase(
+          context,
+          state,
+          swap,
+          "restore_promoted",
+        );
+        swap = validatedDatabaseSwap(state.operation);
+        present = await databasePresence(context, [
+          production,
+          restoreDatabase,
+          quarantineDatabase,
+        ]);
+      }
+      if (
+        !present.has(production)
+        || present.has(restoreDatabase)
+        || !present.has(quarantineDatabase)
+      ) {
+        throw new LifecycleError(
+          "lifecycle_database_swap_state_invalid",
+          "database_swap_recovery",
+        );
+      }
+
       await startControlPlane(
         context,
         state.operation.from.image_id,
@@ -1076,8 +1410,12 @@ async function rollback(context, values) {
         state.operation.from.schema,
         "rollback_restored",
       );
-      await dropDatabase(context, quarantineDatabase);
-      originalRenamed = false;
+      if (await runningAuthorityDatabase(context) !== production) {
+        throw new LifecycleError(
+          "lifecycle_authority_database_changed",
+          "rollback_restored",
+        );
+      }
       const completedAt = context.now().toISOString();
       const restoredInstallation = {
         ...state.operation.from,
@@ -1094,11 +1432,52 @@ async function rollback(context, values) {
           rollback_authority: "backup_restore",
           down_migration_performed: false,
           recovery_required: false,
+          quarantine_database: quarantineDatabase,
+          quarantine_cleanup_pending: true,
+          database_swap: {
+            ...swap,
+            phase: "rollback_verified",
+            updated_at: completedAt,
+          },
           last_failure: null,
         }, "rollback", "succeeded", context.now),
         updated_at: completedAt,
       };
       await writeLifecycleState(context.stateDirectory, state);
+      swapMutationArmed = false;
+
+      let quarantineRemoved = false;
+      let cleanupStatePersisted = false;
+      try {
+        await dropDatabase(context, quarantineDatabase);
+        quarantineRemoved = true;
+        const cleanupRecordedAt = context.now().toISOString();
+        const cleanupState = {
+          ...state,
+          generation: state.generation + 1,
+          operation: appendEvent({
+            ...state.operation,
+            quarantine_cleanup_pending: false,
+            quarantine_removed_at: cleanupRecordedAt,
+            database_swap: {
+              ...state.operation.database_swap,
+              phase: "cleanup_complete",
+              updated_at: cleanupRecordedAt,
+            },
+          }, "rollback_quarantine_cleanup", "succeeded", context.now),
+          updated_at: cleanupRecordedAt,
+        };
+        try {
+          await writeLifecycleState(context.stateDirectory, cleanupState);
+          state = cleanupState;
+          cleanupStatePersisted = true;
+        } catch {
+          // The persisted pending marker remains conservative after cleanup.
+        }
+      } catch {
+        // Rollback is complete; status exposes the retained quarantine for
+        // explicit operator cleanup instead of undoing a verified rollback.
+      }
       return receipt("rollback", {
         operation_id: state.operation.operation_id,
         phase: state.operation.phase,
@@ -1109,55 +1488,63 @@ async function rollback(context, values) {
         backup_restore_authoritative: true,
         down_migration_performed: false,
         explicit_confirmation_verified: true,
-        quarantine_removed: true,
+        quarantine_removed: quarantineRemoved,
+        quarantine_cleanup_pending:
+          !quarantineRemoved || !cleanupStatePersisted,
         state_generation: state.generation,
       });
     } catch (error) {
       let compensationFailed = false;
-      if (stopped && originalRenamed && production && quarantineDatabase) {
-        try {
-          if (restoredPromoted) {
-            const failedDatabase = `agentops_failed_${state.operation.operation_id.slice(-12)}`;
-            await terminateDatabaseConnections(context, [production]);
-            await renameDatabase(context, production, failedDatabase, "rollback_compensation");
-            await renameDatabase(
+      if (swapMutationArmed) {
+        await stopControlPlane(context).catch(() => {
+          compensationFailed = true;
+        });
+      } else {
+        const checkpoint = validatedDatabaseSwap(state?.operation || {});
+        const restoreDatabase = checkpoint?.restore_database;
+        if (restoreDatabase) {
+          try {
+            await dropDatabase(
               context,
-              quarantineDatabase,
-              production,
+              restoreDatabase,
               "rollback_compensation",
             );
-            originalRenamed = false;
-            await dropDatabase(context, failedDatabase, "rollback_compensation");
-          } else {
-            await renameDatabase(
-              context,
-              quarantineDatabase,
-              production,
-              "rollback_compensation",
-            );
-            originalRenamed = false;
+          } catch {
+            compensationFailed = true;
           }
-          await startControlPlane(
-            context,
-            state.installation.image_id,
-            "rollback_compensation",
-          );
-          await waitForHealth(
-            context,
-            state.installation.image_id,
-            "rollback_compensation",
-          );
-        } catch {
-          compensationFailed = true;
         }
-      } else if (restoreDatabase && !restoredPromoted) {
-        try {
-          await dropDatabase(context, restoreDatabase, "rollback_compensation");
-        } catch {
-          compensationFailed = true;
+        if (controlPlaneStopAttempted) {
+          try {
+            await startControlPlane(
+              context,
+              state.installation.image_id,
+              "rollback_compensation",
+            );
+            await waitForHealth(
+              context,
+              state.installation.image_id,
+              "rollback_compensation",
+            );
+          } catch {
+            compensationFailed = true;
+          }
+        }
+        if (!compensationFailed && checkpoint) {
+          state = {
+            ...state,
+            operation: {
+              ...state.operation,
+              database_swap: null,
+            },
+          };
         }
       }
-      await recordFailure(context, state, error, compensationFailed || originalRenamed);
+      await recordFailure(
+        context,
+        state,
+        error,
+        swapMutationArmed || compensationFailed,
+      );
       throw error;
     }
   });

@@ -483,6 +483,8 @@ jobs:
               and .backup_restore_authoritative == true
               and .down_migration_performed == false
               and .explicit_confirmation_verified == true
+              and .quarantine_removed == true
+              and .quarantine_cleanup_pending == false
             ' "${rollback_receipt}" > /dev/null
 
           authority_after_rollback="$(

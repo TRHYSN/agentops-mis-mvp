@@ -5,11 +5,21 @@ async function source(path: string) {
   return readFile(new URL(path, import.meta.url), "utf8");
 }
 
-const [cli, state, schemaIdentity, packageJson, readme, backup, restore] =
+const [
+  cli,
+  state,
+  schemaIdentity,
+  databaseIdentity,
+  packageJson,
+  readme,
+  backup,
+  restore,
+] =
   await Promise.all([
     source("../../../deploy/byoc/retained-data-lifecycle.mjs"),
     source("../../../deploy/byoc/retained-data-lifecycle-state.mjs"),
     source("./byoc-schema-identity.ts"),
+    source("./byoc-database-identity.ts"),
     source("../package.json"),
     source("../../../deploy/byoc/README.md"),
     source("../../../deploy/byoc/backup.sh"),
@@ -18,13 +28,29 @@ const [cli, state, schemaIdentity, packageJson, readme, backup, restore] =
 
 assert.match(cli, /plan", "status", "apply", "rollback"/);
 assert.match(cli, /--confirm-restore-from-backup/);
+assert.match(cli, /lifecycle_plan_id_required/);
 assert.match(cli, /lifecycle_active_runs_must_be_drained/);
 assert.match(cli, /configurationSnapshot/);
+assert.match(
+  cli,
+  /\"exec\",[\s\S]*?\"control-plane\",[\s\S]*?\"check:postgres-schema\"/,
+);
+assert.doesNotMatch(
+  cli,
+  /\"run\",[\s\S]*?\"migrate\",[\s\S]*?\"check:postgres-schema\"/,
+);
 assert.match(cli, /runBackup\(context, backupPath\)/);
 assert.match(cli, /validateBackupBundle/);
 assert.match(cli, /runRestoreDrill/);
 assert.match(cli, /rollback_authority: "backup_restore"/);
 assert.match(cli, /down_migration_performed: false/);
+assert.match(cli, /quarantine_cleanup_pending: true/);
+assert.match(cli, /boundAuthorityDatabase/);
+assert.match(cli, /databasePresence/);
+assert.match(cli, /production_rename_started/);
+assert.match(cli, /production_quarantined/);
+assert.match(cli, /restore_promotion_started/);
+assert.match(cli, /restore_promoted/);
 assert.doesNotMatch(cli, /down migration|down-migration|migrate:down|schema:down/i);
 assert.match(cli, /IMAGE_DIGEST_REFERENCE/);
 assert.match(cli, /migration_manifest_sha256/);
@@ -51,11 +77,18 @@ assert.match(schemaIdentity, /EXPECTED_POSTGRES_SCHEMA_FINGERPRINT/);
 assert.match(schemaIdentity, /POSTGRES_MIGRATION_MANIFEST/);
 assert.match(schemaIdentity, /migration_manifest_sha256/);
 assert.match(schemaIdentity, /database_contacted: false/);
+assert.match(databaseIdentity, /current_database\(\)/);
+assert.match(databaseIdentity, /runtime_role_verified: true/);
+assert.match(databaseIdentity, /database_contacted: true/);
 
 const scripts = JSON.parse(packageJson).scripts as Record<string, string>;
 assert.equal(
   scripts["byoc:schema-identity"],
   "tsx scripts/byoc-schema-identity.ts",
+);
+assert.equal(
+  scripts["byoc:database-identity"],
+  "tsx scripts/byoc-database-identity.ts",
 );
 assert.equal(
   scripts["test:byoc-retained-data-lifecycle-behavior-contract"],
@@ -72,7 +105,12 @@ assert.match(readme, /retained-data-lifecycle\.mjs status/);
 assert.match(readme, /retained-data-lifecycle\.mjs apply/);
 assert.match(readme, /retained-data-lifecycle\.mjs rollback/);
 assert.match(readme, /--confirm-restore-from-backup/);
+assert.match(readme, /runtime connection's actual\s+authority database/);
+assert.match(readme, /stops the\s+control plane/);
+assert.match(readme, /fsyncs a committed backup bundle/);
+assert.match(readme, /production_rename_started/);
 assert.match(readme, /backup restore is authoritative/i);
+assert.match(readme, /quarantine_cleanup_pending=true/);
 assert.match(readme, /does not perform an\s+in-place down migration/i);
 assert.match(readme, /offline behavior and packaging evidence/i);
 assert.match(
@@ -82,6 +120,9 @@ assert.match(
 
 assert.match(backup, /COMMITTED\.pending/);
 assert.match(backup, /mv "\$staging\/COMMITTED\.pending" "\$output\/COMMITTED"/);
+assert.match(backup, /fs\.fsyncSync/);
+assert.match(backup, /fsync_path "\$output"/);
+assert.match(backup, /fsync_path "\$output_parent"/);
 assert.match(restore, /restore_database_must_not_be_production/);
 assert.match(restore, /restore_provisioning_completed/);
 
