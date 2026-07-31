@@ -5,16 +5,21 @@ import {
   scryptSync,
 } from "node:crypto";
 import { spawnSync } from "node:child_process";
+import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
 import { Client } from "pg";
 
+import {
+  cleanupPostgresRoleBoundaryFixture,
+} from "./postgres-role-boundary-test-helper";
 import {
   HUMAN_SCRYPT_PARAMS,
 } from "../src/server/controlPlane/humanPasswordPolicy";
 import {
   assertPostgresEntitlementAdminRoleBoundary,
   assertPostgresRuntimeRoleBoundary,
+  derivedPostgresFunctionOwnerRole,
   POSTGRES_MIGRATION_MANIFEST,
   runPostgresSchemaCommand,
   SchemaReadinessError,
@@ -26,9 +31,16 @@ const applicationSchema = `role_boundary_${suffix}`;
 const runtimeApiSchema = `role_api_${suffix}`;
 const runtimeRole = `role_runtime_${suffix}`;
 const entitlementAdminRole = `role_ent_admin_${suffix}`;
+const functionOwnerRole = derivedPostgresFunctionOwnerRole(
+  applicationSchema,
+  runtimeApiSchema,
+);
+const functionOwnerMembershipProbe = `role_fn_probe_${suffix}`;
 const runtimePassword = `${randomBytes(24).toString("base64url")}R1!`;
 const entitlementAdminPassword =
   `${randomBytes(24).toString("base64url")}A1!`;
+const functionOwnerPasswordProbe =
+  `${randomBytes(24).toString("base64url")}F1!`;
 const operatorPassword = `${randomBytes(24).toString("base64url")}O1!`;
 const operatorId = `usr_role_operator_${suffix}`;
 const workspaceId = `ws_role_boundary_${suffix}`;
@@ -36,6 +48,12 @@ const agentId = `agt_role_boundary_${suffix}`;
 const taskId = `tsk_role_boundary_${suffix}`;
 const runId = `run_role_boundary_${suffix}`;
 const startScript = fileURLToPath(new URL("./start.mjs", import.meta.url));
+const schemaReadinessSource = fileURLToPath(
+  new URL(
+    "../src/server/controlPlane/schemaReadiness.ts",
+    import.meta.url,
+  ),
+);
 let activeCheck = "initialize";
 
 function quotedIdentifier(value: string) {
@@ -70,8 +88,72 @@ function boundedOutput(result: ReturnType<typeof spawnSync>) {
   assert.equal(output.includes(baseDsn), false);
   assert.equal(output.includes(runtimePassword), false);
   assert.equal(output.includes(entitlementAdminPassword), false);
+  assert.equal(output.includes(functionOwnerPasswordProbe), false);
   assert.equal(output.includes("postgresql://"), false);
   return output;
+}
+
+function assertPreMigrationFunctionOwnerHandoffSourceContract() {
+  const source = readFileSync(schemaReadinessSource, "utf8");
+  const commandStart = source.indexOf(
+    "export async function runPostgresSchemaCommand(",
+  );
+  const commandEnd = source.indexOf(
+    "\nexport async function ",
+    commandStart + 1,
+  );
+  assert.ok(commandStart >= 0);
+  const commandSource = source.slice(
+    commandStart,
+    commandEnd >= 0 ? commandEnd : undefined,
+  );
+  const prepareIndex = commandSource.indexOf(
+    "await prepareMigrationFunctionOwner(",
+  );
+  const migrateIndex = commandSource.indexOf(
+    "await migrate(client, manifest)",
+  );
+  const finalizeIndex = commandSource.indexOf(
+    "await finalizeFunctionOwner(",
+    migrateIndex,
+  );
+  const provisionIndex = commandSource.indexOf(
+    "await provisionPostgresRuntimeRoleBoundary(",
+    finalizeIndex,
+  );
+  assert.ok(prepareIndex >= 0);
+  assert.ok(prepareIndex < migrateIndex);
+  assert.ok(migrateIndex < finalizeIndex);
+  assert.ok(finalizeIndex < provisionIndex);
+
+  const prepareStart = source.indexOf(
+    "async function prepareMigrationFunctionOwner(",
+  );
+  const prepareEnd = source.indexOf(
+    "\nasync function installRuntimeCostApi(",
+    prepareStart,
+  );
+  assert.ok(prepareStart >= 0);
+  assert.ok(prepareEnd > prepareStart);
+  const prepareSource = source.slice(prepareStart, prepareEnd);
+  const roleIndex = prepareSource.indexOf("await ensureFunctionOwnerRole(");
+  const capabilityIndex = prepareSource.indexOf("await prepareFunctionOwner(");
+  assert.ok(roleIndex >= 0);
+  assert.ok(roleIndex < capabilityIndex);
+
+  const capabilityStart = source.indexOf(
+    "async function prepareFunctionOwner(",
+  );
+  const capabilityEnd = source.indexOf(
+    "\nasync function transferApplicationSecurityDefiners(",
+    capabilityStart,
+  );
+  assert.ok(capabilityStart >= 0);
+  assert.ok(capabilityEnd > capabilityStart);
+  assert.match(
+    source.slice(capabilityStart, capabilityEnd),
+    /GRANT \$\{functionOwner\} TO \$\{migrator\}/,
+  );
 }
 
 function startCheck(
@@ -113,6 +195,67 @@ async function expectPermissionDenied(
       && typeof error === "object"
       && "code" in error
       && error.code === "42501"
+    ),
+  );
+}
+
+async function expectFunctionOwnerReadinessDenied(
+  runtime: Client,
+  entitlementAdmin: Client,
+) {
+  for (const readiness of [
+    () => assertPostgresRuntimeRoleBoundary(runtime, {
+      applicationSchema,
+      runtimeApiSchema,
+      runtimeRole,
+    }),
+    () => assertPostgresEntitlementAdminRoleBoundary(
+      entitlementAdmin,
+      {
+        applicationSchema,
+        runtimeApiSchema,
+        entitlementAdminRole,
+      },
+    ),
+  ]) {
+    await assert.rejects(
+      readiness(),
+      (error: unknown) => (
+        error instanceof SchemaReadinessError
+        && error.code === "postgres_function_owner_restriction_invalid"
+      ),
+    );
+  }
+}
+
+async function expectRuntimeApiFunctionSetDenied(
+  runtime: Client,
+  entitlementAdmin: Client,
+) {
+  await assert.rejects(
+    assertPostgresRuntimeRoleBoundary(runtime, {
+      applicationSchema,
+      runtimeApiSchema,
+      runtimeRole,
+    }),
+    (error: unknown) => (
+      error instanceof SchemaReadinessError
+      && error.code === "postgres_runtime_api_function_set_invalid"
+    ),
+  );
+  await assert.rejects(
+    assertPostgresEntitlementAdminRoleBoundary(
+      entitlementAdmin,
+      {
+        applicationSchema,
+        runtimeApiSchema,
+        entitlementAdminRole,
+      },
+    ),
+    (error: unknown) => (
+      error instanceof SchemaReadinessError
+      && error.code ===
+        "postgres_entitlement_admin_api_function_set_invalid"
     ),
   );
 }
@@ -234,8 +377,12 @@ async function run() {
   const owner = new Client({ connectionString: baseDsn });
   const createdRoles: string[] = [];
   const createdSchemas: string[] = [];
-  await owner.connect();
+  const cleanupClients: Client[] = [];
+  let contractError: unknown;
+  let contractFailed = false;
+  let successReceipt: Record<string, unknown> | undefined;
   try {
+    await owner.connect();
     const version = await owner.query<{ server_version_num: string }>(
       "SHOW server_version_num",
     );
@@ -258,7 +405,16 @@ async function run() {
       entitlementAdminRole,
       entitlementAdminPassword,
     });
-    createdRoles.push(runtimeRole, entitlementAdminRole);
+    createdRoles.push(
+      runtimeRole,
+      entitlementAdminRole,
+      functionOwnerRole,
+    );
+    await owner.query(
+      `CREATE ROLE ${quotedIdentifier(functionOwnerMembershipProbe)}
+       NOLOGIN NOINHERIT`,
+    );
+    createdRoles.push(functionOwnerMembershipProbe);
     createdSchemas.push(runtimeApiSchema);
     assert.equal(
       migration.applied_count,
@@ -281,9 +437,69 @@ async function run() {
       connectionString: entitlementAdminDsn,
     });
     await scopedOwner.connect();
+    cleanupClients.push(scopedOwner);
     await runtime.connect();
+    cleanupClients.push(runtime);
     await entitlementAdmin.connect();
-    try {
+    cleanupClients.push(entitlementAdmin);
+      activeCheck = "function_owner_role_restricted";
+      const functionOwner = await scopedOwner.query<{
+        login: boolean;
+        superuser: boolean;
+        create_role: boolean;
+        create_db: boolean;
+        replication: boolean;
+        bypass_rls: boolean;
+        inherit: boolean;
+        any_role_membership: boolean;
+      }>(
+        `SELECT
+           role_row.rolcanlogin AS login,
+           role_row.rolsuper AS superuser,
+           role_row.rolcreaterole AS create_role,
+           role_row.rolcreatedb AS create_db,
+           role_row.rolreplication AS replication,
+           role_row.rolbypassrls AS bypass_rls,
+           role_row.rolinherit AS inherit,
+           EXISTS(
+             SELECT 1
+             FROM pg_auth_members membership
+             WHERE membership.member=role_row.oid
+                OR membership.roleid=role_row.oid
+           ) AS any_role_membership
+         FROM pg_roles role_row
+         WHERE role_row.rolname=$1`,
+        [functionOwnerRole],
+      );
+      assert.deepEqual(functionOwner.rows[0], {
+        login: false,
+        superuser: false,
+        create_role: false,
+        create_db: false,
+        replication: false,
+        bypass_rls: false,
+        inherit: false,
+        any_role_membership: false,
+      });
+      const relationOwner = await scopedOwner.query<{
+        owner_name: string;
+      }>(
+        `SELECT pg_get_userbyid(relation_row.relowner) AS owner_name
+         FROM pg_class relation_row
+         JOIN pg_namespace namespace_row
+           ON namespace_row.oid=relation_row.relnamespace
+         WHERE namespace_row.nspname=$1
+           AND relation_row.relname='run_cost_reservations'`,
+        [applicationSchema],
+      );
+      assert.ok(relationOwner.rows[0]?.owner_name);
+      assert.notEqual(functionOwnerRole, runtimeRole);
+      assert.notEqual(functionOwnerRole, entitlementAdminRole);
+      assert.notEqual(
+        functionOwnerRole,
+        relationOwner.rows[0]?.owner_name,
+      );
+
       activeCheck = "runtime_readiness";
       const runtimeReadiness = await runPostgresSchemaCommand("check", {
         connectionString: runtimeDsn,
@@ -308,8 +524,375 @@ async function run() {
         boundary.application_function_execute_allowlist_verified,
         true,
       );
+      assert.equal(boundary.function_owner_restricted, true);
+      assert.equal(boundary.runtime_api_function_set_verified, true);
       assert.equal(boundary.set_role_membership_forbidden, true);
       assert.equal(boundary.pg_temp_shadowing_forbidden, true);
+
+      activeCheck = "pre_migration_function_owner_handoff_source_contract";
+      assertPreMigrationFunctionOwnerHandoffSourceContract();
+      activeCheck = "function_owner_idempotent_reprovision";
+      const setFunctionOwnerPassword = await scopedOwner.query<{
+        statement: string;
+      }>(
+        "SELECT format('ALTER ROLE %I PASSWORD %L',$1::text,$2::text) AS statement",
+        [functionOwnerRole, functionOwnerPasswordProbe],
+      );
+      assert.ok(setFunctionOwnerPassword.rows[0]?.statement);
+      await scopedOwner.query(
+        String(setFunctionOwnerPassword.rows[0]?.statement),
+      );
+      const reprovision = await runPostgresSchemaCommand("migrate", {
+        connectionString: ownerDsn(),
+        applicationSchema,
+        runtimeApiSchema,
+        runtimeRole,
+        runtimePassword,
+        entitlementAdminRole,
+        entitlementAdminPassword,
+        provisionRoleBoundary: true,
+      });
+      assert.equal(reprovision.applied_count, 0);
+      assert.equal(
+        reprovision.current_count,
+        POSTGRES_MIGRATION_MANIFEST.length,
+      );
+      const clearedPassword = await scopedOwner.query<{
+        password_cleared: boolean;
+      }>(
+        `SELECT rolpassword IS NULL AS password_cleared
+         FROM pg_authid
+         WHERE rolname=$1`,
+        [functionOwnerRole],
+      );
+      assert.equal(clearedPassword.rows[0]?.password_cleared, true);
+      const postMigrationMembership = await scopedOwner.query<{
+        membership_count: string;
+      }>(
+        `SELECT count(*)::text AS membership_count
+         FROM pg_auth_members membership
+         JOIN pg_roles member_role ON member_role.oid=membership.member
+         JOIN pg_roles granted_role ON granted_role.oid=membership.roleid
+         WHERE member_role.rolname=$1
+           AND granted_role.rolname=$2`,
+        [String(relationOwner.rows[0]?.owner_name), functionOwnerRole],
+      );
+      assert.equal(
+        postMigrationMembership.rows[0]?.membership_count,
+        "0",
+      );
+      const runtimeAfterReprovision =
+        await assertPostgresRuntimeRoleBoundary(runtime, {
+          applicationSchema,
+          runtimeApiSchema,
+          runtimeRole,
+        });
+      const adminAfterReprovision =
+        await assertPostgresEntitlementAdminRoleBoundary(
+          entitlementAdmin,
+          {
+            applicationSchema,
+            runtimeApiSchema,
+            entitlementAdminRole,
+          },
+        );
+      assert.equal(
+        runtimeAfterReprovision.function_owner_restricted,
+        true,
+      );
+      assert.equal(
+        adminAfterReprovision.function_owner_restricted,
+        true,
+      );
+
+      activeCheck = "function_owner_stale_execute_acl_repaired";
+      const entitlementIssueCore = `${
+        quotedIdentifier(applicationSchema)
+      }."agentops_issue_entitlement_admin_challenge_core_v11"(` +
+        "text,text,text,text,jsonb,text,interval,text)";
+      activeCheck = "function_owner_stale_execute_acl_grant";
+      const migratorRole = String(relationOwner.rows[0]?.owner_name);
+      activeCheck = "function_owner_stale_execute_membership_grant";
+      await scopedOwner.query(
+        `GRANT ${quotedIdentifier(functionOwnerRole)}
+         TO ${quotedIdentifier(migratorRole)}`,
+      );
+      try {
+        await scopedOwner.query(
+          `SET ROLE ${quotedIdentifier(functionOwnerRole)}`,
+        );
+        try {
+          activeCheck = "function_owner_stale_execute_acl_grant";
+          await scopedOwner.query(
+            `GRANT EXECUTE ON FUNCTION ${entitlementIssueCore}
+             TO ${quotedIdentifier(functionOwnerMembershipProbe)}`,
+          );
+        } finally {
+          await scopedOwner.query("RESET ROLE");
+        }
+      } finally {
+        activeCheck = "function_owner_stale_execute_membership_revoke";
+        await scopedOwner.query(
+          `REVOKE ${quotedIdentifier(functionOwnerRole)}
+           FROM ${quotedIdentifier(migratorRole)}`,
+        );
+      }
+      activeCheck = "function_owner_stale_execute_acl_denied";
+      await expectFunctionOwnerReadinessDenied(runtime, entitlementAdmin);
+      activeCheck = "function_owner_stale_execute_acl_reprovision";
+      const aclRepair = await runPostgresSchemaCommand("migrate", {
+        connectionString: ownerDsn(),
+        applicationSchema,
+        runtimeApiSchema,
+        runtimeRole,
+        runtimePassword,
+        entitlementAdminRole,
+        entitlementAdminPassword,
+        provisionRoleBoundary: true,
+      });
+      assert.equal(aclRepair.applied_count, 0);
+      activeCheck = "function_owner_stale_execute_acl_revoked";
+      const staleAcl = await scopedOwner.query<{ executable: boolean }>(
+        `SELECT has_function_privilege(
+           $1,
+           to_regprocedure($2),
+           'EXECUTE'
+         ) AS executable`,
+        [
+          functionOwnerMembershipProbe,
+          `${applicationSchema}.` +
+            "agentops_issue_entitlement_admin_challenge_core_v11(" +
+            "text,text,text,text,jsonb,text,interval,text)",
+        ],
+      );
+      assert.equal(staleAcl.rows[0]?.executable, false);
+      activeCheck = "function_owner_stale_execute_acl_restored";
+      await assertPostgresRuntimeRoleBoundary(runtime, {
+        applicationSchema,
+        runtimeApiSchema,
+        runtimeRole,
+      });
+      await assertPostgresEntitlementAdminRoleBoundary(
+        entitlementAdmin,
+        {
+          applicationSchema,
+          runtimeApiSchema,
+          entitlementAdminRole,
+        },
+      );
+
+      activeCheck = "runtime_api_function_set_closed";
+      const unexpectedApiFunction = `${
+        quotedIdentifier(runtimeApiSchema)
+      }."agentops_unexpected_runtime_api_probe_v1"()`;
+      await scopedOwner.query(
+        `CREATE FUNCTION ${unexpectedApiFunction}
+         RETURNS text
+         LANGUAGE sql
+         SECURITY DEFINER
+         SET search_path=pg_catalog,pg_temp
+         AS 'SELECT current_user::text'`,
+      );
+      await scopedOwner.query(
+        `REVOKE ALL ON FUNCTION ${unexpectedApiFunction} FROM PUBLIC`,
+      );
+      await scopedOwner.query(
+        `GRANT EXECUTE ON FUNCTION ${unexpectedApiFunction}
+         TO ${quotedIdentifier(runtimeRole)}`,
+      );
+      await expectRuntimeApiFunctionSetDenied(runtime, entitlementAdmin);
+      await assert.rejects(
+        runPostgresSchemaCommand("migrate", {
+          connectionString: ownerDsn(),
+          applicationSchema,
+          runtimeApiSchema,
+          runtimeRole,
+          runtimePassword,
+          entitlementAdminRole,
+          entitlementAdminPassword,
+          provisionRoleBoundary: true,
+        }),
+        (error: unknown) => (
+          error instanceof SchemaReadinessError
+          && error.code === "postgres_runtime_api_function_set_invalid"
+        ),
+      );
+      await scopedOwner.query(`DROP FUNCTION ${unexpectedApiFunction}`);
+      await assertPostgresRuntimeRoleBoundary(runtime, {
+        applicationSchema,
+        runtimeApiSchema,
+        runtimeRole,
+      });
+      await assertPostgresEntitlementAdminRoleBoundary(
+        entitlementAdmin,
+        {
+          applicationSchema,
+          runtimeApiSchema,
+          entitlementAdminRole,
+        },
+      );
+
+      activeCheck = "function_owner_login_drift_denied";
+      await scopedOwner.query(
+        `ALTER ROLE ${quotedIdentifier(functionOwnerRole)} LOGIN`,
+      );
+      try {
+        await expectFunctionOwnerReadinessDenied(runtime, entitlementAdmin);
+      } finally {
+        await scopedOwner.query(
+          `ALTER ROLE ${quotedIdentifier(functionOwnerRole)} NOLOGIN`,
+        );
+      }
+      const restoredRuntimeAfterLogin =
+        await assertPostgresRuntimeRoleBoundary(runtime, {
+          applicationSchema,
+          runtimeApiSchema,
+          runtimeRole,
+        });
+      const restoredAdminAfterLogin =
+        await assertPostgresEntitlementAdminRoleBoundary(
+          entitlementAdmin,
+          {
+            applicationSchema,
+            runtimeApiSchema,
+            entitlementAdminRole,
+          },
+        );
+      assert.equal(
+        restoredRuntimeAfterLogin.function_owner_restricted,
+        true,
+      );
+      assert.equal(
+        restoredAdminAfterLogin.function_owner_restricted,
+        true,
+      );
+
+      activeCheck = "function_owner_membership_drift_denied";
+      await scopedOwner.query(
+        `GRANT ${quotedIdentifier(functionOwnerMembershipProbe)}
+         TO ${quotedIdentifier(functionOwnerRole)}`,
+      );
+      try {
+        await expectFunctionOwnerReadinessDenied(runtime, entitlementAdmin);
+      } finally {
+        await scopedOwner.query(
+          `REVOKE ${quotedIdentifier(functionOwnerMembershipProbe)}
+           FROM ${quotedIdentifier(functionOwnerRole)}`,
+        );
+      }
+      await scopedOwner.query(
+        `GRANT ${quotedIdentifier(functionOwnerRole)}
+         TO ${quotedIdentifier(functionOwnerMembershipProbe)}`,
+      );
+      try {
+        await expectFunctionOwnerReadinessDenied(runtime, entitlementAdmin);
+      } finally {
+        await scopedOwner.query(
+          `REVOKE ${quotedIdentifier(functionOwnerRole)}
+           FROM ${quotedIdentifier(functionOwnerMembershipProbe)}`,
+        );
+      }
+      const restoredRuntimeAfterMembership =
+        await assertPostgresRuntimeRoleBoundary(runtime, {
+          applicationSchema,
+          runtimeApiSchema,
+          runtimeRole,
+        });
+      const restoredAdminAfterMembership =
+        await assertPostgresEntitlementAdminRoleBoundary(
+          entitlementAdmin,
+          {
+            applicationSchema,
+            runtimeApiSchema,
+            entitlementAdminRole,
+          },
+        );
+      assert.equal(
+        restoredRuntimeAfterMembership.function_owner_restricted,
+        true,
+      );
+      assert.equal(
+        restoredAdminAfterMembership.function_owner_restricted,
+        true,
+      );
+
+      activeCheck = "function_owner_non_function_object_drift_denied";
+      const ownedObjectSchema = `role_owned_object_${suffix}`;
+      const ownedDomain = `${
+        quotedIdentifier(ownedObjectSchema)
+      }."function_owner_domain_probe"`;
+      await scopedOwner.query(
+        `CREATE SCHEMA ${quotedIdentifier(ownedObjectSchema)}`,
+      );
+      createdSchemas.push(ownedObjectSchema);
+      await scopedOwner.query(
+        `CREATE DOMAIN ${ownedDomain} AS text`,
+      );
+      await scopedOwner.query(
+        `ALTER DOMAIN ${ownedDomain}
+         OWNER TO ${quotedIdentifier(functionOwnerRole)}`,
+      );
+      try {
+        await expectFunctionOwnerReadinessDenied(runtime, entitlementAdmin);
+        await assert.rejects(
+          runPostgresSchemaCommand("migrate", {
+            connectionString: ownerDsn(),
+            applicationSchema,
+            runtimeApiSchema,
+            runtimeRole,
+            runtimePassword,
+            entitlementAdminRole,
+            entitlementAdminPassword,
+            provisionRoleBoundary: true,
+          }),
+          (error: unknown) => (
+            error instanceof SchemaReadinessError
+            && error.code ===
+              "postgres_function_owner_restriction_invalid"
+          ),
+        );
+      } finally {
+        await scopedOwner.query(`DROP DOMAIN ${ownedDomain}`);
+        await scopedOwner.query(
+          `DROP SCHEMA ${quotedIdentifier(ownedObjectSchema)}`,
+        );
+      }
+      const ownedObjectResidue = await scopedOwner.query<{
+        schema_count: string;
+        type_count: string;
+      }>(
+        `SELECT
+           (
+             SELECT count(*)::text
+             FROM pg_namespace
+             WHERE nspname=$1
+           ) AS schema_count,
+           (
+             SELECT count(*)::text
+             FROM pg_type type_row
+             JOIN pg_namespace namespace_row
+               ON namespace_row.oid=type_row.typnamespace
+             WHERE namespace_row.nspname=$1
+           ) AS type_count`,
+        [ownedObjectSchema],
+      );
+      assert.deepEqual(ownedObjectResidue.rows[0], {
+        schema_count: "0",
+        type_count: "0",
+      });
+      await assertPostgresRuntimeRoleBoundary(runtime, {
+        applicationSchema,
+        runtimeApiSchema,
+        runtimeRole,
+      });
+      await assertPostgresEntitlementAdminRoleBoundary(
+        entitlementAdmin,
+        {
+          applicationSchema,
+          runtimeApiSchema,
+          entitlementAdminRole,
+        },
+      );
 
       activeCheck = "runtime_future_function_default_acl_denied";
       const futureFunction = `${
@@ -319,7 +902,6 @@ async function run() {
         `CREATE FUNCTION ${futureFunction}
          RETURNS integer
          LANGUAGE sql
-         SECURITY DEFINER
          SET search_path=pg_catalog,${quotedIdentifier(applicationSchema)},pg_temp
          AS 'SELECT 1'`,
       );
@@ -476,6 +1058,8 @@ async function run() {
       );
       assert.equal(adminBoundary.application_relation_access_forbidden, true);
       assert.equal(adminBoundary.plan_apply_executable, true);
+      assert.equal(adminBoundary.function_owner_restricted, true);
+      assert.equal(adminBoundary.runtime_api_function_set_verified, true);
       activeCheck = "owner_entitlement_seed";
       const now = new Date();
       await scopedOwner.query(
@@ -593,7 +1177,7 @@ async function run() {
       };
       assert.equal(startReceipt.database_role_boundary_verified, true);
 
-      console.log(JSON.stringify({
+      successReceipt = {
         contract: "agentops_postgres_role_boundary_v1",
         ok: true,
         postgres_major: 16,
@@ -605,6 +1189,19 @@ async function run() {
         runtime_approved_cost_functions_executed: true,
         runtime_cost_function_integrity_verified: true,
         runtime_application_function_allowlist_verified: true,
+        function_owner_restricted: true,
+        function_owner_distinct: true,
+        function_owner_idempotent_reprovision: true,
+        pre_migration_owner_handoff_source_order_verified: true,
+        post_migration_owner_membership_zero: true,
+        function_owner_password_cleared: true,
+        function_owner_stale_execute_acl_repaired: true,
+        runtime_api_function_set_closed: true,
+        function_owner_login_drift_denied: true,
+        function_owner_membership_drift_denied: true,
+        function_owner_non_function_object_drift_denied: true,
+        function_owner_non_function_object_drift_restored: true,
+        function_owner_readiness_restored: true,
         runtime_pg_temp_shadowing_forbidden: true,
         runtime_set_role_membership_forbidden: true,
         runtime_normal_application_operations_executed: true,
@@ -626,28 +1223,32 @@ async function run() {
         row_data_omitted: true,
         python_used: false,
         sqlite_used: false,
-      }));
-    } finally {
-      await entitlementAdmin.end().catch(() => undefined);
-      await runtime.end().catch(() => undefined);
-      await scopedOwner.end().catch(() => undefined);
-    }
-  } finally {
-    for (const schema of createdSchemas.reverse()) {
-      await owner.query(
-        `DROP SCHEMA IF EXISTS ${quotedIdentifier(schema)} CASCADE`,
-      ).catch(() => undefined);
-    }
-    for (const role of createdRoles.reverse()) {
-      await owner.query(
-        `DROP OWNED BY ${quotedIdentifier(role)}`,
-      ).catch(() => undefined);
-      await owner.query(
-        `DROP ROLE IF EXISTS ${quotedIdentifier(role)}`,
-      ).catch(() => undefined);
-    }
-    await owner.end().catch(() => undefined);
+      };
+  } catch (error) {
+    contractFailed = true;
+    contractError = error;
   }
+  try {
+    await cleanupPostgresRoleBoundaryFixture(
+      owner,
+      cleanupClients,
+      createdSchemas,
+      createdRoles,
+      functionOwnerRole,
+    );
+  } catch (cleanupError) {
+    if (contractFailed) {
+      throw new AggregateError(
+        [contractError, cleanupError],
+        "postgres_role_boundary_contract_and_cleanup_failed",
+      );
+    }
+    throw cleanupError;
+  }
+  if (contractFailed) throw contractError;
+  assert.ok(successReceipt);
+  successReceipt.cleanup_catalog_zero = true;
+  console.log(JSON.stringify(successReceipt));
 }
 
 run().catch((error: unknown) => {

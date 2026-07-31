@@ -33,7 +33,10 @@ import {
 } from "../src/server/controlPlane/agentGatewayTasks";
 import { closeControlPlanePoolForTests } from "../src/server/controlPlane/db";
 import { ControlPlaneHttpError } from "../src/server/controlPlane/http";
-import { runPostgresSchemaCommand } from "../src/server/controlPlane/schemaReadiness";
+import {
+  derivedPostgresFunctionOwnerRole,
+  runPostgresSchemaCommand,
+} from "../src/server/controlPlane/schemaReadiness";
 
 const baseDsn = String(process.env.AGENTOPS_POSTGRES_DSN || "").trim();
 const schema = `agentops_gateway_core_${randomBytes(6).toString("hex")}`;
@@ -397,6 +400,10 @@ async function runContract() {
   const runtimePassword = randomBytes(24).toString("base64url");
   const entitlementAdminRole = `ea_core_${randomBytes(8).toString("hex")}`;
   const entitlementAdminPassword = randomBytes(24).toString("base64url");
+  const functionOwnerRole = derivedPostgresFunctionOwnerRole(
+    schema,
+    runtimeApiSchema,
+  );
   const admin = new Client({ connectionString: baseDsn });
   await admin.connect();
   const observer = http.createServer((_request, response) => {
@@ -1337,6 +1344,14 @@ async function runContract() {
     }
     await admin.query(`DROP SCHEMA IF EXISTS "${schema}" CASCADE`);
     await admin.query(`DROP SCHEMA IF EXISTS "${runtimeApiSchema}" CASCADE`);
+    const functionOwnerExists = await admin.query(
+      "SELECT 1 FROM pg_roles WHERE rolname=$1",
+      [functionOwnerRole],
+    );
+    if (functionOwnerExists.rowCount === 1) {
+      await admin.query(`DROP OWNED BY "${functionOwnerRole}"`);
+      await admin.query(`DROP ROLE "${functionOwnerRole}"`);
+    }
     await admin.query(`DROP ROLE IF EXISTS "${runtimeRole}"`);
     await admin.query(`DROP ROLE IF EXISTS "${entitlementAdminRole}"`);
     await admin.end();

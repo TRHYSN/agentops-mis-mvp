@@ -138,6 +138,23 @@ The complete Human review acceptance also covers the first-party Human Session
 owners for login, logout, current session, approval list/detail/decision,
 candidate Memory review, and operator loop supervision.
 
+Role-boundary provisioning derives a dedicated, passwordless `NOLOGIN`
+function-owner identity from the application and runtime API schema names.
+Each provisioning pass explicitly clears any password verifier on that role.
+Before applying pending migrations, the same transaction validates or creates
+the restricted owner and grants the migrator temporary membership, so a later
+`CREATE OR REPLACE` can update functions already owned by that identity.
+Membership and schema `CREATE` are removed after migration and again after the
+bounded API wrappers and application `SECURITY DEFINER` ownership are rebuilt.
+Runtime and entitlement-admin readiness verify the owner's restricted
+attributes, zero memberships, schema privileges, a database-wide ownership
+closed set that permits only the expected functions, and each wrapper's exact
+body, fixed search path, owner, and executable grantee.
+Re-provisioning also removes stale non-owner `EXECUTE` ACLs from application
+`SECURITY DEFINER` functions, and readiness rejects any later ACL drift.
+The runtime API schema is a closed eight-function set; an extra function,
+owner, signature, or executable grantee fails both runtime and admin readiness.
+
 Frozen commit `72a1b9f` passed the full real-runtime acceptance separately with
 Hermes and OpenClaw against the same source fingerprint. Both runs used the
 TypeScript Worker and PostgreSQL 16, performed a real provider call with
@@ -152,7 +169,6 @@ backup/restore behavior. Release authority still requires:
 
 - remaining browser dashboard, agent, connector, and deployment workflows
 - a real external BYOC deployment, upgrade, rollback, and restore drill
-- a dedicated restricted `NOLOGIN` owner for `SECURITY DEFINER` functions
 - a clean exact-head Hermes plus OpenClaw acceptance receipt
 - exact-head GitHub Actions and supply-chain evidence
 

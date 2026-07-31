@@ -14,6 +14,7 @@ import { establishHumanSession } from "../src/server/controlPlane/humanSession";
 import { HUMAN_SCRYPT_PARAMS } from "../src/server/controlPlane/humanPasswordPolicy";
 import { ControlPlaneHttpError } from "../src/server/controlPlane/http";
 import {
+  derivedPostgresFunctionOwnerRole,
   POSTGRES_MIGRATION_MANIFEST,
   runPostgresSchemaCommand,
   SCHEMA_CONTRACT,
@@ -523,6 +524,10 @@ async function run() {
   const runtimePassword = randomBytes(24).toString("base64url");
   const entitlementAdminRole = `ea_human_${randomBytes(8).toString("hex")}`;
   const entitlementAdminPassword = randomBytes(24).toString("base64url");
+  const functionOwnerRole = derivedPostgresFunctionOwnerRole(
+    schema,
+    runtimeApiSchema,
+  );
   const admin = new Client({ connectionString: baseDsn });
   const originalFetch = globalThis.fetch;
   let fetchCalls = 0;
@@ -879,6 +884,16 @@ async function run() {
       await admin.query(
         `DROP SCHEMA IF EXISTS ${quotedSchema(runtimeApiSchema)} CASCADE`,
       );
+      const functionOwnerExists = await admin.query(
+        "SELECT 1 FROM pg_roles WHERE rolname=$1",
+        [functionOwnerRole],
+      );
+      if (functionOwnerExists.rowCount === 1) {
+        await admin.query(
+          `DROP OWNED BY ${quotedSchema(functionOwnerRole)}`,
+        );
+        await admin.query(`DROP ROLE ${quotedSchema(functionOwnerRole)}`);
+      }
       await admin.query(`DROP ROLE IF EXISTS ${quotedSchema(runtimeRole)}`);
       await admin.query(
         `DROP ROLE IF EXISTS ${quotedSchema(entitlementAdminRole)}`,

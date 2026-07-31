@@ -172,7 +172,11 @@ As of 2026-07-31:
   transactional TypeScript runner/readiness ownership, exact catalog
   fingerprinting, and real PostgreSQL 16 bootstrap and contract coverage.
   Production uses distinct migrator, restricted runtime, and entitlement-admin
-  identities. Runtime startup rejects schema owners and over-privileged DSNs.
+  identities plus a derived passwordless `NOLOGIN` owner for all application
+  `SECURITY DEFINER` functions and bounded API wrappers. Runtime startup rejects
+  schema owners, over-privileged DSNs, function-owner attribute or membership
+  drift, any non-allowlisted database object ownership, schema `CREATE`, and
+  wrapper ownership drift.
 - Lane 2 has direct TypeScript/PostgreSQL owners for Agent identity, sessions,
   task claim, Agent Plans, runs, and governed evidence. The commercial
   TypeScript Worker uses those HTTP owners and has no Python, SQLite, or direct
@@ -212,9 +216,15 @@ As of 2026-07-31:
   upgrade/rollback, an external restore drill, exact-head CI, and final
   promotion remain open.
 
-The remaining database hardening item is transferring all
-`SECURITY DEFINER` functions from the migrator to a dedicated restricted
-`NOLOGIN` owner without weakening idempotent provisioning or upgrade behavior.
+Database function ownership is now separated from migration authority. Before
+pending migrations execute, the transaction grants the migrator temporary
+membership in the derived function-owner role so existing owner-bound functions
+remain upgradeable. It revokes that handoff after migration, transfers all
+application `SECURITY DEFINER` functions and bounded API wrappers during
+provisioning, then revokes schema `CREATE` and role membership again before
+commit. Re-provisioning is idempotent, and PostgreSQL 16 contracts prove LOGIN,
+membership, and unexpected object-ownership drift fail closed and recover only
+after the catalog boundary is restored.
 
 Commits after `d3b9e73` are not covered by that frozen-source runtime receipt.
 Release, handoff, and merge authority remain false until the remaining read,

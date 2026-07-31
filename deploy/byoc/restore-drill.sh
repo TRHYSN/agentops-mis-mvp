@@ -191,43 +191,38 @@ docker compose --env-file "$env_file" -f "$compose_file" exec -T postgres \
   sh -ceu 'pg_restore --username "$POSTGRES_USER" --dbname "$1" --no-owner --no-privileges --exit-on-error' sh "$restore_database" \
   < "$backup"
 
-if ! docker compose --env-file "$env_file" -f "$compose_file" run --rm \
-  migrate sh -ceu '
-    dsn_configured=false
-    [ -z "${AGENTOPS_POSTGRES_DSN_FILE:-}" ] || dsn_configured=true
-    if [ "$dsn_configured" = true ] &&
-      [ -n "${AGENTOPS_POSTGRES_HOST:-}" ]
-    then
-      exit 65
-    elif [ -n "${AGENTOPS_POSTGRES_HOST:-}" ] &&
-      [ -n "${AGENTOPS_POSTGRES_PASSWORD_FILE:-}" ]
-    then
-      AGENTOPS_POSTGRES_DATABASE=$1
-      export AGENTOPS_POSTGRES_DATABASE
-      unset AGENTOPS_POSTGRES_DSN AGENTOPS_POSTGRES_DSN_FILE
-    elif [ "$dsn_configured" = true ]; then
-      restore_dsn_file="${AGENTOPS_POSTGRES_DSN_FILE}.restore.$$"
-      remove_restore_dsn_file() {
-        [ -z "$restore_dsn_file" ] || rm -f "$restore_dsn_file"
-      }
-      trap remove_restore_dsn_file 0
-      trap "exit 129" 1
-      trap "exit 130" 2
-      trap "exit 143" 15
-      node /usr/local/lib/agentops/postgres-dsn-for-restore.mjs \
-        "$1" "$restore_dsn_file"
-      AGENTOPS_POSTGRES_DSN_FILE=$restore_dsn_file
-      export AGENTOPS_POSTGRES_DSN_FILE
-      unset AGENTOPS_POSTGRES_DSN
-    else
-      exit 65
-    fi
-    npm run check:postgres-schema
-  ' sh "$restore_database" >/dev/null 2>&1
-then
-  printf '%s\n' "restore_manifest_check_failed" >&2
-  exit 1
-fi
+validation_status=0
+docker compose --env-file "$env_file" -f "$compose_file" run --rm \
+  migrate sh /usr/local/lib/agentops/restore-provision.sh \
+  "$restore_database" >/dev/null 2>&1 || validation_status=$?
+
+case "$validation_status" in
+  0) ;;
+  65)
+    printf '%s\n' "restore_database_configuration_invalid" >&2
+    exit 1
+    ;;
+  71)
+    printf '%s\n' "restore_provisioning_failed" >&2
+    exit 1
+    ;;
+  72)
+    printf '%s\n' "restore_manifest_check_failed" >&2
+    exit 1
+    ;;
+  73)
+    printf '%s\n' "restore_runtime_role_boundary_failed" >&2
+    exit 1
+    ;;
+  74)
+    printf '%s\n' "restore_entitlement_admin_role_boundary_failed" >&2
+    exit 1
+    ;;
+  *)
+    printf '%s\n' "restore_validation_failed" >&2
+    exit 1
+    ;;
+esac
 
 workflow_complete=true
 kept=false
@@ -249,4 +244,4 @@ if ! remove_restore_staging; then
   exit 1
 fi
 trap - 0 1 2 15
-printf '{"ok":true,"contract":"agentops_byoc_restore_drill_v3","staged_object_verified":true,"staged_object_read_only":true,"checksum_verified":true,"migration_manifest_verified":true,"schema_fingerprint_verified":true,"production_overwritten":false,"restore_database_kept":%s,"cleanup_confirmed":%s,"restore_disposition_confirmed":true,"credentials_omitted":true}\n' "$kept" "$cleanup_confirmed"
+printf '{"ok":true,"contract":"agentops_byoc_restore_drill_v4","staged_object_verified":true,"staged_object_read_only":true,"checksum_verified":true,"restore_provisioning_completed":true,"migration_manifest_verified":true,"schema_fingerprint_verified":true,"runtime_role_boundary_verified":true,"entitlement_admin_role_boundary_verified":true,"function_owner_boundary_verified":true,"isolated_role_dsns_file_backed":true,"production_overwritten":false,"restore_database_kept":%s,"cleanup_confirmed":%s,"restore_disposition_confirmed":true,"credentials_omitted":true}\n' "$kept" "$cleanup_confirmed"

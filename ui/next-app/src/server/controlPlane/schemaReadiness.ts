@@ -70,6 +70,8 @@ export type RuntimeRoleBoundaryReceipt = Readonly<{
   entitlement_challenge_issue_executable: true;
   entitlement_challenge_issue_integrity_verified: true;
   entitlement_challenge_admin_functions_not_executable: true;
+  function_owner_restricted: true;
+  runtime_api_function_set_verified: true;
   normal_application_operations_allowed: true;
   entitlement_read_allowed: true;
   superuser_forbidden: true;
@@ -92,6 +94,8 @@ export type EntitlementAdminRoleBoundaryReceipt = Readonly<{
   plan_apply_executable: true;
   issue_not_executable: true;
   wrapper_integrity_verified: true;
+  function_owner_restricted: true;
+  runtime_api_function_set_verified: true;
   superuser_forbidden: true;
   bypass_rls_forbidden: true;
   set_role_membership_forbidden: true;
@@ -110,6 +114,20 @@ export type SchemaCommandOptions = Readonly<{
   entitlementAdminPassword?: string;
   enforceRuntimeBoundary?: boolean;
   provisionRoleBoundary?: boolean;
+}>;
+
+type ResolvedRoleProvisioningContext = Readonly<{
+  applicationSchema: string;
+  runtimeApiSchema: string;
+  runtimeRole: string;
+  runtimePassword: string;
+  entitlementAdminRole: string;
+  entitlementAdminPassword: string;
+}>;
+
+type PreparedMigrationFunctionOwner = Readonly<{
+  migratorRole: string;
+  functionOwnerRole: string;
 }>;
 
 export class SchemaReadinessError extends Error {
@@ -413,6 +431,25 @@ function selectedEntitlementAdminRole(
   }
 }
 
+export function derivedPostgresFunctionOwnerRole(
+  applicationSchema: string,
+  runtimeApiSchema: string,
+) {
+  const application = safeIdentifier(
+    applicationSchema,
+    "postgres_schema_invalid",
+  );
+  const api = safeIdentifier(
+    runtimeApiSchema,
+    "postgres_runtime_api_schema_invalid",
+  );
+  const suffix = createHash("sha256")
+    .update(`${application}\u0000${api}`, "utf8")
+    .digest("hex")
+    .slice(0, 24);
+  return `agentops_fn_${suffix}`;
+}
+
 async function setLocalSearchPath(
   client: ClientBase,
   schemas: readonly string[],
@@ -579,6 +616,178 @@ async function roleHasMembership(
     [roleName],
   );
   return result.rows[0]?.any_role_membership === true;
+}
+
+async function restrictedFunctionOwnerRole(
+  client: ClientBase,
+  roleName: string,
+) {
+  const result = await client.query<{
+    login: boolean;
+    superuser: boolean;
+    create_role: boolean;
+    create_db: boolean;
+    replication: boolean;
+    bypass_rls: boolean;
+    inherit: boolean;
+  }>(
+    `SELECT
+       rolcanlogin AS login,
+       rolsuper AS superuser,
+       rolcreaterole AS create_role,
+       rolcreatedb AS create_db,
+       rolreplication AS replication,
+       rolbypassrls AS bypass_rls,
+       rolinherit AS inherit
+     FROM pg_roles
+     WHERE rolname=$1`,
+    [roleName],
+  );
+  const role = result.rows[0];
+  return Boolean(
+    role
+    && !role.login
+    && !role.superuser
+    && !role.create_role
+    && !role.create_db
+    && !role.replication
+    && !role.bypass_rls
+    && !role.inherit
+    && !(await roleHasMembership(client, roleName))
+  );
+}
+
+async function restrictedFunctionOwnerBoundary(
+  client: ClientBase,
+  roleName: string,
+  applicationSchema: string,
+  runtimeApiSchema: string,
+) {
+  if (!(await restrictedFunctionOwnerRole(client, roleName))) return false;
+  const result = await client.query<{
+    app_usage: boolean;
+    app_create: boolean;
+    api_usage: boolean;
+    api_create: boolean;
+    owns_schema: boolean;
+    owns_relation: boolean;
+    application_security_definer_owner_drift: boolean;
+    application_security_definer_execute_acl_drift: boolean;
+    function_ownership_outside_boundary: boolean;
+    unexpected_owned_object: boolean;
+  }>(
+    `SELECT
+       has_schema_privilege($1,$2,'USAGE') AS app_usage,
+       has_schema_privilege($1,$2,'CREATE') AS app_create,
+       has_schema_privilege($1,$3,'USAGE') AS api_usage,
+       has_schema_privilege($1,$3,'CREATE') AS api_create,
+       EXISTS(
+         SELECT 1
+         FROM pg_namespace namespace_row
+         JOIN pg_roles owner_role
+           ON owner_role.oid=namespace_row.nspowner
+         WHERE owner_role.rolname=$1
+       ) AS owns_schema,
+       EXISTS(
+         SELECT 1
+         FROM pg_class relation_row
+         JOIN pg_roles owner_role
+           ON owner_role.oid=relation_row.relowner
+         WHERE owner_role.rolname=$1
+       ) AS owns_relation,
+       EXISTS(
+         SELECT 1
+         FROM pg_proc function_row
+         JOIN pg_namespace namespace_row
+           ON namespace_row.oid=function_row.pronamespace
+         JOIN pg_roles owner_role
+           ON owner_role.oid=function_row.proowner
+         WHERE namespace_row.nspname=$2
+           AND function_row.prosecdef
+           AND owner_role.rolname<>$1
+       ) AS application_security_definer_owner_drift,
+       EXISTS(
+         SELECT 1
+         FROM pg_proc function_row
+         JOIN pg_namespace namespace_row
+           ON namespace_row.oid=function_row.pronamespace
+         CROSS JOIN LATERAL aclexplode(
+           COALESCE(
+             function_row.proacl,
+             acldefault('f',function_row.proowner)
+           )
+         ) privilege_row
+         WHERE namespace_row.nspname=$2
+           AND function_row.prosecdef
+           AND privilege_row.privilege_type='EXECUTE'
+           AND (
+             privilege_row.grantee=0
+             OR privilege_row.grantee<>function_row.proowner
+           )
+       ) AS application_security_definer_execute_acl_drift,
+       EXISTS(
+         SELECT 1
+         FROM pg_proc function_row
+         JOIN pg_namespace namespace_row
+           ON namespace_row.oid=function_row.pronamespace
+         JOIN pg_roles owner_role
+           ON owner_role.oid=function_row.proowner
+         WHERE owner_role.rolname=$1
+           AND (
+             namespace_row.nspname NOT IN ($2,$3)
+             OR (
+               namespace_row.nspname=$2
+               AND NOT function_row.prosecdef
+             )
+           )
+       ) AS function_ownership_outside_boundary,
+       EXISTS(
+         SELECT 1
+         FROM pg_shdepend ownership_dependency
+         JOIN pg_roles owner_role
+           ON owner_role.oid=ownership_dependency.refobjid
+         WHERE ownership_dependency.refclassid='pg_authid'::regclass
+           AND ownership_dependency.deptype='o'
+           AND owner_role.rolname=$1
+           AND NOT (
+             ownership_dependency.dbid=(
+               SELECT database_row.oid
+               FROM pg_database database_row
+               WHERE database_row.datname=current_database()
+             )
+             AND ownership_dependency.classid='pg_proc'::regclass
+             AND EXISTS(
+               SELECT 1
+               FROM pg_proc function_row
+               JOIN pg_namespace namespace_row
+                 ON namespace_row.oid=function_row.pronamespace
+               WHERE function_row.oid=ownership_dependency.objid
+                 AND function_row.proowner=owner_role.oid
+                 AND (
+                   (
+                     namespace_row.nspname=$2
+                     AND function_row.prosecdef
+                   )
+                   OR namespace_row.nspname=$3
+                 )
+             )
+           )
+       ) AS unexpected_owned_object`,
+    [roleName, applicationSchema, runtimeApiSchema],
+  );
+  const boundary = result.rows[0];
+  return Boolean(
+    boundary?.app_usage
+    && !boundary.app_create
+    && boundary.api_usage
+    && !boundary.api_create
+    && !boundary.owns_schema
+    && !boundary.owns_relation
+    && !boundary.application_security_definer_owner_drift
+    && !boundary.application_security_definer_execute_acl_drift
+    && !boundary.function_ownership_outside_boundary
+    && !boundary.unexpected_owned_object
+  );
 }
 
 async function relationOwners(
@@ -1170,6 +1379,105 @@ async function entitlementIssueWrapperRoles(
   });
 }
 
+async function exactRuntimeApiFunctionSet(
+  client: ClientBase,
+  context: Readonly<{
+    runtimeApiSchema: string;
+    functionOwnerRole: string;
+    runtimeRole: string;
+    entitlementAdminRole: string;
+  }>,
+) {
+  const result = await client.query<{
+    function_name: string;
+    arguments: string;
+    owner_name: string;
+    security_definer: boolean;
+    public_execute: boolean;
+    execute_grantees: string[];
+  }>(
+    `SELECT
+       function_row.proname AS function_name,
+       oidvectortypes(function_row.proargtypes) AS arguments,
+       pg_get_userbyid(function_row.proowner) AS owner_name,
+       function_row.prosecdef AS security_definer,
+       EXISTS(
+         SELECT 1
+         FROM aclexplode(
+           COALESCE(
+             function_row.proacl,
+             acldefault('f',function_row.proowner)
+           )
+         ) privilege_row
+         WHERE privilege_row.grantee=0
+           AND privilege_row.privilege_type='EXECUTE'
+       ) AS public_execute,
+       ARRAY(
+         SELECT DISTINCT pg_get_userbyid(privilege_row.grantee)
+         FROM aclexplode(
+           COALESCE(
+             function_row.proacl,
+             acldefault('f',function_row.proowner)
+           )
+         ) privilege_row
+         WHERE privilege_row.grantee<>0
+           AND privilege_row.privilege_type='EXECUTE'
+         ORDER BY pg_get_userbyid(privilege_row.grantee)
+       )::text[] AS execute_grantees
+     FROM pg_proc function_row
+     JOIN pg_namespace namespace_row
+       ON namespace_row.oid=function_row.pronamespace
+     WHERE namespace_row.nspname=$1
+     ORDER BY function_row.proname,oidvectortypes(function_row.proargtypes)`,
+    [context.runtimeApiSchema],
+  );
+  const expected = [
+    ...APPROVED_COST_FUNCTIONS.map((function_) => ({
+      name: function_.name,
+      arguments: function_.arguments,
+      grantee: context.runtimeRole,
+    })),
+    {
+      name: ENTITLEMENT_CHALLENGE_FUNCTIONS.issue.publicName,
+      arguments: ENTITLEMENT_CHALLENGE_FUNCTIONS.issue.arguments,
+      grantee: context.runtimeRole,
+    },
+    {
+      name: ENTITLEMENT_CHALLENGE_FUNCTIONS.plan.publicName,
+      arguments: ENTITLEMENT_CHALLENGE_FUNCTIONS.plan.arguments,
+      grantee: context.entitlementAdminRole,
+    },
+    {
+      name: ENTITLEMENT_CHALLENGE_FUNCTIONS.apply.publicName,
+      arguments: ENTITLEMENT_CHALLENGE_FUNCTIONS.apply.arguments,
+      grantee: context.entitlementAdminRole,
+    },
+  ];
+  if (result.rows.length !== expected.length) return false;
+  const actualByIdentity = new Map(
+    result.rows.map((row) => [
+      `${row.function_name}(${row.arguments.replaceAll(" ", "")})`,
+      row,
+    ]),
+  );
+  return expected.every((entry) => {
+    const row = actualByIdentity.get(
+      `${entry.name}(${entry.arguments})`,
+    );
+    return Boolean(
+      row
+      && row.owner_name === context.functionOwnerRole
+      && row.security_definer
+      && !row.public_execute
+      && JSON.stringify(row.execute_grantees)
+        === JSON.stringify([
+          context.functionOwnerRole,
+          entry.grantee,
+        ].sort())
+    );
+  });
+}
+
 async function runtimeBoundaryStep<T>(
   code: string,
   work: () => Promise<T>,
@@ -1269,6 +1577,27 @@ export async function assertPostgresRuntimeRoleBoundary(
   if (!protectedOwner) {
     throw new SchemaReadinessError("postgres_protected_relation_owner_missing");
   }
+  const functionOwner = derivedPostgresFunctionOwnerRole(
+    applicationSchema,
+    runtimeApiSchema,
+  );
+  if (
+    functionOwner === protectedOwner
+    || functionOwner === principal.role_name
+    || !(await runtimeBoundaryStep(
+      "function_owner",
+      () => restrictedFunctionOwnerBoundary(
+        client,
+        functionOwner,
+        applicationSchema,
+        runtimeApiSchema,
+      ),
+    ))
+  ) {
+    throw new SchemaReadinessError(
+      "postgres_function_owner_restriction_invalid",
+    );
+  }
   if (
     await runtimeBoundaryStep(
       "reservation_privileges",
@@ -1348,7 +1677,7 @@ export async function assertPostgresRuntimeRoleBoundary(
           runtimeApiSchema,
           applicationSchema,
           function_,
-          protectedOwner,
+          functionOwner,
           principal.role_name,
         ),
       ))
@@ -1393,7 +1722,7 @@ export async function assertPostgresRuntimeRoleBoundary(
     () => entitlementIssueWrapperRoles(client, {
       runtimeApiSchema,
       applicationSchema,
-      expectedOwner: protectedOwner,
+      expectedOwner: functionOwner,
     }),
   );
   if (
@@ -1403,6 +1732,21 @@ export async function assertPostgresRuntimeRoleBoundary(
   ) {
     throw new SchemaReadinessError(
       "postgres_runtime_entitlement_challenge_issue_integrity_invalid",
+    );
+  }
+  if (
+    !(await runtimeBoundaryStep(
+      "runtime_api_function_set",
+      () => exactRuntimeApiFunctionSet(client, {
+        runtimeApiSchema,
+        functionOwnerRole: functionOwner,
+        runtimeRole: principal.role_name,
+        entitlementAdminRole: issueRoles.boundAdminRole,
+      }),
+    ))
+  ) {
+    throw new SchemaReadinessError(
+      "postgres_runtime_api_function_set_invalid",
     );
   }
   for (const function_ of [
@@ -1451,6 +1795,8 @@ export async function assertPostgresRuntimeRoleBoundary(
     entitlement_challenge_issue_executable: true,
     entitlement_challenge_issue_integrity_verified: true,
     entitlement_challenge_admin_functions_not_executable: true,
+    function_owner_restricted: true,
+    runtime_api_function_set_verified: true,
     normal_application_operations_allowed: true,
     entitlement_read_allowed: true,
     superuser_forbidden: true,
@@ -1578,10 +1924,31 @@ export async function assertPostgresEntitlementAdminRoleBoundary(
       "postgres_entitlement_admin_protected_owner_invalid",
     );
   }
-  const expectedOwner = [...protectedOwners][0];
-  if (!expectedOwner || expectedOwner === principal.role_name) {
+  const relationOwner = [...protectedOwners][0];
+  if (!relationOwner || relationOwner === principal.role_name) {
     throw new SchemaReadinessError(
       "postgres_entitlement_admin_relation_owner_forbidden",
+    );
+  }
+  const functionOwner = derivedPostgresFunctionOwnerRole(
+    applicationSchema,
+    runtimeApiSchema,
+  );
+  if (
+    functionOwner === relationOwner
+    || functionOwner === principal.role_name
+    || !(await runtimeBoundaryStep(
+      "entitlement_admin_function_owner",
+      () => restrictedFunctionOwnerBoundary(
+        client,
+        functionOwner,
+        applicationSchema,
+        runtimeApiSchema,
+      ),
+    ))
+  ) {
+    throw new SchemaReadinessError(
+      "postgres_function_owner_restriction_invalid",
     );
   }
   const issue = ENTITLEMENT_CHALLENGE_FUNCTIONS.issue;
@@ -1605,7 +1972,7 @@ export async function assertPostgresEntitlementAdminRoleBoundary(
     () => entitlementIssueWrapperRoles(client, {
       runtimeApiSchema,
       applicationSchema,
-      expectedOwner,
+      expectedOwner: functionOwner,
     }),
   );
   if (
@@ -1615,6 +1982,21 @@ export async function assertPostgresEntitlementAdminRoleBoundary(
   ) {
     throw new SchemaReadinessError(
       "postgres_entitlement_admin_issue_function_integrity_invalid",
+    );
+  }
+  if (
+    !(await runtimeBoundaryStep(
+      "entitlement_admin_api_function_set",
+      () => exactRuntimeApiFunctionSet(client, {
+        runtimeApiSchema,
+        functionOwnerRole: functionOwner,
+        runtimeRole: issueRoles.executeRole,
+        entitlementAdminRole: principal.role_name,
+      }),
+    ))
+  ) {
+    throw new SchemaReadinessError(
+      "postgres_entitlement_admin_api_function_set_invalid",
     );
   }
   const definitions = [
@@ -1659,7 +2041,7 @@ export async function assertPostgresEntitlementAdminRoleBoundary(
           applicationSchema,
           functionName: entry.definition.publicName,
           arguments: entry.definition.arguments,
-          expectedOwner,
+          expectedOwner: functionOwner,
           expectedGrantee: entry.shouldExecute
             ? principal.role_name
             : issueRoles.executeRole,
@@ -1682,6 +2064,8 @@ export async function assertPostgresEntitlementAdminRoleBoundary(
     plan_apply_executable: true,
     issue_not_executable: true,
     wrapper_integrity_verified: true,
+    function_owner_restricted: true,
+    runtime_api_function_set_verified: true,
     superuser_forbidden: true,
     bypass_rls_forbidden: true,
     set_role_membership_forbidden: true,
@@ -1701,6 +2085,20 @@ async function assertMigrationAuthority(
     PROTECTED_COST_RELATIONS.some(
       (relation) => owners.get(relation) !== principal.role_name,
     )
+  ) {
+    throw new SchemaReadinessError("postgres_migration_role_not_owner");
+  }
+  return principal;
+}
+
+async function assertExistingMigrationAuthority(
+  client: ClientBase,
+  applicationSchema: string,
+) {
+  const principal = await currentDatabasePrincipal(client);
+  const owners = await relationOwners(client, applicationSchema);
+  if (
+    [...owners.values()].some((owner) => owner !== principal.role_name)
   ) {
     throw new SchemaReadinessError("postgres_migration_role_not_owner");
   }
@@ -1774,18 +2172,64 @@ async function ensureRuntimeRole(
   await client.query(sql);
 }
 
-async function installRuntimeCostApi(
+async function ensureFunctionOwnerRole(
   client: ClientBase,
-  applicationSchema: string,
+  migratorRole: string,
+  functionOwnerRole: string,
+  excludedRoles: readonly string[],
+) {
+  if (
+    functionOwnerRole === migratorRole
+    || excludedRoles.includes(functionOwnerRole)
+  ) {
+    throw new SchemaReadinessError("postgres_roles_must_be_distinct");
+  }
+  const role = await client.query<{ exists: boolean }>(
+    "SELECT EXISTS(SELECT 1 FROM pg_roles WHERE rolname=$1) AS exists",
+    [functionOwnerRole],
+  );
+  if (role.rows[0]?.exists) {
+    if (!(await restrictedFunctionOwnerRole(client, functionOwnerRole))) {
+      throw new SchemaReadinessError(
+        "postgres_function_owner_restriction_invalid",
+      );
+    }
+  } else {
+    const statement = await client.query<{ statement: string }>(
+      `SELECT format(
+         'CREATE ROLE %I WITH NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS',
+         $1::text
+       ) AS statement`,
+      [functionOwnerRole],
+    );
+    const sql = statement.rows[0]?.statement;
+    if (!sql) {
+      throw new SchemaReadinessError(
+        "postgres_function_owner_provision_failed",
+      );
+    }
+    await client.query(sql);
+  }
+  const clearPassword = await client.query<{ statement: string }>(
+    "SELECT format('ALTER ROLE %I PASSWORD NULL',$1::text) AS statement",
+    [functionOwnerRole],
+  );
+  const clearPasswordSql = clearPassword.rows[0]?.statement;
+  if (!clearPasswordSql) {
+    throw new SchemaReadinessError(
+      "postgres_function_owner_provision_failed",
+    );
+  }
+  await client.query(clearPasswordSql);
+}
+
+async function ensureRuntimeApiSchema(
+  client: ClientBase,
   runtimeApiSchema: string,
   migratorRole: string,
-  runtimeRole: string,
 ) {
-  const app = quotedIdentifier(applicationSchema);
   const api = quotedIdentifier(runtimeApiSchema);
-  const runtime = quotedIdentifier(runtimeRole);
   const migrator = quotedIdentifier(migratorRole);
-
   await client.query(
     `CREATE SCHEMA IF NOT EXISTS ${api} AUTHORIZATION ${migrator}`,
   );
@@ -1798,6 +2242,232 @@ async function installRuntimeCostApi(
   if (apiOwner.rows[0]?.owner_name !== migratorRole) {
     throw new SchemaReadinessError("postgres_runtime_api_owner_mismatch");
   }
+}
+
+async function prepareFunctionOwner(
+  client: ClientBase,
+  applicationSchema: string,
+  runtimeApiSchema: string,
+  migratorRole: string,
+  functionOwnerRole: string,
+) {
+  const app = quotedIdentifier(applicationSchema);
+  const api = quotedIdentifier(runtimeApiSchema);
+  const migrator = quotedIdentifier(migratorRole);
+  const functionOwner = quotedIdentifier(functionOwnerRole);
+  await client.query(`GRANT ${functionOwner} TO ${migrator}`);
+  await client.query(
+    `GRANT USAGE,CREATE ON SCHEMA ${app},${api} TO ${functionOwner}`,
+  );
+  await client.query(
+    `GRANT SELECT,INSERT,UPDATE,DELETE
+       ON ALL TABLES IN SCHEMA ${app}
+       TO ${functionOwner}`,
+  );
+  await client.query(
+    `GRANT USAGE,SELECT,UPDATE
+       ON ALL SEQUENCES IN SCHEMA ${app}
+       TO ${functionOwner}`,
+  );
+  await client.query(
+    `GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA ${app}
+       TO ${functionOwner}`,
+  );
+  // The restricted owner must not retain a pg_default_acl ownership object.
+  await client.query(
+    `ALTER DEFAULT PRIVILEGES FOR ROLE ${functionOwner}
+       GRANT EXECUTE ON FUNCTIONS TO PUBLIC`,
+  );
+}
+
+async function transferApplicationSecurityDefiners(
+  client: ClientBase,
+  applicationSchema: string,
+  functionOwnerRole: string,
+) {
+  const statements = await client.query<{ statement: string }>(
+    `SELECT format(
+       'ALTER FUNCTION %I.%I(%s) OWNER TO %I',
+       namespace_row.nspname,
+       function_row.proname,
+       pg_get_function_identity_arguments(function_row.oid),
+       $2::text
+     ) AS statement
+     FROM pg_proc function_row
+     JOIN pg_namespace namespace_row
+       ON namespace_row.oid=function_row.pronamespace
+     WHERE namespace_row.nspname=$1
+       AND function_row.prosecdef
+     ORDER BY function_row.proname,function_row.oid`,
+    [applicationSchema, functionOwnerRole],
+  );
+  for (const row of statements.rows) {
+    await client.query(row.statement);
+  }
+}
+
+async function restrictApplicationSecurityDefinerExecute(
+  client: ClientBase,
+  applicationSchema: string,
+) {
+  const statements = await client.query<{ statement: string }>(
+    `SELECT DISTINCT format(
+       'REVOKE EXECUTE ON FUNCTION %I.%I(%s) FROM %I',
+       namespace_row.nspname,
+       function_row.proname,
+       pg_get_function_identity_arguments(function_row.oid),
+       grantee_role.rolname
+     ) AS statement
+     FROM pg_proc function_row
+     JOIN pg_namespace namespace_row
+       ON namespace_row.oid=function_row.pronamespace
+     CROSS JOIN LATERAL aclexplode(
+       COALESCE(
+         function_row.proacl,
+         acldefault('f',function_row.proowner)
+       )
+     ) privilege_row
+     JOIN pg_roles grantee_role
+       ON grantee_role.oid=privilege_row.grantee
+     WHERE namespace_row.nspname=$1
+       AND function_row.prosecdef
+       AND privilege_row.privilege_type='EXECUTE'
+       AND privilege_row.grantee<>function_row.proowner
+     ORDER BY statement`,
+    [applicationSchema],
+  );
+  const app = quotedIdentifier(applicationSchema);
+  await client.query(
+    `REVOKE EXECUTE ON ALL FUNCTIONS IN SCHEMA ${app} FROM PUBLIC`,
+  );
+  for (const row of statements.rows) {
+    await client.query(row.statement);
+  }
+}
+
+async function finalizeFunctionOwner(
+  client: ClientBase,
+  applicationSchema: string,
+  runtimeApiSchema: string,
+  migratorRole: string,
+  functionOwnerRole: string,
+) {
+  const app = quotedIdentifier(applicationSchema);
+  const api = quotedIdentifier(runtimeApiSchema);
+  const migrator = quotedIdentifier(migratorRole);
+  const functionOwner = quotedIdentifier(functionOwnerRole);
+  await client.query(
+    `REVOKE CREATE ON SCHEMA ${app},${api} FROM ${functionOwner}`,
+  );
+  await client.query(`REVOKE ${functionOwner} FROM ${migrator}`);
+  if (!(await restrictedFunctionOwnerRole(client, functionOwnerRole))) {
+    throw new SchemaReadinessError(
+      "postgres_function_owner_restriction_invalid",
+    );
+  }
+}
+
+function resolvedRoleProvisioningContext(
+  options: SchemaCommandOptions,
+  applicationSchema: string,
+  runtimeApiSchema: string,
+): ResolvedRoleProvisioningContext | null {
+  const provisionRoleBoundary = options.provisionRoleBoundary ?? Boolean(
+    options.runtimeRole
+    || options.entitlementAdminRole
+    || (!options.connectionString && isProductionDeployment()),
+  );
+  if (!provisionRoleBoundary) return null;
+
+  const runtimeRole = selectedRuntimeRole(options.runtimeRole, true);
+  let runtimePassword = String(options.runtimePassword || "");
+  if (!runtimePassword) {
+    try {
+      runtimePassword = secretEnvironmentValue(
+        "AGENTOPS_POSTGRES_RUNTIME_PASSWORD",
+      );
+    } catch {
+      throw new SchemaReadinessError("postgres_runtime_password_required");
+    }
+  }
+  const entitlementAdminRole = selectedEntitlementAdminRole(
+    options.entitlementAdminRole,
+    isProductionDeployment(),
+  );
+  let entitlementAdminPassword = String(
+    options.entitlementAdminPassword || "",
+  );
+  if (!entitlementAdminPassword) {
+    try {
+      entitlementAdminPassword = secretEnvironmentValue(
+        "AGENTOPS_POSTGRES_ENTITLEMENT_ADMIN_PASSWORD",
+      );
+    } catch {
+      throw new SchemaReadinessError(
+        "postgres_entitlement_admin_password_required",
+      );
+    }
+  }
+  return {
+    applicationSchema,
+    runtimeApiSchema,
+    runtimeRole,
+    runtimePassword,
+    entitlementAdminRole,
+    entitlementAdminPassword,
+  };
+}
+
+async function prepareMigrationFunctionOwner(
+  client: ClientBase,
+  context: ResolvedRoleProvisioningContext,
+): Promise<PreparedMigrationFunctionOwner> {
+  const principal = await assertExistingMigrationAuthority(
+    client,
+    context.applicationSchema,
+  );
+  const functionOwnerRole = derivedPostgresFunctionOwnerRole(
+    context.applicationSchema,
+    context.runtimeApiSchema,
+  );
+  await ensureFunctionOwnerRole(
+    client,
+    principal.role_name,
+    functionOwnerRole,
+    [context.runtimeRole, context.entitlementAdminRole],
+  );
+  await ensureRuntimeApiSchema(
+    client,
+    context.runtimeApiSchema,
+    principal.role_name,
+  );
+  await prepareFunctionOwner(
+    client,
+    context.applicationSchema,
+    context.runtimeApiSchema,
+    principal.role_name,
+    functionOwnerRole,
+  );
+  return {
+    migratorRole: principal.role_name,
+    functionOwnerRole,
+  };
+}
+
+async function installRuntimeCostApi(
+  client: ClientBase,
+  applicationSchema: string,
+  runtimeApiSchema: string,
+  migratorRole: string,
+  runtimeRole: string,
+  functionOwnerRole: string,
+) {
+  const app = quotedIdentifier(applicationSchema);
+  const api = quotedIdentifier(runtimeApiSchema);
+  const runtime = quotedIdentifier(runtimeRole);
+  const migrator = quotedIdentifier(migratorRole);
+
+  const functionOwner = quotedIdentifier(functionOwnerRole);
 
   await client.query(`REVOKE ALL ON SCHEMA ${api} FROM PUBLIC`);
   await client.query(`REVOKE CREATE,USAGE ON SCHEMA ${app} FROM PUBLIC`);
@@ -1859,7 +2529,7 @@ async function installRuntimeCostApi(
     );
     await client.query(
       `ALTER FUNCTION ${wrapper}(${function_.arguments})
-       OWNER TO ${migrator}`,
+       OWNER TO ${functionOwner}`,
     );
     await client.query(
       `REVOKE ALL ON FUNCTION ${wrapper}(${function_.arguments})
@@ -1908,15 +2578,15 @@ async function installEntitlementChallengeApi(
   client: ClientBase,
   applicationSchema: string,
   runtimeApiSchema: string,
-  migratorRole: string,
   runtimeRole: string,
   entitlementAdminRole: string,
+  functionOwnerRole: string,
 ) {
   const app = quotedIdentifier(applicationSchema);
   const api = quotedIdentifier(runtimeApiSchema);
-  const migrator = quotedIdentifier(migratorRole);
   const runtime = quotedIdentifier(runtimeRole);
   const admin = quotedIdentifier(entitlementAdminRole);
+  const functionOwner = quotedIdentifier(functionOwnerRole);
   const definitions = [
     {
       ...ENTITLEMENT_CHALLENGE_FUNCTIONS.issue,
@@ -1961,7 +2631,7 @@ async function installEntitlementChallengeApi(
     );
     await client.query(
       `ALTER FUNCTION ${wrapper}(${definition.arguments})
-       OWNER TO ${migrator}`,
+       OWNER TO ${functionOwner}`,
     );
     await client.query(
       `REVOKE ALL ON FUNCTION ${wrapper}(${definition.arguments})
@@ -2013,6 +2683,10 @@ export async function provisionPostgresRuntimeRoleBoundary(
   if (runtimeRole === entitlementAdminRole) {
     throw new SchemaReadinessError("postgres_runtime_and_admin_roles_must_differ");
   }
+  const functionOwnerRole = derivedPostgresFunctionOwnerRole(
+    applicationSchema,
+    runtimeApiSchema,
+  );
   let principal: Awaited<ReturnType<typeof currentDatabasePrincipal>>;
   try {
     principal = await assertMigrationAuthority(client, applicationSchema);
@@ -2045,12 +2719,38 @@ export async function provisionPostgresRuntimeRoleBoundary(
     );
   }
   try {
+    await ensureFunctionOwnerRole(
+      client,
+      principal.role_name,
+      functionOwnerRole,
+      [runtimeRole, entitlementAdminRole],
+    );
+    await ensureRuntimeApiSchema(
+      client,
+      runtimeApiSchema,
+      principal.role_name,
+    );
+    await prepareFunctionOwner(
+      client,
+      applicationSchema,
+      runtimeApiSchema,
+      principal.role_name,
+      functionOwnerRole,
+    );
+  } catch (error) {
+    if (error instanceof SchemaReadinessError) throw error;
+    throw new SchemaReadinessError(
+      "postgres_function_owner_provision_failed",
+    );
+  }
+  try {
     await installRuntimeCostApi(
       client,
       applicationSchema,
       runtimeApiSchema,
       principal.role_name,
       runtimeRole,
+      functionOwnerRole,
     );
   } catch (error) {
     if (error instanceof SchemaReadinessError) throw error;
@@ -2061,9 +2761,9 @@ export async function provisionPostgresRuntimeRoleBoundary(
       client,
       applicationSchema,
       runtimeApiSchema,
-      principal.role_name,
       runtimeRole,
       entitlementAdminRole,
+      functionOwnerRole,
     );
   } catch (error) {
     if (error instanceof SchemaReadinessError) throw error;
@@ -2072,6 +2772,15 @@ export async function provisionPostgresRuntimeRoleBoundary(
     );
   }
   try {
+    await transferApplicationSecurityDefiners(
+      client,
+      applicationSchema,
+      functionOwnerRole,
+    );
+    await restrictApplicationSecurityDefinerExecute(
+      client,
+      applicationSchema,
+    );
     await installEntitlementAdminPrivileges(
       client,
       applicationSchema,
@@ -2082,6 +2791,44 @@ export async function provisionPostgresRuntimeRoleBoundary(
     if (error instanceof SchemaReadinessError) throw error;
     throw new SchemaReadinessError(
       "postgres_entitlement_admin_grants_failed",
+    );
+  }
+  try {
+    await finalizeFunctionOwner(
+      client,
+      applicationSchema,
+      runtimeApiSchema,
+      principal.role_name,
+      functionOwnerRole,
+    );
+    if (
+      !(await restrictedFunctionOwnerBoundary(
+        client,
+        functionOwnerRole,
+        applicationSchema,
+        runtimeApiSchema,
+      ))
+    ) {
+      throw new SchemaReadinessError(
+        "postgres_function_owner_restriction_invalid",
+      );
+    }
+    if (
+      !(await exactRuntimeApiFunctionSet(client, {
+        runtimeApiSchema,
+        functionOwnerRole,
+        runtimeRole,
+        entitlementAdminRole,
+      }))
+    ) {
+      throw new SchemaReadinessError(
+        "postgres_runtime_api_function_set_invalid",
+      );
+    }
+  } catch (error) {
+    if (error instanceof SchemaReadinessError) throw error;
+    throw new SchemaReadinessError(
+      "postgres_function_owner_finalize_failed",
     );
   }
 }
@@ -2187,9 +2934,36 @@ export async function runPostgresSchemaCommand(
       failurePhase = "advisory_lock";
       await acquireTransactionLock(client);
       failurePhase = "manifest";
+      const roleProvisioningContext = operation === "migrate"
+        ? resolvedRoleProvisioningContext(
+            options,
+            applicationSchema,
+            runtimeApiSchema,
+          )
+        : null;
+      let preparedMigrationFunctionOwner:
+        PreparedMigrationFunctionOwner | null = null;
+      if (roleProvisioningContext) {
+        failurePhase = "migration_function_owner_prepare";
+        preparedMigrationFunctionOwner = await prepareMigrationFunctionOwner(
+          client,
+          roleProvisioningContext,
+        );
+      }
+      failurePhase = "manifest";
       const counts = operation === "check"
         ? await check(client)
         : await migrate(client, manifest);
+      if (preparedMigrationFunctionOwner) {
+        failurePhase = "migration_function_owner_finalize";
+        await finalizeFunctionOwner(
+          client,
+          applicationSchema,
+          runtimeApiSchema,
+          preparedMigrationFunctionOwner.migratorRole,
+          preparedMigrationFunctionOwner.functionOwnerRole,
+        );
+      }
       failurePhase = "relations";
       await assertSchemaRelations(client);
       failurePhase = "fingerprint";
@@ -2199,55 +2973,12 @@ export async function runPostgresSchemaCommand(
       );
       let databaseRoleBoundaryVerified: boolean | null = null;
       if (operation === "migrate") {
-        const provisionRoleBoundary = options.provisionRoleBoundary ?? Boolean(
-          options.runtimeRole
-          || options.entitlementAdminRole
-          || (!options.connectionString && isProductionDeployment()),
-        );
-        if (provisionRoleBoundary) {
+        if (roleProvisioningContext) {
           failurePhase = "role_provision";
-          const runtimeRole = selectedRuntimeRole(
-            options.runtimeRole,
-            true,
+          await provisionPostgresRuntimeRoleBoundary(
+            client,
+            roleProvisioningContext,
           );
-          let runtimePassword = String(options.runtimePassword || "");
-          if (!runtimePassword) {
-            try {
-              runtimePassword = secretEnvironmentValue(
-                "AGENTOPS_POSTGRES_RUNTIME_PASSWORD",
-              );
-            } catch {
-              throw new SchemaReadinessError(
-                "postgres_runtime_password_required",
-              );
-            }
-          }
-          const entitlementAdminRole = selectedEntitlementAdminRole(
-            options.entitlementAdminRole,
-            isProductionDeployment(),
-          );
-          let entitlementAdminPassword = String(
-            options.entitlementAdminPassword || "",
-          );
-          if (!entitlementAdminPassword) {
-            try {
-              entitlementAdminPassword = secretEnvironmentValue(
-                "AGENTOPS_POSTGRES_ENTITLEMENT_ADMIN_PASSWORD",
-              );
-            } catch {
-              throw new SchemaReadinessError(
-                "postgres_entitlement_admin_password_required",
-              );
-            }
-          }
-          await provisionPostgresRuntimeRoleBoundary(client, {
-            applicationSchema,
-            runtimeApiSchema,
-            runtimeRole,
-            runtimePassword,
-            entitlementAdminRole,
-            entitlementAdminPassword,
-          });
         }
       } else if (
         options.enforceRuntimeBoundary ?? isProductionDeployment()

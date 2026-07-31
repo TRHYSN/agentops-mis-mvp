@@ -30,6 +30,10 @@ type ShellResult = {
 const repositoryRoot = resolve(fileURLToPath(new URL("../../../", import.meta.url)));
 const backupScript = join(repositoryRoot, "deploy/byoc/backup.sh");
 const restoreScript = join(repositoryRoot, "deploy/byoc/restore-drill.sh");
+const restoreProvisionScript = join(
+  repositoryRoot,
+  "deploy/byoc/restore-provision.sh",
+);
 const restoreDsnScript = join(
   repositoryRoot,
   "deploy/byoc/postgres-dsn-for-restore.mjs",
@@ -172,10 +176,15 @@ async function run() {
   try {
     const fixtureBin = join(fixtureRoot, "bin");
     const dockerLog = join(fixtureRoot, "docker.log");
+    const provisionLog = join(fixtureRoot, "provision.log");
     const databaseState = join(fixtureRoot, "databases");
+    const fakeNextApp = join(fixtureRoot, "next-app");
+    const fakeNextAppBin = join(fakeNextApp, "node_modules/.bin");
     await mkdir(fixtureBin, { mode: 0o700 });
     await mkdir(databaseState, { mode: 0o700 });
+    await mkdir(fakeNextAppBin, { mode: 0o700, recursive: true });
     await writeFile(dockerLog, "", { mode: 0o600 });
+    await writeFile(provisionLog, "", { mode: 0o600 });
 
     const fakeDocker = [
       "#!/bin/sh",
@@ -242,13 +251,30 @@ async function run() {
       "    fi",
       '    rmdir "$FAKE_DB_STATE/$last"',
       "    ;;",
-      "  *'npm run check:postgres-schema'*)",
+      "  *restore-provision.sh*)",
+      '    [ "${AGENTOPS_POSTGRES_MIGRATOR_HOST:-}" = "postgres" ] || exit 65',
+      '    [ -n "${AGENTOPS_POSTGRES_MIGRATOR_PASSWORD_FILE:-}" ] || exit 65',
+      '    [ -n "${AGENTOPS_POSTGRES_RUNTIME_PASSWORD_FILE:-}" ] || exit 65',
+      '    [ -n "${AGENTOPS_POSTGRES_ENTITLEMENT_ADMIN_PASSWORD_FILE:-}" ] || exit 65',
+      '    log "provision_source:migrator_components:$last"',
+      '    log "migrate:$last"',
+      '    if [ "${FAKE_MIGRATE_FAIL:-false}" = true ]; then',
+      "      exit 71",
+      "    fi",
+      '    [ -d "$FAKE_DB_STATE/$last" ] || exit 45',
       '    log "schema_check:$last"',
       '    if [ "${FAKE_SCHEMA_FAIL:-false}" = true ]; then',
       '      printf "%s\\n" "$POSTGRES_PASSWORD $AGENTOPS_POSTGRES_DSN" >&2',
-      "      exit 44",
+      "      exit 72",
       "    fi",
-      '    [ -d "$FAKE_DB_STATE/$last" ] || exit 45',
+      '    log "runtime_boundary:$last"',
+      '    if [ "${FAKE_RUNTIME_BOUNDARY_FAIL:-false}" = true ]; then',
+      "      exit 73",
+      "    fi",
+      '    log "entitlement_admin_boundary:$last"',
+      '    if [ "${FAKE_ADMIN_BOUNDARY_FAIL:-false}" = true ]; then',
+      "      exit 74",
+      "    fi",
       "    ;;",
       "  *)",
       "    printf '%s\\n' fake_docker_unexpected >&2",
@@ -260,6 +286,81 @@ async function run() {
     const fakeDockerPath = join(fixtureBin, "docker");
     await writeFile(fakeDockerPath, fakeDocker, { mode: 0o700 });
     await chmod(fakeDockerPath, 0o700);
+
+    const fakeNpm = [
+      "#!/bin/sh",
+      "set -eu",
+      ': "${FAKE_PROVISION_LOG:?}"',
+      ': "${FAKE_EXPECTED_RESTORE_DB:?}"',
+      'log() { printf "%s\\n" "$1" >> "$FAKE_PROVISION_LOG"; }',
+      'case "$*" in',
+      "  *migrate:postgres*)",
+      '    [ -n "${AGENTOPS_POSTGRES_RUNTIME_PASSWORD_FILE:-}" ] || exit 81',
+      '    [ -f "${AGENTOPS_POSTGRES_RUNTIME_PASSWORD_FILE:-}" ] || exit 82',
+      '    [ -n "${AGENTOPS_POSTGRES_ENTITLEMENT_ADMIN_PASSWORD_FILE:-}" ] || exit 83',
+      '    [ -f "${AGENTOPS_POSTGRES_ENTITLEMENT_ADMIN_PASSWORD_FILE:-}" ] || exit 84',
+      '    [ -f "${AGENTOPS_POSTGRES_MIGRATOR_DSN_FILE:-}" ] || exit 85',
+      '    [ -z "${AGENTOPS_POSTGRES_DSN_FILE:-}" ] || exit 86',
+      '    [ -z "${AGENTOPS_POSTGRES_ENTITLEMENT_ADMIN_DSN_FILE:-}" ] || exit 87',
+      '    [ -z "${AGENTOPS_POSTGRES_MIGRATOR_HOST:-}" ] || exit 88',
+      '    [ -z "${AGENTOPS_POSTGRES_MIGRATOR_PASSWORD_FILE:-}" ] || exit 89',
+      '    node -e \'const {readFileSync}=require("fs");const u=new URL(readFileSync(process.env.AGENTOPS_POSTGRES_MIGRATOR_DSN_FILE,"utf8"));if(u.pathname!==`/${process.env.FAKE_EXPECTED_RESTORE_DB}`)process.exit(90);if(process.env.FAKE_EXPECT_COMPONENT_DSN==="true"&&(u.hostname!=="postgres"||u.port!=="5432"||u.username!=="agentops_migrator"))process.exit(91)\'',
+      '    log "migrate:derived_migrator_dsn_only"',
+      '    if [ -n "${FAKE_PROVISION_GATE:-}" ]; then',
+      '      : > "${FAKE_PROVISION_GATE}.started"',
+      '      attempts=0',
+      '      while [ ! -e "${FAKE_PROVISION_GATE}.release" ]; do',
+      "        attempts=$((attempts + 1))",
+      '        [ "$attempts" -lt 200 ] || exit 92',
+      "        sleep 0.05",
+      "      done",
+      "    fi",
+      '    [ "${FAKE_MIGRATE_FAIL:-false}" != true ] || exit 1',
+      "    ;;",
+      "  *check:postgres-schema*)",
+      '    [ -f "${AGENTOPS_POSTGRES_DSN_FILE:-}" ] || exit 93',
+      '    [ -f "${AGENTOPS_POSTGRES_ENTITLEMENT_ADMIN_DSN_FILE:-}" ] || exit 94',
+      '    [ -z "${AGENTOPS_POSTGRES_ENTITLEMENT_ADMIN_PASSWORD_FILE:-}" ] || exit 95',
+      '    [ -z "${AGENTOPS_POSTGRES_RUNTIME_PASSWORD_FILE:-}" ] || exit 96',
+      '    [ -z "${AGENTOPS_POSTGRES_DSN:-}" ] || exit 97',
+      '    [ -z "${AGENTOPS_POSTGRES_ENTITLEMENT_ADMIN_DSN:-}" ] || exit 98',
+      '    log "schema_check:derived_runtime_dsn_only"',
+      '    [ "${FAKE_SCHEMA_FAIL:-false}" != true ] || exit 1',
+      "    ;;",
+      "  *) exit 99 ;;",
+      "esac",
+      "",
+    ].join("\n");
+    const fakeNpmPath = join(fixtureBin, "npm");
+    await writeFile(fakeNpmPath, fakeNpm, { mode: 0o700 });
+    await chmod(fakeNpmPath, 0o700);
+
+    const fakeTsx = [
+      "#!/bin/sh",
+      "set -eu",
+      ': "${FAKE_PROVISION_LOG:?}"',
+      "boundary=",
+      'for value in "$@"; do boundary=$value; done',
+      'case "$boundary" in runtime|entitlement-admin) ;; *) exit 99 ;; esac',
+      '[ -z "${AGENTOPS_POSTGRES_DSN:-}" ] || exit 100',
+      '[ -z "${AGENTOPS_POSTGRES_ENTITLEMENT_ADMIN_DSN:-}" ] || exit 101',
+      '[ -z "${AGENTOPS_POSTGRES_PASSWORD:-}" ] || exit 102',
+      '[ -z "${AGENTOPS_POSTGRES_RUNTIME_PASSWORD:-}" ] || exit 103',
+      '[ -z "${AGENTOPS_POSTGRES_ENTITLEMENT_ADMIN_PASSWORD:-}" ] || exit 104',
+      '[ -z "${AGENTOPS_POSTGRES_ENTITLEMENT_ADMIN_PASSWORD_FILE:-}" ] || exit 105',
+      '[ -f "${AGENTOPS_POSTGRES_DSN_FILE:-}" ] || exit 106',
+      '[ -f "${AGENTOPS_POSTGRES_ENTITLEMENT_ADMIN_DSN_FILE:-}" ] || exit 107',
+      'if [ "${FAKE_FUNCTION_OWNER_EVIDENCE_MISSING:-false}" = true ]; then',
+      "  exit 1",
+      "fi",
+      'if [ "$boundary" = runtime ] && [ "${FAKE_RUNTIME_BOUNDARY_FAIL:-false}" = true ]; then exit 1; fi',
+      'if [ "$boundary" = entitlement-admin ] && [ "${FAKE_ADMIN_BOUNDARY_FAIL:-false}" = true ]; then exit 1; fi',
+      'printf "boundary:%s:function_owner_restricted\\n" "$boundary" >> "$FAKE_PROVISION_LOG"',
+      "",
+    ].join("\n");
+    const fakeTsxPath = join(fakeNextAppBin, "tsx");
+    await writeFile(fakeTsxPath, fakeTsx, { mode: 0o700 });
+    await chmod(fakeTsxPath, 0o700);
 
     const baseEnvironment: NodeJS.ProcessEnv = {
       ...process.env,
@@ -274,6 +375,18 @@ async function run() {
       AGENTOPS_POSTGRES_HOST: "postgres",
       AGENTOPS_POSTGRES_PASSWORD_FILE:
         "/run/secrets/postgres_password",
+      AGENTOPS_POSTGRES_MIGRATOR_HOST: "postgres",
+      AGENTOPS_POSTGRES_MIGRATOR_PORT: "5432",
+      AGENTOPS_POSTGRES_MIGRATOR_USER: "agentops_migrator",
+      AGENTOPS_POSTGRES_MIGRATOR_PASSWORD_FILE:
+        "/run/secrets/postgres_migrator_password",
+      AGENTOPS_POSTGRES_RUNTIME_ROLE: "agentops_runtime",
+      AGENTOPS_POSTGRES_RUNTIME_PASSWORD_FILE:
+        "/run/secrets/postgres_runtime_password",
+      AGENTOPS_POSTGRES_ENTITLEMENT_ADMIN_ROLE:
+        "agentops_entitlement_admin",
+      AGENTOPS_POSTGRES_ENTITLEMENT_ADMIN_PASSWORD_FILE:
+        "/run/secrets/postgres_entitlement_admin_password",
     };
 
     const concurrentBundle = join(fixtureRoot, "concurrent.bundle");
@@ -447,6 +560,278 @@ async function run() {
     assert.equal(fileDsn.pathname, "/restore_from_file");
     assert.equal(fileDsn.searchParams.get("sslmode"), "require");
     assert.equal(fileDsn.searchParams.get("connect_timeout"), "9");
+
+    const migratorDsnFile = join(fixtureRoot, "postgres-migrator-dsn");
+    const runtimePasswordFile = join(fixtureRoot, "postgres-runtime-password");
+    const adminPasswordFile = join(fixtureRoot, "postgres-admin-password");
+    await writeFile(
+      migratorDsnFile,
+      `${dsnSentinel}?sslmode=verify-full&application_name=byoc-restore\n`,
+      { mode: 0o400 },
+    );
+    await writeFile(runtimePasswordFile, `${secretSentinel}-runtime\n`, {
+      mode: 0o400,
+    });
+    await writeFile(adminPasswordFile, `${secretSentinel}-admin\n`, {
+      mode: 0o400,
+    });
+    const roleDsnEnvironment: NodeJS.ProcessEnv = {
+      ...process.env,
+      AGENTOPS_POSTGRES_MIGRATOR_DSN_FILE: migratorDsnFile,
+      AGENTOPS_POSTGRES_USER: "agentops_runtime_restore",
+      AGENTOPS_POSTGRES_PASSWORD_FILE: runtimePasswordFile,
+      AGENTOPS_POSTGRES_ENTITLEMENT_ADMIN_USER:
+        "agentops_entitlement_admin_restore",
+      AGENTOPS_POSTGRES_ENTITLEMENT_ADMIN_PASSWORD_FILE: adminPasswordFile,
+    };
+    const runtimeRestoreDsnFile = join(
+      fixtureRoot,
+      "postgres-runtime-restore-dsn",
+    );
+    const runtimeRoleDsnResult = await runNode(
+      [
+        restoreDsnScript,
+        "restore_role_profiles",
+        runtimeRestoreDsnFile,
+        "migrator",
+        "runtime",
+      ],
+      roleDsnEnvironment,
+    );
+    assert.equal(runtimeRoleDsnResult.code, 0);
+    assertNoSecretOutput(runtimeRoleDsnResult);
+    const runtimeRoleDsn = new URL(
+      await readFile(runtimeRestoreDsnFile, "utf8"),
+    );
+    assert.equal(runtimeRoleDsn.pathname, "/restore_role_profiles");
+    assert.equal(runtimeRoleDsn.username, "agentops_runtime_restore");
+    assert.equal(runtimeRoleDsn.password, `${secretSentinel}-runtime`);
+    assert.equal(runtimeRoleDsn.searchParams.get("sslmode"), "verify-full");
+    assert.equal(
+      runtimeRoleDsn.searchParams.get("application_name"),
+      "byoc-restore",
+    );
+    assert.equal((await lstat(runtimeRestoreDsnFile)).mode & 0o777, 0o400);
+
+    const adminRestoreDsnFile = join(
+      fixtureRoot,
+      "postgres-admin-restore-dsn",
+    );
+    const adminRoleDsnResult = await runNode(
+      [
+        restoreDsnScript,
+        "restore_role_profiles",
+        adminRestoreDsnFile,
+        "migrator",
+        "entitlement-admin",
+      ],
+      roleDsnEnvironment,
+    );
+    assert.equal(adminRoleDsnResult.code, 0);
+    assertNoSecretOutput(adminRoleDsnResult);
+    const adminRoleDsn = new URL(
+      await readFile(adminRestoreDsnFile, "utf8"),
+    );
+    assert.equal(adminRoleDsn.pathname, "/restore_role_profiles");
+    assert.equal(
+      adminRoleDsn.username,
+      "agentops_entitlement_admin_restore",
+    );
+    assert.equal(adminRoleDsn.password, `${secretSentinel}-admin`);
+    assert.equal(adminRoleDsn.searchParams.get("sslmode"), "verify-full");
+    assert.equal((await lstat(adminRestoreDsnFile)).mode & 0o777, 0o400);
+
+    const migratorPasswordFile = join(
+      fixtureRoot,
+      "postgres-migrator-password",
+    );
+    await writeFile(migratorPasswordFile, `${secretSentinel}-migrator\n`, {
+      mode: 0o400,
+    });
+    const cleanProvisionEnvironment: NodeJS.ProcessEnv = { ...process.env };
+    for (const name of [
+      "AGENTOPS_POSTGRES_MIGRATOR_DSN",
+      "AGENTOPS_POSTGRES_MIGRATOR_DSN_FILE",
+      "AGENTOPS_POSTGRES_DSN",
+      "AGENTOPS_POSTGRES_DSN_FILE",
+      "AGENTOPS_POSTGRES_ENTITLEMENT_ADMIN_DSN",
+      "AGENTOPS_POSTGRES_ENTITLEMENT_ADMIN_DSN_FILE",
+      "AGENTOPS_POSTGRES_MIGRATOR_PASSWORD",
+      "AGENTOPS_POSTGRES_PASSWORD",
+      "AGENTOPS_POSTGRES_RUNTIME_PASSWORD",
+      "AGENTOPS_POSTGRES_ENTITLEMENT_ADMIN_PASSWORD",
+      "AGENTOPS_POSTGRES_MIGRATOR_HOST",
+      "AGENTOPS_POSTGRES_MIGRATOR_PORT",
+      "AGENTOPS_POSTGRES_MIGRATOR_DATABASE",
+      "AGENTOPS_POSTGRES_MIGRATOR_USER",
+      "AGENTOPS_POSTGRES_MIGRATOR_PASSWORD_FILE",
+      "AGENTOPS_POSTGRES_HOST",
+      "AGENTOPS_POSTGRES_PORT",
+      "AGENTOPS_POSTGRES_DATABASE",
+      "AGENTOPS_POSTGRES_USER",
+      "AGENTOPS_POSTGRES_PASSWORD_FILE",
+      "AGENTOPS_POSTGRES_ENTITLEMENT_ADMIN_HOST",
+      "AGENTOPS_POSTGRES_ENTITLEMENT_ADMIN_PORT",
+      "AGENTOPS_POSTGRES_ENTITLEMENT_ADMIN_DATABASE",
+      "AGENTOPS_POSTGRES_ENTITLEMENT_ADMIN_USER",
+      "AGENTOPS_POSTGRES_RUNTIME_PASSWORD_FILE",
+      "AGENTOPS_POSTGRES_ENTITLEMENT_ADMIN_PASSWORD_FILE",
+    ]) {
+      delete cleanProvisionEnvironment[name];
+    }
+    Object.assign(cleanProvisionEnvironment, {
+      PATH: `${fixtureBin}:${process.env.PATH ?? ""}`,
+      AGENTOPS_BYOC_LIB_DIR: join(repositoryRoot, "deploy/byoc"),
+      AGENTOPS_BYOC_NEXT_APP_ROOT: fakeNextApp,
+      AGENTOPS_POSTGRES_RUNTIME_ROLE: "agentops_runtime",
+      AGENTOPS_POSTGRES_ENTITLEMENT_ADMIN_ROLE:
+        "agentops_entitlement_admin",
+      AGENTOPS_POSTGRES_RUNTIME_PASSWORD_FILE: runtimePasswordFile,
+      AGENTOPS_POSTGRES_ENTITLEMENT_ADMIN_PASSWORD_FILE: adminPasswordFile,
+      FAKE_PROVISION_LOG: provisionLog,
+    });
+    const derivedProvisionFiles = async () => (await readdir(fixtureRoot))
+      .filter((name) => name.includes(".restore-"));
+
+    activeCheck = "default_compose_migrator_components";
+    const componentRestoreDatabase = "restore_component_provision";
+    const componentProvision = await runShell(
+      restoreProvisionScript,
+      [componentRestoreDatabase],
+      {
+        ...cleanProvisionEnvironment,
+        AGENTOPS_POSTGRES_MIGRATOR_HOST: "postgres",
+        AGENTOPS_POSTGRES_MIGRATOR_PORT: "5432",
+        AGENTOPS_POSTGRES_MIGRATOR_DATABASE: "agentops_production",
+        AGENTOPS_POSTGRES_MIGRATOR_USER: "agentops_migrator",
+        AGENTOPS_POSTGRES_MIGRATOR_PASSWORD_FILE: migratorPasswordFile,
+        FAKE_EXPECTED_RESTORE_DB: componentRestoreDatabase,
+        FAKE_EXPECT_COMPONENT_DSN: "true",
+      },
+    );
+    assert.equal(componentProvision.code, 0);
+    assertNoSecretOutput(componentProvision);
+    assert.deepEqual(await derivedProvisionFiles(), []);
+    const componentProvisionLog = await logLines(provisionLog);
+    assert.equal(
+      componentProvisionLog.includes(
+        "migrate:derived_migrator_dsn_only",
+      ),
+      true,
+    );
+    assert.equal(
+      componentProvisionLog.includes(
+        "schema_check:derived_runtime_dsn_only",
+      ),
+      true,
+    );
+    assert.equal(
+      componentProvisionLog.includes(
+        "boundary:runtime:function_owner_restricted",
+      ),
+      true,
+    );
+    assert.equal(
+      componentProvisionLog.includes(
+        "boundary:entitlement-admin:function_owner_restricted",
+      ),
+      true,
+    );
+
+    const signalGate = join(fixtureRoot, "restore-provision-signal-gate");
+    activeCheck = "component_dsn_signal_cleanup";
+    const signaledComponentProvision = startShell(
+      restoreProvisionScript,
+      ["restore_component_signal"],
+      {
+        ...cleanProvisionEnvironment,
+        AGENTOPS_POSTGRES_MIGRATOR_HOST: "postgres",
+        AGENTOPS_POSTGRES_MIGRATOR_PORT: "5432",
+        AGENTOPS_POSTGRES_MIGRATOR_DATABASE: "agentops_production",
+        AGENTOPS_POSTGRES_MIGRATOR_USER: "agentops_migrator",
+        AGENTOPS_POSTGRES_MIGRATOR_PASSWORD_FILE: migratorPasswordFile,
+        FAKE_EXPECTED_RESTORE_DB: "restore_component_signal",
+        FAKE_EXPECT_COMPONENT_DSN: "true",
+        FAKE_PROVISION_GATE: signalGate,
+      },
+    );
+    await waitForPath(`${signalGate}.started`);
+    const filesBeforeSignal = await derivedProvisionFiles();
+    assert.equal(filesBeforeSignal.length, 3);
+    for (const name of filesBeforeSignal) {
+      assert.equal((await lstat(join(fixtureRoot, name))).mode & 0o777, 0o400);
+    }
+    signaledComponentProvision.child.kill("SIGTERM");
+    await writeFile(`${signalGate}.release`, "", { mode: 0o600 });
+    const signaledComponentResult = await signaledComponentProvision.result;
+    assert.equal(signaledComponentResult.code, 143);
+    assertNoSecretOutput(signaledComponentResult);
+    assert.deepEqual(await derivedProvisionFiles(), []);
+
+    const provisionMigratorDsnFile = join(
+      fixtureRoot,
+      "postgres-provision-migrator-dsn",
+    );
+    await writeFile(
+      provisionMigratorDsnFile,
+      `${dsnSentinel}?sslmode=verify-full&connect_timeout=11\n`,
+      { mode: 0o400 },
+    );
+    const fileProvisionEnvironment: NodeJS.ProcessEnv = {
+      ...cleanProvisionEnvironment,
+      AGENTOPS_POSTGRES_MIGRATOR_DSN_FILE: provisionMigratorDsnFile,
+    };
+
+    activeCheck = "file_backed_provision_sequence";
+    const fileRestoreDatabase = "restore_file_provision";
+    const fileProvision = await runShell(
+      restoreProvisionScript,
+      [fileRestoreDatabase],
+      {
+        ...fileProvisionEnvironment,
+        FAKE_EXPECTED_RESTORE_DB: fileRestoreDatabase,
+      },
+    );
+    assert.equal(fileProvision.code, 0);
+    assertNoSecretOutput(fileProvision);
+    assert.deepEqual(await derivedProvisionFiles(), []);
+    const fileProvisionLog = await logLines(provisionLog);
+    assert.equal(
+      fileProvisionLog.includes("migrate:derived_migrator_dsn_only"),
+      true,
+    );
+    assert.equal(
+      fileProvisionLog.includes("schema_check:derived_runtime_dsn_only"),
+      true,
+    );
+
+    activeCheck = "function_owner_evidence_required";
+    const missingFunctionOwnerEvidence = await runShell(
+      restoreProvisionScript,
+      ["restore_missing_function_owner"],
+      {
+        ...fileProvisionEnvironment,
+        FAKE_EXPECTED_RESTORE_DB: "restore_missing_function_owner",
+        FAKE_FUNCTION_OWNER_EVIDENCE_MISSING: "true",
+      },
+    );
+    assert.equal(missingFunctionOwnerEvidence.code, 73);
+    assertNoSecretOutput(missingFunctionOwnerEvidence);
+    assert.deepEqual(await derivedProvisionFiles(), []);
+
+    activeCheck = "direct_dsn_rejected_before_boundary";
+    const directDsnConflict = await runShell(
+      restoreProvisionScript,
+      ["restore_direct_dsn_conflict"],
+      {
+        ...fileProvisionEnvironment,
+        AGENTOPS_POSTGRES_DSN: dsnSentinel,
+        FAKE_EXPECTED_RESTORE_DB: "restore_direct_dsn_conflict",
+      },
+    );
+    assert.equal(directDsnConflict.code, 65);
+    assertNoSecretOutput(directDsnConflict);
+    assert.deepEqual(await derivedProvisionFiles(), []);
 
     const existingDsnOutput = join(fixtureRoot, "postgres-existing-dsn");
     const existingDsnContent = "existing output must remain unchanged\n";
@@ -623,6 +1008,20 @@ async function run() {
       true,
     );
 
+    const failedProvisionDatabase = "provision_failure_cleanup";
+    activeCheck = "provision_failure_cleanup";
+    const failedProvision = await runShell(restoreScript, [validBundle], {
+      ...baseEnvironment,
+      AGENTOPS_RESTORE_DATABASE: failedProvisionDatabase,
+      AGENTOPS_RESTORE_KEEP: "true",
+      FAKE_MIGRATE_FAIL: "true",
+    });
+    assertFailed(failedProvision, /restore_provisioning_failed/);
+    assert.equal(
+      await pathExists(join(databaseState, failedProvisionDatabase)),
+      false,
+    );
+
     const failedSchemaDatabase = "schema_failure_cleanup";
     activeCheck = "schema_failure_cleanup";
     const failedSchema = await runShell(restoreScript, [validBundle], {
@@ -634,6 +1033,48 @@ async function run() {
     assertFailed(failedSchema);
     assert.equal(
       await pathExists(join(databaseState, failedSchemaDatabase)),
+      false,
+    );
+
+    const failedRuntimeBoundaryDatabase = "runtime_boundary_failure_cleanup";
+    activeCheck = "runtime_boundary_failure_cleanup";
+    const failedRuntimeBoundary = await runShell(
+      restoreScript,
+      [validBundle],
+      {
+        ...baseEnvironment,
+        AGENTOPS_RESTORE_DATABASE: failedRuntimeBoundaryDatabase,
+        AGENTOPS_RESTORE_KEEP: "true",
+        FAKE_RUNTIME_BOUNDARY_FAIL: "true",
+      },
+    );
+    assertFailed(
+      failedRuntimeBoundary,
+      /restore_runtime_role_boundary_failed/,
+    );
+    assert.equal(
+      await pathExists(join(databaseState, failedRuntimeBoundaryDatabase)),
+      false,
+    );
+
+    const failedAdminBoundaryDatabase = "admin_boundary_failure_cleanup";
+    activeCheck = "admin_boundary_failure_cleanup";
+    const failedAdminBoundary = await runShell(
+      restoreScript,
+      [validBundle],
+      {
+        ...baseEnvironment,
+        AGENTOPS_RESTORE_DATABASE: failedAdminBoundaryDatabase,
+        AGENTOPS_RESTORE_KEEP: "true",
+        FAKE_ADMIN_BOUNDARY_FAIL: "true",
+      },
+    );
+    assertFailed(
+      failedAdminBoundary,
+      /restore_entitlement_admin_role_boundary_failed/,
+    );
+    assert.equal(
+      await pathExists(join(databaseState, failedAdminBoundaryDatabase)),
       false,
     );
 
@@ -666,6 +1107,22 @@ async function run() {
     );
     assert.match(
       successfulCleanup.stdout,
+      /"restore_provisioning_completed":true/,
+    );
+    assert.match(
+      successfulCleanup.stdout,
+      /"runtime_role_boundary_verified":true/,
+    );
+    assert.match(
+      successfulCleanup.stdout,
+      /"entitlement_admin_role_boundary_verified":true/,
+    );
+    assert.match(
+      successfulCleanup.stdout,
+      /"function_owner_boundary_verified":true/,
+    );
+    assert.match(
+      successfulCleanup.stdout,
       /"restore_database_kept":false/,
     );
     assert.equal(await pathExists(join(databaseState, cleanupDatabase)), false);
@@ -687,6 +1144,22 @@ async function run() {
     assert.equal(await pathExists(join(databaseState, keptDatabase)), true);
     const finalLog = await logLines(dockerLog);
     assert.equal(finalLog.includes(`dropdb:${keptDatabase}`), false);
+    assert.equal(
+      finalLog.includes(
+        `provision_source:migrator_components:${cleanupDatabase}`,
+      ),
+      true,
+    );
+    assert.equal(finalLog.includes(`migrate:${cleanupDatabase}`), true);
+    assert.equal(finalLog.includes(`schema_check:${cleanupDatabase}`), true);
+    assert.equal(
+      finalLog.includes(`runtime_boundary:${cleanupDatabase}`),
+      true,
+    );
+    assert.equal(
+      finalLog.includes(`entitlement_admin_boundary:${cleanupDatabase}`),
+      true,
+    );
 
     console.log(JSON.stringify({
       ok: true,
@@ -703,11 +1176,28 @@ async function run() {
       dsn_file_remains_file_backed: true,
       dsn_existing_output_preserved: true,
       dsn_query_parameters_preserved: true,
+      migrator_dsn_used_for_restore: true,
+      isolated_runtime_dsn_file_backed: true,
+      isolated_entitlement_admin_dsn_file_backed: true,
+      default_compose_migrator_components_retargeted: true,
+      default_compose_role_dsns_file_backed: true,
+      provisioning_passwords_present_during_migration: true,
+      boundary_checks_use_only_derived_role_dsns: true,
+      direct_role_dsns_absent_from_boundary_checker: true,
+      derived_role_dsns_removed_on_success_failure_and_signal: true,
       node_secret_0600_staged_as_0400: true,
       node_secret_symlink_rejected: true,
       restore_failure_cleanup: true,
+      provision_failure_cleanup: true,
       schema_failure_cleanup: true,
       schema_fingerprint_verified: true,
+      runtime_boundary_failure_cleanup: true,
+      entitlement_admin_boundary_failure_cleanup: true,
+      restore_provisioning_completed: true,
+      runtime_role_boundary_verified: true,
+      entitlement_admin_role_boundary_verified: true,
+      function_owner_boundary_verified: true,
+      function_owner_evidence_required: true,
       drop_failure_fail_closed: true,
       success_cleanup_confirmed: true,
       keep_requires_success_and_explicit_true: true,

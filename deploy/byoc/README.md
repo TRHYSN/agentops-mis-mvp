@@ -54,7 +54,7 @@ restricted logins. The control plane receives only the runtime password and
 Human Session HMAC key; it cannot read the migrator, entitlement-admin, or
 operator password, and the migrator cannot read the Human Session HMAC key.
 
-The three database identities are intentionally different:
+The database identities are intentionally different:
 
 - `agentops_migrator` owns the application schema and applies the
   checksum-pinned manifest.
@@ -66,6 +66,11 @@ The three database identities are intentionally different:
   plan/apply API. It has no direct table access to Human credentials,
   entitlements, audit rows, reservations, runs, memberships, or migration
   state.
+- `agentops_fn_<schema-hash>` is a passwordless `NOLOGIN`, `NOINHERIT` owner
+  derived from the application and runtime API schema names. It owns all
+  application `SECURITY DEFINER` functions and bounded API wrappers, but no
+  application relations and neither schema's `CREATE` privilege. Provisioning
+  explicitly clears any pre-existing password verifier.
 
 Cost reservation writes cross a separately owned
 `agentops_runtime_api` schema through five explicitly granted
@@ -80,9 +85,19 @@ for future functions. Existing and newly created application functions are not
 runtime-executable unless the bounded API grants them explicitly. Runtime
 readiness verifies the complete application-function allowlist; it contains
 only the approval-binding and PreparedAction-lease validation helpers required
-by ordinary trigger-backed writes. The remaining promotion hardening item is a
-dedicated restricted `NOLOGIN` owner for `SECURITY DEFINER` functions; the
-current candidate still assigns those functions to the migrator.
+by ordinary trigger-backed writes. Before pending migrations execute, the
+migrator receives temporary membership and schema `CREATE` for the derived
+function owner, allowing upgrades to replace functions already owned by that
+identity. The transaction revokes that handoff after migration, rebuilds the
+wrappers, transfers application `SECURITY DEFINER` ownership, and revokes both
+again before commit. No fourth password or customer-managed secret is required.
+Readiness verifies the final role attributes, zero memberships, schema grants,
+a database-wide ownership closed set that permits only the expected functions,
+wrapper source, fixed search path, and exact executable grantees.
+Re-provisioning removes stale non-owner `EXECUTE` grants from application
+`SECURITY DEFINER` functions before the transaction commits.
+The runtime API schema is verified as an exact eight-function closed set, so an
+unregistered wrapper, owner, signature, or executable grantee fails readiness.
 
 Entitlement administration is a high-privilege operator action, not a normal
 control-plane request. The optional `entitlement-admin` Compose profile is
@@ -218,19 +233,31 @@ read-only object, so replacing the original bundle path after validation cannot
 change the restored bytes. The staging directory is removed on success, failure,
 or a handled termination signal.
 
-Custom Compose deployments may supply `AGENTOPS_POSTGRES_DSN_FILE` to the
-migrator instead of component settings. The default BYOC entrypoint rejects a
-credentialed `AGENTOPS_POSTGRES_DSN` environment value and rejects a DSN file
-combined with a component password file. When the drill selects the isolated
-restore database, it parses the DSN as a PostgreSQL URL and changes only the
-database pathname; query parameters such as `sslmode`, certificate settings,
-and connection timeouts are preserved. The derived DSN is written beside the
-entrypoint's staged source as a new `0400` file and removed when validation
-exits; the full DSN is never copied back into an environment variable or
-printed.
-When a file-backed DSN is mounted with host mode `0600`, the same entrypoint
-stages it as the Node-owned `AGENTOPS_POSTGRES_DSN_FILE`; a DSN file and a
-component password file cannot be configured together.
+Because the dump deliberately omits ownership and ACLs, restore validation does
+not stop at a read-only schema check. The default Compose migrator component
+settings are converted beside the staged migrator password into three new
+`0400` DSN files targeting the isolated database. The checksum-pinned
+migration/provisioning command consumes only the derived migrator DSN while the
+runtime and entitlement-admin role passwords remain available for provisioning.
+This rebuilds their grants and transfers every bounded `SECURITY DEFINER`
+function to the derived `NOLOGIN` function owner. The password inputs are then
+removed from the child environment, and the manifest, fingerprint, runtime
+boundary, and entitlement-admin boundary checks consume only their respective
+derived DSN files. The v4 receipt is emitted only when both role boundaries
+explicitly verify the restricted function owner.
+
+Custom Compose deployments may supply
+`AGENTOPS_POSTGRES_MIGRATOR_DSN_FILE` to the migrator instead of component
+settings. The default BYOC entrypoint rejects credentialed DSN environment
+values and rejects a migrator DSN file combined with migrator component
+credentials. When the drill selects the isolated restore database, it parses
+the staged migrator DSN as a PostgreSQL URL and changes only the database
+pathname; query parameters such as `sslmode`, certificate settings, and
+connection timeouts are preserved in all three derived DSNs. Component and DSN
+file inputs therefore converge on the same file-backed migration and validation
+flow. Direct runtime/admin DSNs or password values fail closed. All derived
+files are removed on success, failure, or a handled signal, and no full DSN is
+copied into an environment variable or printed.
 
 Set a unique `AGENTOPS_RESTORE_DATABASE` and
 `AGENTOPS_RESTORE_KEEP=true` only when an operator intends to retain a fully

@@ -180,9 +180,11 @@ async function run() {
     healthRoute,
     backupScript,
     restoreScript,
+    restoreProvisionScript,
     behaviorContract,
     secretEntrypoint,
     restoreDsnHelper,
+    restoreRoleBoundaryCheck,
     nodeHealthcheck,
     schemaReadiness,
   ] = await Promise.all([
@@ -193,9 +195,11 @@ async function run() {
     source("../app/api/mis/health/route.ts"),
     source("../../../deploy/byoc/backup.sh"),
     source("../../../deploy/byoc/restore-drill.sh"),
+    source("../../../deploy/byoc/restore-provision.sh"),
     source("./byoc-backup-restore-behavior-contract.ts"),
     source("../../../deploy/byoc/node-secret-entrypoint.mjs"),
     source("../../../deploy/byoc/postgres-dsn-for-restore.mjs"),
+    source("../../../deploy/byoc/postgres-role-boundary-check.ts"),
     source("../../../deploy/byoc/node-healthcheck.mjs"),
     source("../src/server/controlPlane/schemaReadiness.ts"),
   ]);
@@ -220,6 +224,8 @@ async function run() {
   assert.match(dockerfile, /node-secret-entrypoint\.mjs/);
   assert.match(dockerfile, /node-healthcheck\.mjs/);
   assert.match(dockerfile, /postgres-dsn-for-restore\.mjs/);
+  assert.match(dockerfile, /postgres-role-boundary-check\.ts/);
+  assert.match(dockerfile, /restore-provision\.sh/);
   assert.match(dockerfile, /COPY migrations\/postgres \.\/migrations\/postgres/);
   assert.match(dockerfile, /WORKDIR \/opt\/agentops\/ui\/next-app/);
   assert.match(dockerfile, /CMD \["node", "scripts\/start\.mjs"\]/);
@@ -533,18 +539,45 @@ async function run() {
   assert.match(restoreScript, /restore_database_must_not_be_production/);
   assert.match(restoreScript, /restore_cleanup_failed/);
   assert.match(restoreScript, /restore_manifest_check_failed/);
-  assert.match(restoreScript, /pg_restore/);
-  assert.match(restoreScript, /AGENTOPS_POSTGRES_PASSWORD_FILE/);
-  assert.match(restoreScript, /AGENTOPS_POSTGRES_DATABASE=\$1/);
-  assert.match(restoreScript, /AGENTOPS_POSTGRES_DSN_FILE/);
+  assert.match(restoreScript, /restore_provisioning_failed/);
+  assert.match(restoreScript, /restore_runtime_role_boundary_failed/);
   assert.match(
     restoreScript,
-    /\/usr\/local\/lib\/agentops\/postgres-dsn-for-restore\.mjs/,
+    /restore_entitlement_admin_role_boundary_failed/,
+  );
+  assert.match(restoreScript, /pg_restore/);
+  assert.match(restoreScript, /restore-provision\.sh/);
+  assert.match(
+    restoreProvisionScript,
+    /AGENTOPS_POSTGRES_MIGRATOR_PASSWORD_FILE/,
+  );
+  assert.match(
+    restoreProvisionScript,
+    /dsn_source_file=\$migrator_password_file/,
+  );
+  assert.match(
+    restoreProvisionScript,
+    /AGENTOPS_POSTGRES_MIGRATOR_DSN_FILE/,
+  );
+  assert.match(
+    restoreProvisionScript,
+    /AGENTOPS_POSTGRES_RUNTIME_PASSWORD_FILE/,
+  );
+  assert.match(
+    restoreProvisionScript,
+    /AGENTOPS_POSTGRES_ENTITLEMENT_ADMIN_PASSWORD_FILE/,
+  );
+  assert.match(
+    restoreProvisionScript,
+    /postgres-dsn-for-restore\.mjs/,
   );
   assert.match(restoreDsnHelper, /constants\.O_NOFOLLOW/);
   assert.match(restoreDsnHelper, /new URL\(source\)/);
   assert.match(restoreDsnHelper, /parsed\.pathname = `\/\$\{targetDatabase\}`/);
   assert.match(restoreDsnHelper, /writePostgresDsnForRestore/);
+  assert.match(restoreDsnHelper, /POSTGRES_PROFILES/);
+  assert.match(restoreDsnHelper, /componentPostgresDsn/);
+  assert.match(restoreDsnHelper, /targetPasswordFile/);
   assert.match(restoreDsnHelper, /fchmodSync\(descriptor, 0o400\)/);
   assert.match(restoreDsnHelper, /if \(outputCreated\)/);
   assert.doesNotMatch(
@@ -552,13 +585,66 @@ async function run() {
     /process\.stdout\.write\(postgresDsnForRestore/,
   );
   assert.doesNotMatch(
-    restoreScript,
+    restoreProvisionScript,
     /AGENTOPS_POSTGRES_DSN=\$\(/,
   );
-  assert.match(restoreScript, /npm run check:postgres-schema/);
+  assert.match(restoreProvisionScript, /npm run migrate:postgres/);
+  assert.match(restoreProvisionScript, /npm run check:postgres-schema/);
+  assert.match(
+    restoreProvisionScript,
+    /postgres-role-boundary-check\.ts" runtime/,
+  );
+  assert.match(
+    restoreProvisionScript,
+    /postgres-role-boundary-check\.ts" entitlement-admin/,
+  );
+  assert.match(
+    restoreProvisionScript,
+    /unset AGENTOPS_POSTGRES_ENTITLEMENT_ADMIN_PASSWORD_FILE/,
+  );
+  assert.match(
+    restoreProvisionScript,
+    /AGENTOPS_POSTGRES_ENTITLEMENT_ADMIN_DSN_FILE=\$admin_restore_dsn/,
+  );
+  assert.doesNotMatch(
+    restoreProvisionScript,
+    /if \[ "\$file_backed" = true \]/,
+  );
+  assert.match(
+    restoreProvisionScript,
+    /remove_derived_dsn_files/,
+  );
+  assert.match(
+    restoreRoleBoundaryCheck,
+    /assertPostgresRuntimeRoleBoundary/,
+  );
+  assert.match(
+    restoreRoleBoundaryCheck,
+    /assertPostgresEntitlementAdminRoleBoundary/,
+  );
+  assert.match(
+    restoreRoleBoundaryCheck,
+    /postgresEntitlementAdminDsn/,
+  );
+  assert.match(
+    restoreRoleBoundaryCheck,
+    /receipt\.function_owner_restricted !== true/,
+  );
+  assert.match(
+    restoreRoleBoundaryCheck,
+    /direct_database_secret_forbidden/,
+  );
   assert.match(restoreScript, /production_overwritten":false/);
+  assert.match(restoreScript, /restore_provisioning_completed":true/);
   assert.match(restoreScript, /migration_manifest_verified":true/);
   assert.match(restoreScript, /schema_fingerprint_verified":true/);
+  assert.match(restoreScript, /runtime_role_boundary_verified":true/);
+  assert.match(
+    restoreScript,
+    /entitlement_admin_role_boundary_verified":true/,
+  );
+  assert.match(restoreScript, /function_owner_boundary_verified":true/);
+  assert.match(restoreScript, /isolated_role_dsns_file_backed":true/);
   assert.match(restoreScript, /restore_disposition_confirmed":true/);
   assert.doesNotMatch(restoreScript, /schema_verified":true/);
   assert.doesNotMatch(restoreScript, /--clean|--create|python|sqlite/i);
@@ -568,6 +654,14 @@ async function run() {
   assert.match(behaviorContract, /dsn_file_supported/);
   assert.match(behaviorContract, /dsn_existing_output_preserved/);
   assert.match(behaviorContract, /dsn_query_parameters_preserved/);
+  assert.match(
+    behaviorContract,
+    /default_compose_role_dsns_file_backed/,
+  );
+  assert.match(
+    behaviorContract,
+    /derived_role_dsns_removed_on_success_failure_and_signal/,
+  );
   assert.match(behaviorContract, /node_secret_0600_staged_as_0400/);
   assert.match(behaviorContract, /node_secret_symlink_rejected/);
   assert.match(behaviorContract, /restore_failure_cleanup/);
@@ -610,6 +704,10 @@ async function run() {
     restore_dsn_remains_file_backed: true,
     restore_dsn_existing_output_preserved: true,
     restore_dsn_query_preserved: true,
+    restore_uses_migrator_credentials: true,
+    restore_reprovisions_role_boundaries: true,
+    restore_runtime_admin_boundaries_verified: true,
+    restore_function_owner_boundary_verified: true,
     isolated_restore_schema_drill: true,
     executable_backup_restore_behavior_contract: true,
     python_used: false,

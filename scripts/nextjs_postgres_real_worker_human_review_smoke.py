@@ -737,6 +737,16 @@ def assert_entitlement_admin_receipt_safe(
         raise RuntimeError("entitlement_administration_auth_material_exposed")
 
 
+def derived_postgres_function_owner_role(
+    application_schema: str,
+    runtime_api_schema: str,
+) -> str:
+    digest = hashlib.sha256(
+        f"{application_schema}\0{runtime_api_schema}".encode("utf-8")
+    ).hexdigest()
+    return f"agentops_fn_{digest[:24]}"
+
+
 def cleanup_postgres_fixture(
     base_dsn: str,
     node: str,
@@ -744,12 +754,14 @@ def cleanup_postgres_fixture(
     runtime_api_schema: str,
     runtime_role: str,
     entitlement_admin_role: str,
+    function_owner_role: str,
 ) -> dict[str, bool]:
     cleanup = NodePgAdapter(base_dsn, node)
     errors: list[str] = []
     role_names = (
         ("runtime", runtime_role),
         ("entitlement_admin", entitlement_admin_role),
+        ("function_owner", function_owner_role),
     )
     existing_roles: dict[str, bool] = {}
 
@@ -807,13 +819,14 @@ def cleanup_postgres_fixture(
               ) AS schema_present,
               EXISTS(
                 SELECT 1 FROM pg_roles
-                WHERE rolname IN (?,?)
+                WHERE rolname IN (?,?,?)
               ) AS role_present""",
             (
                 application_schema,
                 runtime_api_schema,
                 runtime_role,
                 entitlement_admin_role,
+                function_owner_role,
             ),
         )
         if (
@@ -832,6 +845,7 @@ def cleanup_postgres_fixture(
     return {
         "schemas_removed": True,
         "roles_removed": True,
+        "function_owner_role_removed": True,
         "catalog_zero_residue_verified": True,
     }
 
@@ -2317,6 +2331,10 @@ def main() -> int:
     runtime_api_schema = f"agentops_real_runtime_api_{fixture_suffix}"
     runtime_role = f"agentops_real_runtime_{fixture_suffix}"
     entitlement_admin_role = f"agentops_real_admin_{fixture_suffix}"
+    function_owner_role = derived_postgres_function_owner_role(
+        schema,
+        runtime_api_schema,
+    )
     migrator_dsn = dsn_with_search_path(args.postgres_dsn, schema)
     runtime_password = "Runtime-" + secrets.token_urlsafe(24)
     entitlement_admin_password = "Admin-" + secrets.token_urlsafe(24)
@@ -2852,6 +2870,7 @@ def main() -> int:
             runtime_api_schema,
             runtime_role,
             entitlement_admin_role,
+            function_owner_role,
         )
         fixture_cleanup_complete = True
         next_artifact_after_cleanup_sha256 = stable_tree_sha256(
@@ -2996,6 +3015,7 @@ def main() -> int:
                 runtime_api_schema,
                 runtime_role,
                 entitlement_admin_role,
+                function_owner_role,
             )
             fixture_cleanup_complete = True
             next_artifact_after_cleanup_sha256 = stable_tree_sha256(
@@ -3097,6 +3117,7 @@ def main() -> int:
                     runtime_api_schema,
                     runtime_role,
                     entitlement_admin_role,
+                    function_owner_role,
                 )
             except Exception:
                 pass
