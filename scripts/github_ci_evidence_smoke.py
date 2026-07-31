@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import http.client
+import os
 import subprocess
 from pathlib import Path
 from unittest.mock import patch
@@ -157,6 +158,7 @@ def main() -> int:
         return subprocess.CompletedProcess(args, 1, "", "unexpected gh command")
 
     with (
+        patch.dict(os.environ, {"GITHUB_ACTIONS": "false"}, clear=False),
         patch("github_ci_evidence.shutil.which", return_value="/usr/bin/gh"),
         patch("github_ci_evidence.run", side_effect=fake_gh_run),
         patch(
@@ -212,6 +214,7 @@ def main() -> int:
             "completed_without_success_rejected": completed_without_success.get("conclusion") is None,
             "wrong_workflow_rejected": wrong_workflow.get("head_matches") is False,
             "sidebar_workflow_text_rejected": sidebar_only_main.get("head_matches") is False,
+            "host_github_actions_env_isolated": True,
             "regression_87ee537": {
                 "agentops_mis_ci": regression_evidence["agentops_mis_ci"].get("conclusion"),
                 "byoc_compose": regression_evidence["byoc_compose"].get("conclusion"),
