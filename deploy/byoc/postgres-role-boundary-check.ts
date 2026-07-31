@@ -88,11 +88,24 @@ try {
     sql_omitted: true,
     row_data_omitted: true,
   }));
-} catch {
+} catch (error) {
+  const boundedErrors = new Set([
+    "boundary_invalid",
+    "direct_database_secret_forbidden",
+    "function_owner_boundary_missing",
+  ]);
+  const candidate = error instanceof readiness.SchemaReadinessError
+    ? error.code
+    : error instanceof Error && boundedErrors.has(error.message)
+      ? error.message
+      : "restore_role_boundary_check_failed";
+  const errorCode = /^[a-z0-9_]+$/.test(candidate)
+    ? candidate
+    : "restore_role_boundary_check_failed";
   console.error(JSON.stringify({
     ok: false,
     contract: "agentops_byoc_restore_role_boundary_v1",
-    error: "restore_role_boundary_check_failed",
+    error_code: errorCode,
     credentials_omitted: true,
     sql_omitted: true,
     row_data_omitted: true,

@@ -271,10 +271,14 @@ async function run() {
       "    fi",
       '    log "runtime_boundary:$last"',
       '    if [ "${FAKE_RUNTIME_BOUNDARY_FAIL:-false}" = true ]; then',
+      "      printf '%s\\n' 'restore_provision_runtime_boundary_failed:runtime_fixture_failed' >&2",
+      '      printf "%s\\n" "$POSTGRES_PASSWORD $AGENTOPS_POSTGRES_DSN" >&2',
       "      exit 73",
       "    fi",
       '    log "entitlement_admin_boundary:$last"',
       '    if [ "${FAKE_ADMIN_BOUNDARY_FAIL:-false}" = true ]; then',
+      "      printf '%s\\n' 'restore_provision_entitlement_admin_boundary_failed:admin_fixture_failed' >&2",
+      '      printf "%s\\n" "$POSTGRES_PASSWORD $AGENTOPS_POSTGRES_DSN" >&2',
       "      exit 74",
       "    fi",
       "    ;;",
@@ -1060,6 +1064,10 @@ async function run() {
       failedRuntimeBoundary,
       /restore_runtime_role_boundary_failed/,
     );
+    assert.match(
+      failedRuntimeBoundary.stderr,
+      /restore_provision_runtime_boundary_failed:runtime_fixture_failed/,
+    );
     assert.equal(
       await pathExists(join(databaseState, failedRuntimeBoundaryDatabase)),
       false,
@@ -1080,6 +1088,10 @@ async function run() {
     assertFailed(
       failedAdminBoundary,
       /restore_entitlement_admin_role_boundary_failed/,
+    );
+    assert.match(
+      failedAdminBoundary.stderr,
+      /restore_provision_entitlement_admin_boundary_failed:admin_fixture_failed/,
     );
     assert.equal(
       await pathExists(join(databaseState, failedAdminBoundaryDatabase)),

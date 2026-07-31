@@ -596,11 +596,27 @@ async function run() {
   assert.match(restoreProvisionScript, /npm run check:postgres-schema/);
   assert.match(
     restoreProvisionScript,
-    /postgres-role-boundary-check\.ts" runtime/,
+    /run_boundary_check runtime 73 runtime/,
   );
   assert.match(
     restoreProvisionScript,
-    /postgres-role-boundary-check\.ts" entitlement-admin/,
+    /run_boundary_check entitlement-admin 74 entitlement_admin/,
+  );
+  assert.match(
+    restoreProvisionScript,
+    /postgres-role-boundary-check\.ts" "\$boundary"/,
+  );
+  assert.match(
+    restoreRoleBoundaryCheck,
+    /error instanceof readiness\.SchemaReadinessError/,
+  );
+  assert.match(
+    restoreRoleBoundaryCheck,
+    /error_code: errorCode/,
+  );
+  assert.doesNotMatch(
+    restoreRoleBoundaryCheck,
+    /error_code: String\(/,
   );
   assert.match(
     restoreProvisionScript,

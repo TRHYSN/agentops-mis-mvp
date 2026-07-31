@@ -217,7 +217,7 @@ docker compose --env-file "$env_file" -f "$compose_file" run --rm \
   "$restore_database" >/dev/null 2>"$validation_log" || validation_status=$?
 validation_detail=$(
   awk '
-    /^restore_provision_migration_failed:[a-z0-9_]+$/ {
+    /^restore_provision_(migration|runtime_boundary|entitlement_admin_boundary)_failed:[a-z0-9_]+$/ {
       value = $0
     }
     END {

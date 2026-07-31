@@ -27,12 +27,17 @@ fi
 
 derived_dsn_files=
 migration_receipt=
+boundary_receipt=
 remove_derived_dsn_files() {
   status=$?
   trap - 0 1 2 15
   if [ -n "$migration_receipt" ]; then
     rm -f "$migration_receipt" || status=75
     migration_receipt=
+  fi
+  if [ -n "$boundary_receipt" ]; then
+    rm -f "$boundary_receipt" || status=75
+    boundary_receipt=
   fi
   for derived_dsn_file in $derived_dsn_files; do
     rm -f "$derived_dsn_file" || status=75
@@ -177,9 +182,43 @@ unset AGENTOPS_POSTGRES_ENTITLEMENT_ADMIN_PASSWORD_FILE
 AGENTOPS_POSTGRES_ENTITLEMENT_ADMIN_DSN_FILE=$admin_restore_dsn
 export AGENTOPS_POSTGRES_ENTITLEMENT_ADMIN_DSN_FILE
 npm run check:postgres-schema >/dev/null 2>&1 || exit 72
-./node_modules/.bin/tsx \
-  "$lib_dir/postgres-role-boundary-check.ts" runtime \
-  >/dev/null 2>&1 || exit 73
-./node_modules/.bin/tsx \
-  "$lib_dir/postgres-role-boundary-check.ts" entitlement-admin \
-  >/dev/null 2>&1 || exit 74
+
+run_boundary_check() {
+  boundary=$1
+  failure_status=$2
+  diagnostic_boundary=$3
+  if ! boundary_receipt=$(
+    mktemp "${TMPDIR:-/tmp}/agentops-restore-boundary.XXXXXXXX"
+  ); then
+    printf '%s\n' \
+      "restore_provision_${diagnostic_boundary}_boundary_failed:receipt_unavailable" \
+      >&2
+    exit "$failure_status"
+  fi
+  chmod 600 "$boundary_receipt"
+  if ! ./node_modules/.bin/tsx \
+    "$lib_dir/postgres-role-boundary-check.ts" "$boundary" \
+    >"$boundary_receipt" 2>&1
+  then
+    boundary_code=$(
+      sed -n \
+        's/.*"error_code":"\([a-z0-9_][a-z0-9_]*\)".*/\1/p' \
+        "$boundary_receipt" |
+        tail -n 1
+    )
+    case "$boundary_code" in
+      ""|*[!a-z0-9_]*) boundary_code=unknown ;;
+    esac
+    printf '%s\n' \
+      "restore_provision_${diagnostic_boundary}_boundary_failed:$boundary_code" \
+      >&2
+    rm -f "$boundary_receipt" || exit 75
+    boundary_receipt=
+    exit "$failure_status"
+  fi
+  rm -f "$boundary_receipt" || exit 75
+  boundary_receipt=
+}
+
+run_boundary_check runtime 73 runtime
+run_boundary_check entitlement-admin 74 entitlement_admin
