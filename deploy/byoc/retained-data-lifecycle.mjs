@@ -1,0 +1,1208 @@
+#!/usr/bin/env node
+
+import { randomBytes } from "node:crypto";
+import { lstat, readFile } from "node:fs/promises";
+import { spawnSync } from "node:child_process";
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
+
+import {
+  LIFECYCLE_STATE_CONTRACT,
+  lifecycleLockStatus,
+  lifecycleStateDirectory,
+  readLifecycleState,
+  sha256,
+  sha256File,
+  withLifecycleLock,
+  writeLifecycleState,
+} from "./retained-data-lifecycle-state.mjs";
+
+const RECEIPT_CONTRACT = "agentops_byoc_retained_data_lifecycle_v1";
+const SCHEMA_IDENTITY_CONTRACT = "agentops_byoc_schema_identity_v1";
+const SCHEMA_READINESS_CONTRACT = "agentops_postgres_schema_readiness_v1";
+const IMAGE_DIGEST_REFERENCE = /@sha256:[0-9a-f]{64}$/;
+const IMAGE_ID = /^sha256:[0-9a-f]{64}$/;
+const SHA256 = /^[0-9a-f]{64}$/;
+const SAFE_DATABASE_IDENTIFIER = /^[a-z][a-z0-9_]{0,62}$/;
+const OPERATION_ID = /^byoc_lifecycle_[0-9a-f]{20}$/;
+const TERMINAL_PHASES = new Set(["applied", "rolled_back"]);
+const moduleDirectory = dirname(fileURLToPath(import.meta.url));
+const defaultRepositoryRoot = resolve(moduleDirectory, "../..");
+
+export class LifecycleError extends Error {
+  constructor(code, stage = "unknown") {
+    super(code);
+    this.name = "LifecycleError";
+    this.code = code;
+    this.stage = stage;
+  }
+}
+
+function errorCode(error) {
+  if (error instanceof LifecycleError) return error.code;
+  const message = String(error?.message || "");
+  return /^[a-z0-9_]+$/.test(message)
+    ? message
+    : "lifecycle_operation_failed";
+}
+
+function asLifecycleError(error, stage) {
+  if (error instanceof LifecycleError) return error;
+  return new LifecycleError(errorCode(error), stage);
+}
+
+function defaultRunner(command, args, options = {}) {
+  const result = spawnSync(command, args, {
+    cwd: options.cwd,
+    env: options.env,
+    encoding: "utf8",
+    input: options.input,
+    maxBuffer: 8 * 1024 * 1024,
+    timeout: options.timeout || 15 * 60 * 1000,
+  });
+  if (result.error) {
+    return {
+      status: typeof result.status === "number" ? result.status : 127,
+      stdout: String(result.stdout || ""),
+      stderr: "",
+    };
+  }
+  return {
+    status: result.status ?? 1,
+    stdout: String(result.stdout || ""),
+    stderr: String(result.stderr || ""),
+  };
+}
+
+function checked(result, code, stage) {
+  if (result.status !== 0) throw new LifecycleError(code, stage);
+  return result.stdout.trim();
+}
+
+function receipt(operation, fields = {}) {
+  return {
+    contract: RECEIPT_CONTRACT,
+    ok: true,
+    operation,
+    ...fields,
+    credentials_omitted: true,
+    sql_omitted: true,
+    row_data_omitted: true,
+  };
+}
+
+function failureReceipt(operation, error) {
+  const failure = asLifecycleError(error, "unknown");
+  return {
+    contract: RECEIPT_CONTRACT,
+    ok: false,
+    operation,
+    error_code: failure.code,
+    failure_stage: failure.stage,
+    state_promoted: false,
+    credentials_omitted: true,
+    sql_omitted: true,
+    row_data_omitted: true,
+  };
+}
+
+function event(stage, outcome, now) {
+  return { stage, outcome, recorded_at: now().toISOString() };
+}
+
+function appendEvent(operation, stage, outcome, now) {
+  return {
+    ...operation,
+    events: [...operation.events, event(stage, outcome, now)],
+  };
+}
+
+function parseArguments(arguments_) {
+  const [command, ...tokens] = arguments_;
+  if (!new Set(["plan", "status", "apply", "rollback"]).has(command)) {
+    throw new LifecycleError("lifecycle_command_invalid", "arguments");
+  }
+  const values = {};
+  for (let index = 0; index < tokens.length; index += 2) {
+    const key = tokens[index];
+    const value = tokens[index + 1];
+    if (!key?.startsWith("--") || value === undefined) {
+      throw new LifecycleError("lifecycle_arguments_invalid", "arguments");
+    }
+    if (Object.hasOwn(values, key)) {
+      throw new LifecycleError("lifecycle_arguments_invalid", "arguments");
+    }
+    values[key] = value;
+  }
+  const allowed = command === "plan"
+    ? new Set(["--to-image"])
+    : command === "apply"
+      ? new Set(["--plan-id"])
+      : command === "rollback"
+        ? new Set(["--confirm-restore-from-backup"])
+        : new Set();
+  if (Object.keys(values).some((key) => !allowed.has(key))) {
+    throw new LifecycleError("lifecycle_arguments_invalid", "arguments");
+  }
+  return { command, values };
+}
+
+function jsonReceipt(output, expectedContract, code, stage) {
+  const lines = output.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  for (const line of lines.reverse()) {
+    try {
+      const parsed = JSON.parse(line);
+      if (parsed?.contract === expectedContract && parsed?.ok === true) {
+        return parsed;
+      }
+    } catch {
+      // Non-JSON package-manager preamble is ignored.
+    }
+  }
+  throw new LifecycleError(code, stage);
+}
+
+function assertSchemaIdentity(identity, stage) {
+  if (
+    identity.contract !== SCHEMA_IDENTITY_CONTRACT
+    || identity.ok !== true
+    || typeof identity.schema_contract !== "string"
+    || typeof identity.schema_fingerprint_contract !== "string"
+    || !SHA256.test(String(identity.schema_fingerprint_sha256 || ""))
+    || !SHA256.test(String(identity.migration_manifest_sha256 || ""))
+    || !Number.isSafeInteger(identity.schema_object_count)
+    || !Number.isSafeInteger(identity.migration_count)
+    || identity.static_manifest_only !== true
+    || identity.database_contacted !== false
+  ) {
+    throw new LifecycleError("lifecycle_schema_identity_invalid", stage);
+  }
+  return {
+    contract: identity.schema_contract,
+    fingerprint_contract: identity.schema_fingerprint_contract,
+    fingerprint_sha256: identity.schema_fingerprint_sha256,
+    object_count: identity.schema_object_count,
+    migration_manifest_sha256: identity.migration_manifest_sha256,
+    migration_count: identity.migration_count,
+  };
+}
+
+function sameSchema(left, right) {
+  return JSON.stringify(left) === JSON.stringify(right);
+}
+
+function composeArguments(context, tail) {
+  return [
+    "compose",
+    "--env-file",
+    context.envFile,
+    "-f",
+    context.composeFile,
+    ...tail,
+  ];
+}
+
+function commandEnvironment(context, image) {
+  return {
+    ...context.environment,
+    ...(image ? { AGENTOPS_IMAGE: image } : {}),
+  };
+}
+
+async function regularFile(path, code, stage) {
+  let metadata;
+  try {
+    metadata = await lstat(path);
+  } catch {
+    throw new LifecycleError(code, stage);
+  }
+  if (!metadata.isFile() || metadata.isSymbolicLink()) {
+    throw new LifecycleError(code, stage);
+  }
+}
+
+async function configurationSnapshot(context) {
+  const stage = "configuration_preflight";
+  await regularFile(
+    context.composeFile,
+    "lifecycle_compose_file_invalid",
+    stage,
+  );
+  await regularFile(context.envFile, "lifecycle_env_file_invalid", stage);
+  checked(
+    await context.runner(
+      "docker",
+      composeArguments(context, ["config", "--quiet"]),
+      { cwd: context.repositoryRoot, env: commandEnvironment(context) },
+    ),
+    "lifecycle_compose_configuration_invalid",
+    stage,
+  );
+  const rendered = checked(
+    await context.runner(
+      "docker",
+      composeArguments(context, ["config"]),
+      { cwd: context.repositoryRoot, env: commandEnvironment(context) },
+    ),
+    "lifecycle_compose_configuration_invalid",
+    stage,
+  );
+  return {
+    compose_file_sha256: await sha256File(context.composeFile),
+    env_file_sha256: await sha256File(context.envFile),
+    rendered_compose_sha256: sha256(rendered),
+    compose_validated: true,
+    secret_values_omitted: true,
+  };
+}
+
+async function imageId(context, reference, stage) {
+  const output = checked(
+    await context.runner(
+      "docker",
+      ["image", "inspect", "--format", "{{.Id}}", reference],
+      { cwd: context.repositoryRoot, env: commandEnvironment(context) },
+    ),
+    "lifecycle_image_unavailable",
+    stage,
+  );
+  if (!IMAGE_ID.test(output)) {
+    throw new LifecycleError("lifecycle_image_identity_invalid", stage);
+  }
+  return output;
+}
+
+async function runningInstallation(context) {
+  const stage = "running_installation_preflight";
+  const container = checked(
+    await context.runner(
+      "docker",
+      composeArguments(context, ["ps", "-q", "control-plane"]),
+      { cwd: context.repositoryRoot, env: commandEnvironment(context) },
+    ),
+    "lifecycle_control_plane_not_running",
+    stage,
+  );
+  if (!/^[A-Za-z0-9_.-]+$/.test(container)) {
+    throw new LifecycleError("lifecycle_control_plane_identity_invalid", stage);
+  }
+  const inspected = checked(
+    await context.runner(
+      "docker",
+      ["inspect", "--format", "{{.Config.Image}}\t{{.Image}}", container],
+      { cwd: context.repositoryRoot, env: commandEnvironment(context) },
+    ),
+    "lifecycle_control_plane_inspect_failed",
+    stage,
+  );
+  const [reference, id] = inspected.split("\t");
+  if (!reference || !IMAGE_ID.test(String(id || ""))) {
+    throw new LifecycleError("lifecycle_control_plane_identity_invalid", stage);
+  }
+  return { reference, image_id: id };
+}
+
+async function runningSchemaIdentity(context) {
+  const stage = "running_schema_identity";
+  const output = checked(
+    await context.runner(
+      "docker",
+      composeArguments(context, [
+        "exec",
+        "-T",
+        "control-plane",
+        "npm",
+        "run",
+        "byoc:schema-identity",
+        "--silent",
+      ]),
+      { cwd: context.repositoryRoot, env: commandEnvironment(context) },
+    ),
+    "lifecycle_running_schema_identity_unavailable",
+    stage,
+  );
+  return assertSchemaIdentity(
+    jsonReceipt(
+      output,
+      SCHEMA_IDENTITY_CONTRACT,
+      "lifecycle_running_schema_identity_invalid",
+      stage,
+    ),
+    stage,
+  );
+}
+
+async function imageSchemaIdentity(context, image, stage) {
+  const output = checked(
+    await context.runner(
+      "docker",
+      [
+        "run",
+        "--rm",
+        "--entrypoint",
+        "npm",
+        image,
+        "run",
+        "byoc:schema-identity",
+        "--silent",
+      ],
+      { cwd: context.repositoryRoot, env: commandEnvironment(context) },
+    ),
+    "lifecycle_target_schema_identity_unavailable",
+    stage,
+  );
+  return assertSchemaIdentity(
+    jsonReceipt(
+      output,
+      SCHEMA_IDENTITY_CONTRACT,
+      "lifecycle_target_schema_identity_invalid",
+      stage,
+    ),
+    stage,
+  );
+}
+
+async function schemaReadiness(context, image, expected, operation) {
+  const stage = `${operation}_schema_readiness`;
+  const output = checked(
+    await context.runner(
+      "docker",
+      composeArguments(context, [
+        "run",
+        "--rm",
+        "--no-deps",
+        "migrate",
+        "npm",
+        "run",
+        "check:postgres-schema",
+        "--silent",
+      ]),
+      {
+        cwd: context.repositoryRoot,
+        env: commandEnvironment(context, image),
+      },
+    ),
+    "lifecycle_schema_readiness_failed",
+    stage,
+  );
+  const parsed = jsonReceipt(
+    output,
+    SCHEMA_READINESS_CONTRACT,
+    "lifecycle_schema_readiness_receipt_invalid",
+    stage,
+  );
+  if (
+    parsed.schema_contract !== expected.contract
+    || parsed.schema_fingerprint_contract !== expected.fingerprint_contract
+    || parsed.schema_fingerprint_verified !== true
+    || parsed.schema_object_count !== expected.object_count
+    || parsed.database_role_boundary_verified !== true
+  ) {
+    throw new LifecycleError("lifecycle_schema_readiness_mismatch", stage);
+  }
+}
+
+async function activeRunCount(context) {
+  const stage = "active_run_preflight";
+  const output = checked(
+    await context.runner(
+      "docker",
+      composeArguments(context, [
+        "exec",
+        "-T",
+        "postgres",
+        "sh",
+        "-ceu",
+        "psql --username \"$POSTGRES_USER\" --dbname \"$POSTGRES_DB\" --no-psqlrc --tuples-only --no-align --command \"SELECT count(*) FROM runs WHERE status IN ('running','waiting_approval')\"",
+      ]),
+      { cwd: context.repositoryRoot, env: commandEnvironment(context) },
+    ),
+    "lifecycle_active_run_preflight_failed",
+    stage,
+  );
+  if (!/^[0-9]+$/.test(output)) {
+    throw new LifecycleError("lifecycle_active_run_receipt_invalid", stage);
+  }
+  return Number(output);
+}
+
+async function assertNoActiveRuns(context) {
+  const count = await activeRunCount(context);
+  if (count !== 0) {
+    throw new LifecycleError("lifecycle_active_runs_must_be_drained", "active_run_preflight");
+  }
+  return count;
+}
+
+async function runBackup(context, output) {
+  checked(
+    await context.runner(
+      "/bin/sh",
+      [join(context.repositoryRoot, "deploy/byoc/backup.sh"), output],
+      {
+        cwd: context.repositoryRoot,
+        env: {
+          ...commandEnvironment(context),
+          AGENTOPS_BYOC_COMPOSE_FILE: context.composeFile,
+          AGENTOPS_BYOC_ENV_FILE: context.envFile,
+        },
+      },
+    ),
+    "lifecycle_backup_failed",
+    "backup",
+  );
+}
+
+async function validateBackupBundle(bundle) {
+  const stage = "backup_validation";
+  for (const name of ["database.dump", "SHA256SUMS", "COMMITTED"]) {
+    await regularFile(join(bundle, name), "lifecycle_backup_bundle_invalid", stage);
+  }
+  const commit = (await readFile(join(bundle, "COMMITTED"), "utf8")).trim();
+  if (commit !== "agentops_byoc_backup_bundle_v2") {
+    throw new LifecycleError("lifecycle_backup_uncommitted", stage);
+  }
+  const checksumLine = (await readFile(join(bundle, "SHA256SUMS"), "utf8")).trim();
+  const match = checksumLine.match(/^([0-9a-fA-F]{64})  database\.dump$/);
+  if (!match) throw new LifecycleError("lifecycle_backup_checksum_invalid", stage);
+  const actual = await sha256File(join(bundle, "database.dump"));
+  if (actual !== match[1].toLowerCase()) {
+    throw new LifecycleError("lifecycle_backup_checksum_mismatch", stage);
+  }
+  return {
+    contract: "agentops_byoc_backup_bundle_v2",
+    path: bundle,
+    database_dump_sha256: actual,
+    commit_marker: "agentops_byoc_backup_bundle_v2",
+  };
+}
+
+function plannedBackupPath(context, operation) {
+  const expected = join(
+    context.stateDirectory,
+    "backups",
+    `${operation.operation_id}.bundle`,
+  );
+  if (operation.backup && resolve(operation.backup.path) !== resolve(expected)) {
+    throw new LifecycleError("lifecycle_backup_path_binding_invalid", "backup_validation");
+  }
+  return expected;
+}
+
+async function stopControlPlane(context) {
+  checked(
+    await context.runner(
+      "docker",
+      composeArguments(context, ["stop", "control-plane"]),
+      { cwd: context.repositoryRoot, env: commandEnvironment(context) },
+    ),
+    "lifecycle_control_plane_stop_failed",
+    "control_plane_stop",
+  );
+}
+
+async function startControlPlane(context, image, stage) {
+  checked(
+    await context.runner(
+      "docker",
+      composeArguments(context, [
+        "up",
+        "--detach",
+        "--no-deps",
+        "--no-build",
+        "--force-recreate",
+        "control-plane",
+      ]),
+      { cwd: context.repositoryRoot, env: commandEnvironment(context, image) },
+    ),
+    "lifecycle_control_plane_start_failed",
+    stage,
+  );
+}
+
+async function waitForHealth(context, image, stage) {
+  const timeout = Number(
+    context.environment.AGENTOPS_BYOC_LIFECYCLE_HEALTH_TIMEOUT_SEC || 120,
+  );
+  if (!Number.isSafeInteger(timeout) || timeout < 1 || timeout > 900) {
+    throw new LifecycleError("lifecycle_health_timeout_invalid", stage);
+  }
+  for (let attempt = 0; attempt < timeout; attempt += 1) {
+    const container = await context.runner(
+      "docker",
+      composeArguments(context, ["ps", "-q", "control-plane"]),
+      { cwd: context.repositoryRoot, env: commandEnvironment(context, image) },
+    );
+    if (container.status === 0 && container.stdout.trim()) {
+      const health = await context.runner(
+        "docker",
+        [
+          "inspect",
+          "--format",
+          "{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}",
+          container.stdout.trim(),
+        ],
+        { cwd: context.repositoryRoot, env: commandEnvironment(context, image) },
+      );
+      if (health.status === 0 && health.stdout.trim() === "healthy") return;
+    }
+    await context.wait(1000);
+  }
+  throw new LifecycleError("lifecycle_control_plane_health_failed", stage);
+}
+
+async function migrateTarget(context, image) {
+  const output = checked(
+    await context.runner(
+      "docker",
+      composeArguments(context, ["run", "--rm", "--no-deps", "migrate"]),
+      { cwd: context.repositoryRoot, env: commandEnvironment(context, image) },
+    ),
+    "lifecycle_target_migration_failed",
+    "target_migration",
+  );
+  jsonReceipt(
+    output,
+    SCHEMA_READINESS_CONTRACT,
+    "lifecycle_target_migration_receipt_invalid",
+    "target_migration",
+  );
+}
+
+async function productionDatabase(context) {
+  const output = checked(
+    await context.runner(
+      "docker",
+      composeArguments(context, [
+        "exec",
+        "-T",
+        "postgres",
+        "sh",
+        "-ceu",
+        "printf '%s' \"$POSTGRES_DB\"",
+      ]),
+      { cwd: context.repositoryRoot, env: commandEnvironment(context) },
+    ),
+    "lifecycle_production_database_unknown",
+    "rollback_database_preflight",
+  );
+  if (!SAFE_DATABASE_IDENTIFIER.test(output) || output === "postgres") {
+    throw new LifecycleError(
+      "lifecycle_production_database_invalid",
+      "rollback_database_preflight",
+    );
+  }
+  return output;
+}
+
+function quoteDatabaseIdentifier(value) {
+  if (!SAFE_DATABASE_IDENTIFIER.test(value)) {
+    throw new LifecycleError("lifecycle_database_identifier_invalid", "database_swap");
+  }
+  return `"${value}"`;
+}
+
+function quoteDatabaseLiteral(value) {
+  if (!SAFE_DATABASE_IDENTIFIER.test(value)) {
+    throw new LifecycleError("lifecycle_database_identifier_invalid", "database_swap");
+  }
+  return `'${value}'`;
+}
+
+async function postgresSql(context, sql, code, stage) {
+  checked(
+    await context.runner(
+      "docker",
+      composeArguments(context, [
+        "exec",
+        "-T",
+        "postgres",
+        "sh",
+        "-ceu",
+        "psql --username \"$POSTGRES_USER\" --dbname postgres --no-psqlrc --set ON_ERROR_STOP=1 --command \"$1\" >/dev/null",
+        "sh",
+        sql,
+      ]),
+      { cwd: context.repositoryRoot, env: commandEnvironment(context) },
+    ),
+    code,
+    stage,
+  );
+}
+
+async function terminateDatabaseConnections(context, databases) {
+  const literals = databases.map(quoteDatabaseLiteral).join(",");
+  await postgresSql(
+    context,
+    `SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname IN (${literals}) AND pid<>pg_backend_pid()`,
+    "lifecycle_database_connection_termination_failed",
+    "database_swap",
+  );
+}
+
+async function renameDatabase(context, from, to, stage = "database_swap") {
+  await postgresSql(
+    context,
+    `ALTER DATABASE ${quoteDatabaseIdentifier(from)} RENAME TO ${quoteDatabaseIdentifier(to)}`,
+    "lifecycle_database_rename_failed",
+    stage,
+  );
+}
+
+async function dropDatabase(context, database, stage = "database_cleanup") {
+  await terminateDatabaseConnections(context, [database]);
+  await postgresSql(
+    context,
+    `DROP DATABASE IF EXISTS ${quoteDatabaseIdentifier(database)}`,
+    "lifecycle_database_drop_failed",
+    stage,
+  );
+}
+
+async function runRestoreDrill(context, bundle, image, restoreDatabase) {
+  checked(
+    await context.runner(
+      "/bin/sh",
+      [join(context.repositoryRoot, "deploy/byoc/restore-drill.sh"), bundle],
+      {
+        cwd: context.repositoryRoot,
+        env: {
+          ...commandEnvironment(context, image),
+          AGENTOPS_BYOC_COMPOSE_FILE: context.composeFile,
+          AGENTOPS_BYOC_ENV_FILE: context.envFile,
+          AGENTOPS_RESTORE_DATABASE: restoreDatabase,
+          AGENTOPS_RESTORE_KEEP: "true",
+        },
+      },
+    ),
+    "lifecycle_backup_restore_verification_failed",
+    "rollback_restore_verification",
+  );
+}
+
+function installation(image, schema, verifiedAt) {
+  return {
+    image_reference: image.reference,
+    image_id: image.image_id,
+    schema,
+    verified_at: verifiedAt,
+  };
+}
+
+function archivedOperation(operation) {
+  return {
+    operation_id: operation.operation_id,
+    phase: operation.phase,
+    from_image_id: operation.from.image_id,
+    to_image_id: operation.to.image_id,
+    completed_at: operation.completed_at || null,
+    backup_commit_marker: operation.backup?.commit_marker || null,
+  };
+}
+
+async function recordFailure(context, state, error, recoveryRequired) {
+  if (!state?.operation) return state;
+  const failure = asLifecycleError(error, "unknown");
+  const next = {
+    ...state,
+    generation: state.generation + 1,
+    operation: appendEvent({
+      ...state.operation,
+      last_failure: {
+        error_code: failure.code,
+        failure_stage: failure.stage,
+        recorded_at: context.now().toISOString(),
+      },
+      recovery_required: recoveryRequired,
+    }, failure.stage, "failed", context.now),
+  };
+  await writeLifecycleState(context.stateDirectory, next);
+  return next;
+}
+
+async function plan(context, values) {
+  const toReference = String(values["--to-image"] || "").trim();
+  if (!IMAGE_DIGEST_REFERENCE.test(toReference)) {
+    throw new LifecycleError("lifecycle_target_image_digest_required", "arguments");
+  }
+  return withLifecycleLock(context.stateDirectory, async () => {
+    const existing = await readLifecycleState(context.stateDirectory);
+    if (existing?.operation && !TERMINAL_PHASES.has(existing.operation.phase)) {
+      throw new LifecycleError("lifecycle_operation_already_active", "plan");
+    }
+    const configuration = await configurationSnapshot(context);
+    const currentImage = await runningInstallation(context);
+    const currentSchema = await runningSchemaIdentity(context);
+    await schemaReadiness(
+      context,
+      currentImage.image_id,
+      currentSchema,
+      "plan_current",
+    );
+    const toImageId = await imageId(context, toReference, "target_image_preflight");
+    if (toImageId === currentImage.image_id) {
+      throw new LifecycleError("lifecycle_target_image_unchanged", "target_image_preflight");
+    }
+    const targetSchema = await imageSchemaIdentity(
+      context,
+      toReference,
+      "target_schema_identity",
+    );
+    const activeRuns = await activeRunCount(context);
+    const operationId = `byoc_lifecycle_${sha256(JSON.stringify({
+      from: currentImage.image_id,
+      to: toImageId,
+      schema: targetSchema,
+      nonce: context.randomHex(),
+    })).slice(0, 20)}`;
+    const createdAt = context.now().toISOString();
+    const operation = {
+      operation_id: operationId,
+      phase: "planned",
+      created_at: createdAt,
+      completed_at: null,
+      from: installation(currentImage, currentSchema, createdAt),
+      to: installation(
+        { reference: toReference, image_id: toImageId },
+        targetSchema,
+        null,
+      ),
+      configuration,
+      plan_preflight: {
+        active_run_count: activeRuns,
+        apply_blocked: activeRuns !== 0,
+        current_schema_verified: true,
+        target_image_present: true,
+      },
+      backup: null,
+      database_change_started: false,
+      recovery_required: false,
+      last_failure: null,
+      events: [event("plan", "succeeded", context.now)],
+    };
+    const state = {
+      contract: LIFECYCLE_STATE_CONTRACT,
+      generation: (existing?.generation || 0) + 1,
+      installation: operation.from,
+      operation,
+      history: existing
+        ? [
+            ...existing.history,
+            ...(existing.operation ? [archivedOperation(existing.operation)] : []),
+          ].slice(-50)
+        : [],
+      updated_at: createdAt,
+    };
+    await writeLifecycleState(context.stateDirectory, state);
+    return receipt("plan", {
+      operation_id: operationId,
+      phase: operation.phase,
+      from_image_reference: currentImage.reference,
+      from_image_id: currentImage.image_id,
+      to_image_reference: toReference,
+      to_image_id: toImageId,
+      from_schema_contract: currentSchema.contract,
+      to_schema_contract: targetSchema.contract,
+      active_run_count: activeRuns,
+      apply_blocked: activeRuns !== 0,
+      state_generation: state.generation,
+    });
+  });
+}
+
+async function status(context) {
+  const state = await readLifecycleState(context.stateDirectory);
+  return receipt("status", {
+    state_present: state !== null,
+    operation_locked: await lifecycleLockStatus(context.stateDirectory),
+    state,
+  });
+}
+
+async function apply(context, values) {
+  return withLifecycleLock(context.stateDirectory, async () => {
+    let state = await readLifecycleState(context.stateDirectory);
+    const requestedPlan = String(values["--plan-id"] || "").trim();
+    if (!state?.operation || !new Set(["planned", "backup_ready"]).has(state.operation.phase)) {
+      throw new LifecycleError("lifecycle_apply_not_planned", "apply_preflight");
+    }
+    if (requestedPlan && requestedPlan !== state.operation.operation_id) {
+      throw new LifecycleError("lifecycle_plan_id_mismatch", "apply_preflight");
+    }
+    if (state.operation.database_change_started) {
+      throw new LifecycleError("lifecycle_rollback_required", "apply_preflight");
+    }
+    let controlPlaneStopped = false;
+    try {
+      const configuration = await configurationSnapshot(context);
+      if (JSON.stringify(configuration) !== JSON.stringify(state.operation.configuration)) {
+        throw new LifecycleError("lifecycle_configuration_changed", "configuration_preflight");
+      }
+      const current = await runningInstallation(context);
+      if (current.image_id !== state.operation.from.image_id) {
+        throw new LifecycleError("lifecycle_running_image_changed", "apply_preflight");
+      }
+      await schemaReadiness(
+        context,
+        state.operation.from.image_id,
+        state.operation.from.schema,
+        "apply_current",
+      );
+      if (await imageId(context, state.operation.to.image_reference, "apply_preflight")
+        !== state.operation.to.image_id) {
+        throw new LifecycleError("lifecycle_target_image_changed", "apply_preflight");
+      }
+      const targetSchema = await imageSchemaIdentity(
+        context,
+        state.operation.to.image_reference,
+        "apply_preflight",
+      );
+      if (!sameSchema(targetSchema, state.operation.to.schema)) {
+        throw new LifecycleError("lifecycle_target_schema_changed", "apply_preflight");
+      }
+      await assertNoActiveRuns(context);
+
+      if (state.operation.phase === "planned") {
+        const backupPath = plannedBackupPath(context, state.operation);
+        await runBackup(context, backupPath);
+        const backup = await validateBackupBundle(backupPath);
+        state = {
+          ...state,
+          generation: state.generation + 1,
+          operation: appendEvent({
+            ...state.operation,
+            phase: "backup_ready",
+            backup: {
+              ...backup,
+              created_at: context.now().toISOString(),
+              source_image_id: state.operation.from.image_id,
+              source_schema_contract: state.operation.from.schema.contract,
+            },
+            last_failure: null,
+          }, "backup", "succeeded", context.now),
+          updated_at: context.now().toISOString(),
+        };
+        await writeLifecycleState(context.stateDirectory, state);
+      } else {
+        plannedBackupPath(context, state.operation);
+        await validateBackupBundle(state.operation.backup.path);
+      }
+
+      await stopControlPlane(context);
+      controlPlaneStopped = true;
+      await assertNoActiveRuns(context);
+      state = {
+        ...state,
+        generation: state.generation + 1,
+        operation: appendEvent({
+          ...state.operation,
+          database_change_started: true,
+          recovery_required: true,
+          last_failure: null,
+        }, "target_migration", "started", context.now),
+        updated_at: context.now().toISOString(),
+      };
+      await writeLifecycleState(context.stateDirectory, state);
+
+      await migrateTarget(context, state.operation.to.image_reference);
+      await startControlPlane(
+        context,
+        state.operation.to.image_reference,
+        "target_control_plane_start",
+      );
+      await waitForHealth(
+        context,
+        state.operation.to.image_reference,
+        "target_health",
+      );
+      await schemaReadiness(
+        context,
+        state.operation.to.image_reference,
+        state.operation.to.schema,
+        "apply_target",
+      );
+      const completedAt = context.now().toISOString();
+      const targetInstallation = {
+        ...state.operation.to,
+        verified_at: completedAt,
+      };
+      state = {
+        ...state,
+        generation: state.generation + 1,
+        installation: targetInstallation,
+        operation: appendEvent({
+          ...state.operation,
+          phase: "applied",
+          to: targetInstallation,
+          completed_at: completedAt,
+          recovery_required: false,
+          last_failure: null,
+        }, "apply", "succeeded", context.now),
+        updated_at: completedAt,
+      };
+      await writeLifecycleState(context.stateDirectory, state);
+      return receipt("apply", {
+        operation_id: state.operation.operation_id,
+        phase: state.operation.phase,
+        image_reference: state.installation.image_reference,
+        image_id: state.installation.image_id,
+        schema_contract: state.installation.schema.contract,
+        schema_fingerprint_sha256:
+          state.installation.schema.fingerprint_sha256,
+        backup_bundle: state.operation.backup.path,
+        backup_commit_marker: state.operation.backup.commit_marker,
+        active_run_preflight_passed: true,
+        configuration_preflight_passed: true,
+        state_generation: state.generation,
+      });
+    } catch (error) {
+      const databaseChanged = state?.operation?.database_change_started === true;
+      if (controlPlaneStopped && !databaseChanged) {
+        await startControlPlane(
+          context,
+          state.operation.from.image_id,
+          "apply_compensation_start",
+        ).catch(() => undefined);
+      }
+      await recordFailure(context, state, error, databaseChanged);
+      throw error;
+    }
+  });
+}
+
+async function rollback(context, values) {
+  return withLifecycleLock(context.stateDirectory, async () => {
+    let state = await readLifecycleState(context.stateDirectory);
+    const confirmation = String(
+      values["--confirm-restore-from-backup"] || "",
+    ).trim();
+    if (!state?.operation || !new Set(["applied", "backup_ready"]).has(state.operation.phase)) {
+      throw new LifecycleError("lifecycle_rollback_unavailable", "rollback_preflight");
+    }
+    if (
+      state.operation.phase === "backup_ready"
+      && state.operation.database_change_started !== true
+    ) {
+      throw new LifecycleError("lifecycle_rollback_not_required", "rollback_preflight");
+    }
+    if (!OPERATION_ID.test(confirmation) || confirmation !== state.operation.operation_id) {
+      throw new LifecycleError(
+        "lifecycle_rollback_confirmation_required",
+        "rollback_preflight",
+      );
+    }
+    let stopped = false;
+    let originalRenamed = false;
+    let restoredPromoted = false;
+    let production;
+    let restoreDatabase;
+    let quarantineDatabase;
+    try {
+      const configuration = await configurationSnapshot(context);
+      if (JSON.stringify(configuration) !== JSON.stringify(state.operation.configuration)) {
+        throw new LifecycleError("lifecycle_configuration_changed", "configuration_preflight");
+      }
+      plannedBackupPath(context, state.operation);
+      await validateBackupBundle(state.operation.backup.path);
+      if (await imageId(context, state.operation.from.image_id, "rollback_preflight")
+        !== state.operation.from.image_id) {
+        throw new LifecycleError("lifecycle_rollback_image_changed", "rollback_preflight");
+      }
+      const fromSchema = await imageSchemaIdentity(
+        context,
+        state.operation.from.image_id,
+        "rollback_preflight",
+      );
+      if (!sameSchema(fromSchema, state.operation.from.schema)) {
+        throw new LifecycleError("lifecycle_rollback_schema_changed", "rollback_preflight");
+      }
+      if (state.operation.phase === "applied") {
+        const current = await runningInstallation(context);
+        if (current.image_id !== state.installation.image_id) {
+          throw new LifecycleError("lifecycle_running_image_changed", "rollback_preflight");
+        }
+        await schemaReadiness(
+          context,
+          state.installation.image_id,
+          state.installation.schema,
+          "rollback_current",
+        );
+        await assertNoActiveRuns(context);
+      }
+      production = await productionDatabase(context);
+      const suffix = state.operation.operation_id.slice(-12);
+      restoreDatabase = `agentops_restore_${suffix}`;
+      quarantineDatabase = `agentops_quarantine_${suffix}`;
+
+      await runRestoreDrill(
+        context,
+        state.operation.backup.path,
+        state.operation.from.image_id,
+        restoreDatabase,
+      );
+      state = {
+        ...state,
+        generation: state.generation + 1,
+        operation: appendEvent({
+          ...state.operation,
+          recovery_required: true,
+          last_failure: null,
+        }, "rollback_restore_verification", "succeeded", context.now),
+        updated_at: context.now().toISOString(),
+      };
+      await writeLifecycleState(context.stateDirectory, state);
+
+      await stopControlPlane(context);
+      stopped = true;
+      await assertNoActiveRuns(context);
+      await terminateDatabaseConnections(context, [production, restoreDatabase]);
+      await renameDatabase(context, production, quarantineDatabase);
+      originalRenamed = true;
+      await renameDatabase(context, restoreDatabase, production);
+      restoredPromoted = true;
+      await startControlPlane(
+        context,
+        state.operation.from.image_id,
+        "rollback_control_plane_start",
+      );
+      await waitForHealth(
+        context,
+        state.operation.from.image_id,
+        "rollback_health",
+      );
+      await schemaReadiness(
+        context,
+        state.operation.from.image_id,
+        state.operation.from.schema,
+        "rollback_restored",
+      );
+      await dropDatabase(context, quarantineDatabase);
+      originalRenamed = false;
+      const completedAt = context.now().toISOString();
+      const restoredInstallation = {
+        ...state.operation.from,
+        verified_at: completedAt,
+      };
+      state = {
+        ...state,
+        generation: state.generation + 1,
+        installation: restoredInstallation,
+        operation: appendEvent({
+          ...state.operation,
+          phase: "rolled_back",
+          completed_at: completedAt,
+          rollback_authority: "backup_restore",
+          down_migration_performed: false,
+          recovery_required: false,
+          last_failure: null,
+        }, "rollback", "succeeded", context.now),
+        updated_at: completedAt,
+      };
+      await writeLifecycleState(context.stateDirectory, state);
+      return receipt("rollback", {
+        operation_id: state.operation.operation_id,
+        phase: state.operation.phase,
+        image_reference: state.installation.image_reference,
+        image_id: state.installation.image_id,
+        schema_contract: state.installation.schema.contract,
+        backup_bundle: state.operation.backup.path,
+        backup_restore_authoritative: true,
+        down_migration_performed: false,
+        explicit_confirmation_verified: true,
+        quarantine_removed: true,
+        state_generation: state.generation,
+      });
+    } catch (error) {
+      let compensationFailed = false;
+      if (stopped && originalRenamed && production && quarantineDatabase) {
+        try {
+          if (restoredPromoted) {
+            const failedDatabase = `agentops_failed_${state.operation.operation_id.slice(-12)}`;
+            await terminateDatabaseConnections(context, [production]);
+            await renameDatabase(context, production, failedDatabase, "rollback_compensation");
+            await renameDatabase(
+              context,
+              quarantineDatabase,
+              production,
+              "rollback_compensation",
+            );
+            originalRenamed = false;
+            await dropDatabase(context, failedDatabase, "rollback_compensation");
+          } else {
+            await renameDatabase(
+              context,
+              quarantineDatabase,
+              production,
+              "rollback_compensation",
+            );
+            originalRenamed = false;
+          }
+          await startControlPlane(
+            context,
+            state.installation.image_id,
+            "rollback_compensation",
+          );
+          await waitForHealth(
+            context,
+            state.installation.image_id,
+            "rollback_compensation",
+          );
+        } catch {
+          compensationFailed = true;
+        }
+      } else if (restoreDatabase && !restoredPromoted) {
+        try {
+          await dropDatabase(context, restoreDatabase, "rollback_compensation");
+        } catch {
+          compensationFailed = true;
+        }
+      }
+      await recordFailure(context, state, error, compensationFailed || originalRenamed);
+      throw error;
+    }
+  });
+}
+
+export async function runLifecycle(arguments_, options = {}) {
+  const parsed = parseArguments(arguments_);
+  const environment = { ...process.env, ...(options.environment || {}) };
+  const repositoryRoot = resolve(options.repositoryRoot || defaultRepositoryRoot);
+  const context = {
+    repositoryRoot,
+    composeFile: resolve(
+      repositoryRoot,
+      environment.AGENTOPS_BYOC_COMPOSE_FILE || "deploy/byoc/compose.yaml",
+    ),
+    envFile: resolve(
+      repositoryRoot,
+      environment.AGENTOPS_BYOC_ENV_FILE || "deploy/byoc/.env",
+    ),
+    stateDirectory: resolve(
+      options.stateDirectory || lifecycleStateDirectory(environment),
+    ),
+    environment,
+    runner: options.runner || defaultRunner,
+    now: options.now || (() => new Date()),
+    randomHex: options.randomHex || (() => randomBytes(16).toString("hex")),
+    wait: options.wait || ((milliseconds) => new Promise((resolveWait) => {
+      setTimeout(resolveWait, milliseconds);
+    })),
+  };
+  if (parsed.command === "plan") return plan(context, parsed.values);
+  if (parsed.command === "status") return status(context);
+  if (parsed.command === "apply") return apply(context, parsed.values);
+  return rollback(context, parsed.values);
+}
+
+const invokedAsMain = process.argv[1]
+  && pathToFileURL(resolve(process.argv[1])).href === import.meta.url;
+
+if (invokedAsMain) {
+  const operation = process.argv[2] || "unknown";
+  try {
+    console.log(JSON.stringify(await runLifecycle(process.argv.slice(2))));
+  } catch (error) {
+    console.log(JSON.stringify(failureReceipt(operation, error)));
+    process.exitCode = 1;
+  }
+}

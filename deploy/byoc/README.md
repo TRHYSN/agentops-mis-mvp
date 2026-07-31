@@ -267,6 +267,79 @@ verified restore for a separately reviewed promotion. The script refuses to
 target the configured production database. `AGENTOPS_RESTORE_KEEP` accepts
 only `true` or `false`.
 
+## Retained-data lifecycle
+
+The first operator-facing upgrade lifecycle is
+`deploy/byoc/retained-data-lifecycle.mjs`. It records an atomic private state
+file outside the repository by default under
+`${XDG_STATE_HOME:-$HOME/.local/state}/agentops-mis/byoc-lifecycle`. Set
+`AGENTOPS_BYOC_LIFECYCLE_STATE_DIR` to a private durable host path when the
+default is not appropriate. The directory and state file are kept at `0700`
+and `0600`; each update is fsynced to a new file and atomically renamed while
+an exclusive operation lock is held.
+
+Pull or otherwise load the target image first. The target must be addressed by
+an immutable registry digest, not a floating tag:
+
+```bash
+deploy/byoc/retained-data-lifecycle.mjs plan \
+  --to-image registry.example/agentops-mis@sha256:<64-hex-digest>
+
+deploy/byoc/retained-data-lifecycle.mjs status
+
+deploy/byoc/retained-data-lifecycle.mjs apply \
+  --plan-id byoc_lifecycle_<20-hex-id>
+```
+
+`plan` is read-only with respect to authority data. It verifies the current
+running container and PostgreSQL readiness, reads the static Schema identity
+from both images, binds the source and target image references and local image
+IDs, binds the Schema contract, expected catalog fingerprint, migration count,
+and migration-manifest hash, hashes the resolved Compose configuration, and
+reports whether active Runs still block apply. The current running image must
+already contain the v1 Schema identity command; upgrading an older image that
+lacks it requires a separately reviewed bootstrap procedure.
+
+`apply` re-verifies all plan bindings and fails if Compose or `.env` resolution
+changed. It requires zero `running` or `waiting_approval` Runs, creates and
+validates a committed backup bundle, stops the control plane, checks active
+Runs again, and only then invokes the target image's one-shot forward migrator.
+The state advances to `applied` only after the target control plane is healthy
+and its manifest, catalog fingerprint, and database-role boundary pass. A
+failure after migration starts leaves the service stopped, keeps the state at
+`backup_ready`, and marks `recovery_required=true`; it never reports the target
+as installed.
+
+Rollback is destructive and requires the operation ID as explicit confirmation:
+
+```bash
+deploy/byoc/retained-data-lifecycle.mjs rollback \
+  --confirm-restore-from-backup byoc_lifecycle_<20-hex-id>
+```
+
+For rollback, backup restore is authoritative. The command validates the exact
+committed bundle, runs the existing isolated restore/provisioning drill with the
+recorded source image, stops the control plane, and promotes that verified
+database through a production/quarantine database-name swap. It starts the
+recorded source image and verifies health and Schema readiness before deleting
+the quarantine database and recording `rolled_back`. It does not perform an
+in-place down migration and does not claim that a forward-migrated database is
+compatible with the old image. If post-swap verification fails, it attempts to
+restore the quarantined pre-rollback database and leaves the lifecycle state
+unpromoted; a failed compensation is explicitly marked for manual recovery.
+
+Do not remove the lifecycle state directory or its backup bundle while an
+operation is active. An operation lock left by process or host failure is not
+automatically broken; first prove no lifecycle process is running and preserve
+the state and backup before a Human operator performs recovery. Never run
+`docker compose down --volumes` as part of this workflow.
+
+The lifecycle contracts use an offline injected Docker driver to exercise the
+state machine and packaging. They are offline behavior and packaging evidence
+only. They do not prove a real Docker/Compose upgrade or rollback; clean-host
+forward upgrade, failure injection, backup-authoritative rollback, and retained
+authority-data verification remain mandatory release gates.
+
 The repository contracts exercise these fail-closed paths without a Docker
 daemon. They are packaging and offline behavior evidence only; a real
 clean-customer Docker/Compose installation and restore drill remain required
