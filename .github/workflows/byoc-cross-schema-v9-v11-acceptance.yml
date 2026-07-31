@@ -2,28 +2,19 @@ name: BYOC Cross-Schema v9 to v11 Acceptance
 
 on:
   workflow_dispatch:
+  workflow_call:
   push:
     paths:
       - .github/workflows/byoc-cross-schema-v9-v11-acceptance.yml
-      - deploy/byoc/cross-schema-v9-v11-acceptance.sh
-      - deploy/byoc/compose.historical-v9.yaml
-      - deploy/byoc/historical-v9.Dockerfile
-      - deploy/byoc/historical-v9-adapter/**
-      - deploy/byoc/Dockerfile
-      - deploy/byoc/compose.yaml
-      - deploy/byoc/backup.sh
+      - .dockerignore
+      - deploy/byoc/**
       - migrations/postgres/**
       - ui/next-app/**
   pull_request:
     paths:
       - .github/workflows/byoc-cross-schema-v9-v11-acceptance.yml
-      - deploy/byoc/cross-schema-v9-v11-acceptance.sh
-      - deploy/byoc/compose.historical-v9.yaml
-      - deploy/byoc/historical-v9.Dockerfile
-      - deploy/byoc/historical-v9-adapter/**
-      - deploy/byoc/Dockerfile
-      - deploy/byoc/compose.yaml
-      - deploy/byoc/backup.sh
+      - .dockerignore
+      - deploy/byoc/**
       - migrations/postgres/**
       - ui/next-app/**
 
@@ -40,7 +31,6 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     env:
-      COMPOSE_PROJECT_NAME: agentops-byoc-cross-${{ github.run_id }}-${{ github.run_attempt }}
       AGENTOPS_HISTORICAL_V9_REVISION: f55def1233403a503a39d9af92371a71770c23f7
     defaults:
       run:
@@ -92,13 +82,24 @@ jobs:
         run: |
           set -euo pipefail
           umask 077
-          root="${RUNNER_TEMP}/agentops-byoc-cross-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          nonce="$(openssl rand -hex 32)"
+          nonce_prefix="$(printf '%.16s' "${nonce}")"
+          root="${RUNNER_TEMP}/agentops-byoc-cross-accept-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${nonce_prefix}"
           secrets="${root}/secrets"
           old_env="${root}/historical-v9.env"
           target_env="${root}/target-v11.env"
+          old_compose="${root}/compose.historical-v9.yaml"
+          target_compose="${root}/compose.target-v11.yaml"
           backup="${root}/pre-upgrade-v9.bundle"
           suffix="$(openssl rand -hex 16)"
+          database_prefix="agentops_cross_accept_${GITHUB_RUN_ID}_${GITHUB_RUN_ATTEMPT}_${nonce_prefix}"
+          project="agentops-byoc-cross-accept-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${nonce_prefix}"
           install -d -m 700 "${root}" "${secrets}"
+          printf '%s\n' "${nonce}" > "${root}/acceptance.nonce"
+          install -m 600 \
+            deploy/byoc/compose.historical-v9.yaml \
+            "${old_compose}"
+          install -m 600 deploy/byoc/compose.yaml "${target_compose}"
           openssl rand -hex 32 > "${secrets}/postgres-migrator-password"
           openssl rand -hex 32 > "${secrets}/postgres-runtime-password"
           openssl rand -hex 32 > "${secrets}/postgres-entitlement-admin-password"
@@ -108,18 +109,24 @@ jobs:
           {
             printf 'AGENTOPS_CROSS_SCHEMA_ROOT=%s\n' "${root}"
             printf 'AGENTOPS_CROSS_SCHEMA_SECRETS=%s\n' "${secrets}"
+            printf 'AGENTOPS_CROSS_SCHEMA_ACCEPTANCE_NONCE=%s\n' "${nonce}"
+            printf 'AGENTOPS_CROSS_SCHEMA_ACCEPTANCE_NONCE_FILE=%s/acceptance.nonce\n' \
+              "${root}"
             printf 'AGENTOPS_CROSS_SCHEMA_OLD_ENV_FILE=%s\n' "${old_env}"
             printf 'AGENTOPS_CROSS_SCHEMA_TARGET_ENV_FILE=%s\n' "${target_env}"
+            printf 'AGENTOPS_CROSS_SCHEMA_OLD_COMPOSE_FILE=%s\n' "${old_compose}"
+            printf 'AGENTOPS_CROSS_SCHEMA_TARGET_COMPOSE_FILE=%s\n' "${target_compose}"
             printf 'AGENTOPS_CROSS_SCHEMA_BACKUP_BUNDLE=%s\n' "${backup}"
-            printf 'AGENTOPS_CROSS_SCHEMA_RESTORE_DATABASE=agentops_restore_%s\n' \
-              "${GITHUB_RUN_ID}_${GITHUB_RUN_ATTEMPT}"
-            printf 'AGENTOPS_CROSS_SCHEMA_QUARANTINE_DATABASE=agentops_quarantine_%s\n' \
-              "${GITHUB_RUN_ID}_${GITHUB_RUN_ATTEMPT}"
+            printf 'AGENTOPS_CROSS_SCHEMA_DATABASE_PREFIX=%s\n' "${database_prefix}"
+            printf 'AGENTOPS_CROSS_SCHEMA_DATABASE=%s_authority\n' "${database_prefix}"
+            printf 'AGENTOPS_CROSS_SCHEMA_RESTORE_DATABASE=%s_restore\n' "${database_prefix}"
+            printf 'AGENTOPS_CROSS_SCHEMA_QUARANTINE_DATABASE=%s_quarantine\n' "${database_prefix}"
             printf 'AGENTOPS_CROSS_SCHEMA_AUTHORITY_ID=audit_cross_schema_%s\n' \
               "${suffix}"
             printf 'AGENTOPS_CROSS_SCHEMA_PROBE_SUFFIX=%s\n' "${suffix}"
             printf 'AGENTOPS_CROSS_SCHEMA_REGISTRY=agentops-cross-registry-%s-%s\n' \
               "${GITHUB_RUN_ID}" "${GITHUB_RUN_ATTEMPT}"
+            printf 'COMPOSE_PROJECT_NAME=%s\n' "${project}"
           } >> "${GITHUB_ENV}"
 
       - name: Start pinned local registry
@@ -198,7 +205,8 @@ jobs:
             printf 'AGENTOPS_BIND_ADDRESS=127.0.0.1\n'
             printf 'AGENTOPS_PORT=3001\n'
             printf 'AGENTOPS_ALLOWED_ORIGINS=http://127.0.0.1:3001\n'
-            printf 'AGENTOPS_POSTGRES_DATABASE=agentops\n'
+            printf 'AGENTOPS_POSTGRES_DATABASE=%s\n' \
+              "${AGENTOPS_CROSS_SCHEMA_DATABASE}"
             printf 'AGENTOPS_POSTGRES_MIGRATOR_USER=agentops_migrator\n'
             printf 'AGENTOPS_POSTGRES_MIGRATOR_PASSWORD_FILE=%s/postgres-migrator-password\n' \
               "${AGENTOPS_CROSS_SCHEMA_SECRETS}"
@@ -216,7 +224,8 @@ jobs:
             printf 'AGENTOPS_ENTITLEMENT_CONTROL_PLANE_URL=http://127.0.0.1:3001\n'
             printf 'AGENTOPS_ENTITLEMENT_CONTROL_PLANE_ORIGIN=http://127.0.0.1:3001\n'
             printf 'AGENTOPS_ENTITLEMENT_OPERATOR_USERNAME=owner\n'
-            printf 'AGENTOPS_POSTGRES_DATABASE=agentops\n'
+            printf 'AGENTOPS_POSTGRES_DATABASE=%s\n' \
+              "${AGENTOPS_CROSS_SCHEMA_DATABASE}"
             printf 'AGENTOPS_POSTGRES_MIGRATOR_USER=agentops_migrator\n'
             printf 'AGENTOPS_POSTGRES_RUNTIME_USER=agentops_runtime\n'
             printf 'AGENTOPS_POSTGRES_ENTITLEMENT_ADMIN_USER=agentops_entitlement_admin\n'
@@ -236,15 +245,54 @@ jobs:
             "${AGENTOPS_CROSS_SCHEMA_TARGET_ENV_FILE}"
           docker compose \
             --env-file "${AGENTOPS_CROSS_SCHEMA_OLD_ENV_FILE}" \
-            -f deploy/byoc/compose.historical-v9.yaml config --quiet
+            -f "${AGENTOPS_CROSS_SCHEMA_OLD_COMPOSE_FILE}" config --quiet
           docker compose \
             --env-file "${AGENTOPS_CROSS_SCHEMA_TARGET_ENV_FILE}" \
-            -f deploy/byoc/compose.yaml config --quiet
+            -f "${AGENTOPS_CROSS_SCHEMA_TARGET_COMPOSE_FILE}" config --quiet
+
+      - name: Pre-bind isolated PostgreSQL cluster identity
+        run: |
+          set -euo pipefail
+          old_compose=(
+            docker compose
+            --env-file "${AGENTOPS_CROSS_SCHEMA_OLD_ENV_FILE}"
+            -f "${AGENTOPS_CROSS_SCHEMA_OLD_COMPOSE_FILE}"
+          )
+          "${old_compose[@]}" up \
+            --detach \
+            --no-build \
+            --wait \
+            --wait-timeout 300 \
+            postgres
+          postgres_container="$("${old_compose[@]}" ps -q postgres)"
+          test -n "${postgres_container}"
+          test "$(
+            docker inspect --format '{{index .Config.Labels "com.docker.compose.project"}}' \
+              "${postgres_container}"
+          )" = "${COMPOSE_PROJECT_NAME}"
+          system_identifier="$(
+            "${old_compose[@]}" exec -T postgres sh -ceu \
+              'psql --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" --no-psqlrc --tuples-only --no-align --command "SELECT system_identifier FROM pg_control_system()"' |
+              tr -d '[:space:]'
+          )"
+          case "${system_identifier}" in
+            *[!0-9]*|'') exit 2 ;;
+          esac
+          printf '%s\n' "${system_identifier}" > \
+            "${AGENTOPS_CROSS_SCHEMA_ROOT}/postgres-system-identifier"
+          chmod 600 \
+            "${AGENTOPS_CROSS_SCHEMA_ROOT}/postgres-system-identifier"
+          {
+            printf 'AGENTOPS_CROSS_SCHEMA_EXPECTED_SYSTEM_IDENTIFIER=%s\n' \
+              "${system_identifier}"
+            printf 'AGENTOPS_CROSS_SCHEMA_SYSTEM_IDENTIFIER_FILE=%s/postgres-system-identifier\n' \
+              "${AGENTOPS_CROSS_SCHEMA_ROOT}"
+          } >> "${GITHUB_ENV}"
 
       - name: Run real cross-schema forward migration and rollback
         run: |
           set -euo pipefail
-          receipt="${RUNNER_TEMP}/agentops-byoc-cross-schema-receipt.json"
+          receipt="${AGENTOPS_CROSS_SCHEMA_ROOT}/acceptance-receipt.json"
           timeout 35m deploy/byoc/cross-schema-v9-v11-acceptance.sh > "${receipt}"
           jq -e '
             .ok == true
@@ -264,6 +312,8 @@ jobs:
             and .old_image_restored == true
             and .postgres_volume_preserved == true
             and .postgres_cluster_identity_preserved == true
+            and .destructive_acceptance_isolation_guard == true
+            and .prebound_cluster_verified == true
             and .target_roles_cleaned == true
             and .python_used == false
             and .sqlite_used == false
@@ -281,14 +331,14 @@ jobs:
              [ -f "${AGENTOPS_CROSS_SCHEMA_TARGET_ENV_FILE}" ]; then
             docker compose \
               --env-file "${AGENTOPS_CROSS_SCHEMA_TARGET_ENV_FILE}" \
-              -f deploy/byoc/compose.yaml \
+              -f "${AGENTOPS_CROSS_SCHEMA_TARGET_COMPOSE_FILE}" \
               down --volumes --remove-orphans --timeout 10
           fi
           if [ -n "${AGENTOPS_CROSS_SCHEMA_OLD_ENV_FILE:-}" ] && \
              [ -f "${AGENTOPS_CROSS_SCHEMA_OLD_ENV_FILE}" ]; then
             docker compose \
               --env-file "${AGENTOPS_CROSS_SCHEMA_OLD_ENV_FILE}" \
-              -f deploy/byoc/compose.historical-v9.yaml \
+              -f "${AGENTOPS_CROSS_SCHEMA_OLD_COMPOSE_FILE}" \
               down --volumes --remove-orphans --timeout 10
           fi
           docker rm --force "${AGENTOPS_CROSS_SCHEMA_REGISTRY:-unused}" 2>/dev/null

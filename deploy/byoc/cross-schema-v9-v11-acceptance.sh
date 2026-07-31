@@ -5,10 +5,19 @@ umask 077
 
 required_environment='AGENTOPS_CROSS_SCHEMA_OLD_ENV_FILE
 AGENTOPS_CROSS_SCHEMA_TARGET_ENV_FILE
+AGENTOPS_CROSS_SCHEMA_OLD_COMPOSE_FILE
+AGENTOPS_CROSS_SCHEMA_TARGET_COMPOSE_FILE
 AGENTOPS_CROSS_SCHEMA_OLD_IMAGE
 AGENTOPS_CROSS_SCHEMA_OLD_IMAGE_ID
 AGENTOPS_CROSS_SCHEMA_TARGET_IMAGE
 AGENTOPS_CROSS_SCHEMA_TARGET_IMAGE_ID
+AGENTOPS_CROSS_SCHEMA_ROOT
+AGENTOPS_CROSS_SCHEMA_ACCEPTANCE_NONCE
+AGENTOPS_CROSS_SCHEMA_ACCEPTANCE_NONCE_FILE
+AGENTOPS_CROSS_SCHEMA_EXPECTED_SYSTEM_IDENTIFIER
+AGENTOPS_CROSS_SCHEMA_SYSTEM_IDENTIFIER_FILE
+AGENTOPS_CROSS_SCHEMA_DATABASE_PREFIX
+AGENTOPS_CROSS_SCHEMA_DATABASE
 AGENTOPS_CROSS_SCHEMA_BACKUP_BUNDLE
 AGENTOPS_CROSS_SCHEMA_RESTORE_DATABASE
 AGENTOPS_CROSS_SCHEMA_QUARANTINE_DATABASE
@@ -22,8 +31,149 @@ for name in $required_environment; do
   fi
 done
 
-old_compose_file=${AGENTOPS_CROSS_SCHEMA_OLD_COMPOSE_FILE:-deploy/byoc/compose.historical-v9.yaml}
-target_compose_file=${AGENTOPS_CROSS_SCHEMA_TARGET_COMPOSE_FILE:-deploy/byoc/compose.yaml}
+fail_isolation_guard() {
+  printf '%s\n' "cross_schema_isolation_guard_failed:$1" >&2
+  exit 2
+}
+
+case ${GITHUB_ACTIONS:-}:${CI:-} in
+  true:true) ;;
+  *) fail_isolation_guard github_actions_required ;;
+esac
+case ${GITHUB_RUN_ID:-} in
+  *[!0-9]*|'') fail_isolation_guard github_run_identity_invalid ;;
+esac
+case ${GITHUB_RUN_ATTEMPT:-} in
+  *[!0-9]*|'') fail_isolation_guard github_run_identity_invalid ;;
+esac
+case ${GITHUB_SHA:-} in
+  *[!0-9a-f]*|'') fail_isolation_guard github_sha_invalid ;;
+esac
+case ${#GITHUB_SHA} in
+  40) ;;
+  *) fail_isolation_guard github_sha_invalid ;;
+esac
+
+case "$AGENTOPS_CROSS_SCHEMA_ACCEPTANCE_NONCE" in
+  *[!0-9a-f]*|'') fail_isolation_guard acceptance_nonce_invalid ;;
+esac
+test "${#AGENTOPS_CROSS_SCHEMA_ACCEPTANCE_NONCE}" = '64' ||
+  fail_isolation_guard acceptance_nonce_invalid
+nonce_prefix=$(printf '%.16s' "$AGENTOPS_CROSS_SCHEMA_ACCEPTANCE_NONCE")
+
+test -n "${RUNNER_TEMP:-}" || fail_isolation_guard runner_temp_required
+runner_temp=$(realpath "$RUNNER_TEMP") ||
+  fail_isolation_guard runner_temp_not_canonical
+test "$runner_temp" = "$RUNNER_TEMP" ||
+  fail_isolation_guard runner_temp_not_canonical
+test ! -L "$runner_temp" || fail_isolation_guard runner_temp_symlink
+
+expected_root="$runner_temp/agentops-byoc-cross-accept-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${nonce_prefix}"
+test "$AGENTOPS_CROSS_SCHEMA_ROOT" = "$expected_root" ||
+  fail_isolation_guard acceptance_root_identity_mismatch
+test -d "$AGENTOPS_CROSS_SCHEMA_ROOT" ||
+  fail_isolation_guard acceptance_root_missing
+test ! -L "$AGENTOPS_CROSS_SCHEMA_ROOT" ||
+  fail_isolation_guard acceptance_root_symlink
+acceptance_root=$(realpath "$AGENTOPS_CROSS_SCHEMA_ROOT") ||
+  fail_isolation_guard acceptance_root_not_canonical
+test "$acceptance_root" = "$AGENTOPS_CROSS_SCHEMA_ROOT" ||
+  fail_isolation_guard acceptance_root_not_canonical
+
+assert_root_file() {
+  path=$1
+  expected_path=$2
+  label=$3
+  test "$path" = "$expected_path" ||
+    fail_isolation_guard "${label}_identity_mismatch"
+  test -f "$path" || fail_isolation_guard "${label}_missing"
+  test ! -L "$path" || fail_isolation_guard "${label}_symlink"
+  canonical_path=$(realpath "$path") ||
+    fail_isolation_guard "${label}_not_canonical"
+  test "$canonical_path" = "$path" ||
+    fail_isolation_guard "${label}_not_canonical"
+  case "$canonical_path" in
+    "$acceptance_root"/*) ;;
+    *) fail_isolation_guard "${label}_outside_acceptance_root" ;;
+  esac
+}
+
+assert_root_file \
+  "$AGENTOPS_CROSS_SCHEMA_ACCEPTANCE_NONCE_FILE" \
+  "$acceptance_root/acceptance.nonce" \
+  acceptance_nonce_file
+test "$(cat "$AGENTOPS_CROSS_SCHEMA_ACCEPTANCE_NONCE_FILE")" = \
+  "$AGENTOPS_CROSS_SCHEMA_ACCEPTANCE_NONCE" ||
+  fail_isolation_guard acceptance_nonce_binding_mismatch
+
+old_compose_file=$AGENTOPS_CROSS_SCHEMA_OLD_COMPOSE_FILE
+target_compose_file=$AGENTOPS_CROSS_SCHEMA_TARGET_COMPOSE_FILE
+assert_root_file \
+  "$AGENTOPS_CROSS_SCHEMA_OLD_ENV_FILE" \
+  "$acceptance_root/historical-v9.env" \
+  old_env_file
+assert_root_file \
+  "$AGENTOPS_CROSS_SCHEMA_TARGET_ENV_FILE" \
+  "$acceptance_root/target-v11.env" \
+  target_env_file
+assert_root_file \
+  "$old_compose_file" \
+  "$acceptance_root/compose.historical-v9.yaml" \
+  old_compose_file
+assert_root_file \
+  "$target_compose_file" \
+  "$acceptance_root/compose.target-v11.yaml" \
+  target_compose_file
+assert_root_file \
+  "$AGENTOPS_CROSS_SCHEMA_SYSTEM_IDENTIFIER_FILE" \
+  "$acceptance_root/postgres-system-identifier" \
+  system_identifier_file
+
+expected_project="agentops-byoc-cross-accept-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${nonce_prefix}"
+test "${COMPOSE_PROJECT_NAME:-}" = "$expected_project" ||
+  fail_isolation_guard compose_project_identity_mismatch
+expected_database_prefix="agentops_cross_accept_${GITHUB_RUN_ID}_${GITHUB_RUN_ATTEMPT}_${nonce_prefix}"
+test "$AGENTOPS_CROSS_SCHEMA_DATABASE_PREFIX" = "$expected_database_prefix" ||
+  fail_isolation_guard database_prefix_identity_mismatch
+test "$AGENTOPS_CROSS_SCHEMA_DATABASE" = "${expected_database_prefix}_authority" ||
+  fail_isolation_guard authority_database_identity_mismatch
+test "$AGENTOPS_CROSS_SCHEMA_RESTORE_DATABASE" = "${expected_database_prefix}_restore" ||
+  fail_isolation_guard restore_database_identity_mismatch
+test "$AGENTOPS_CROSS_SCHEMA_QUARANTINE_DATABASE" = "${expected_database_prefix}_quarantine" ||
+  fail_isolation_guard quarantine_database_identity_mismatch
+test "${#AGENTOPS_CROSS_SCHEMA_DATABASE}" -le 63 ||
+  fail_isolation_guard authority_database_name_too_long
+test "${#AGENTOPS_CROSS_SCHEMA_RESTORE_DATABASE}" -le 63 ||
+  fail_isolation_guard restore_database_name_too_long
+test "${#AGENTOPS_CROSS_SCHEMA_QUARANTINE_DATABASE}" -le 63 ||
+  fail_isolation_guard quarantine_database_name_too_long
+
+read_env_database() {
+  env_file=$1
+  match_count=$(grep -c '^AGENTOPS_POSTGRES_DATABASE=' "$env_file" || true)
+  test "$match_count" = '1' ||
+    fail_isolation_guard postgres_database_env_ambiguous
+  sed -n 's/^AGENTOPS_POSTGRES_DATABASE=//p' "$env_file"
+}
+test "$(read_env_database "$AGENTOPS_CROSS_SCHEMA_OLD_ENV_FILE")" = \
+  "$AGENTOPS_CROSS_SCHEMA_DATABASE" ||
+  fail_isolation_guard old_env_database_mismatch
+test "$(read_env_database "$AGENTOPS_CROSS_SCHEMA_TARGET_ENV_FILE")" = \
+  "$AGENTOPS_CROSS_SCHEMA_DATABASE" ||
+  fail_isolation_guard target_env_database_mismatch
+
+test "$AGENTOPS_CROSS_SCHEMA_BACKUP_BUNDLE" = \
+  "$acceptance_root/pre-upgrade-v9.bundle" ||
+  fail_isolation_guard backup_bundle_identity_mismatch
+test ! -L "$AGENTOPS_CROSS_SCHEMA_BACKUP_BUNDLE" ||
+  fail_isolation_guard backup_bundle_symlink
+
+case "$AGENTOPS_CROSS_SCHEMA_EXPECTED_SYSTEM_IDENTIFIER" in
+  *[!0-9]*|'') fail_isolation_guard system_identifier_invalid ;;
+esac
+test "$(cat "$AGENTOPS_CROSS_SCHEMA_SYSTEM_IDENTIFIER_FILE")" = \
+  "$AGENTOPS_CROSS_SCHEMA_EXPECTED_SYSTEM_IDENTIFIER" ||
+  fail_isolation_guard system_identifier_binding_mismatch
 
 case "$AGENTOPS_CROSS_SCHEMA_OLD_IMAGE" in
   *@sha256:????????????????????????????????????????????????????????????????) ;;
@@ -52,6 +202,28 @@ target_compose() {
   docker compose \
     --env-file "$AGENTOPS_CROSS_SCHEMA_TARGET_ENV_FILE" \
     -f "$target_compose_file" "$@"
+}
+
+assert_bound_cluster() {
+  old_postgres_container=$(old_compose ps -q postgres)
+  target_postgres_container=$(target_compose ps -q postgres)
+  test -n "$old_postgres_container" ||
+    fail_isolation_guard prebound_postgres_not_running
+  test "$(printf '%s\n' "$old_postgres_container" | wc -l | tr -d ' ')" = '1' ||
+    fail_isolation_guard prebound_postgres_not_unique
+  test "$old_postgres_container" = "$target_postgres_container" ||
+    fail_isolation_guard compose_cluster_mismatch
+  test "$(docker inspect --format '{{index .Config.Labels "com.docker.compose.project"}}' "$old_postgres_container")" = \
+    "$COMPOSE_PROJECT_NAME" ||
+    fail_isolation_guard postgres_project_label_mismatch
+  current_system_identifier=$(
+    old_compose exec -T postgres sh -ceu \
+      'psql --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" --no-psqlrc --tuples-only --no-align --command "SELECT system_identifier FROM pg_control_system()"' |
+      tr -d '[:space:]'
+  )
+  test "$current_system_identifier" = \
+    "$AGENTOPS_CROSS_SCHEMA_EXPECTED_SYSTEM_IDENTIFIER" ||
+    fail_isolation_guard postgres_system_identifier_mismatch
 }
 
 health_receipt() {
@@ -88,7 +260,7 @@ health_receipt() {
   return 1
 }
 
-temporary_root=${RUNNER_TEMP:-${TMPDIR:-/tmp}}
+temporary_root=$acceptance_root
 old_health="$temporary_root/agentops-cross-schema-old-health.json"
 target_health="$temporary_root/agentops-cross-schema-target-health.json"
 restored_health="$temporary_root/agentops-cross-schema-restored-health.json"
@@ -101,6 +273,7 @@ old_migration_receipt="$temporary_root/agentops-cross-schema-old-migration.json"
 
 old_compose config --quiet
 target_compose config --quiet
+assert_bound_cluster
 
 old_compose up \
   --detach \
@@ -108,6 +281,7 @@ old_compose up \
   --wait \
   --wait-timeout 300 \
   postgres
+assert_bound_cluster
 if ! old_compose run --rm --no-deps migrate >"$old_migration_output"; then
   cat "$old_migration_output" >&2
   exit 1
@@ -163,12 +337,13 @@ old_database_identity=$(
     node /usr/local/lib/agentops/historical-v9-secret-entrypoint.mjs \
       --postgres -- npm run byoc:database-identity --silent
 )
-printf '%s\n' "$old_database_identity" | jq -e '
+printf '%s\n' "$old_database_identity" | jq -e \
+  --arg database "$AGENTOPS_CROSS_SCHEMA_DATABASE" '
   .ok == true
   and .contract == "agentops_byoc_database_identity_v1"
   and .historical_adapter_contract
     == "agentops_byoc_historical_schema_adapter_v1"
-  and .authority_database == "agentops"
+  and .authority_database == $database
   and .runtime_role_verified == true
   and .database_contacted == true
 ' >/dev/null
@@ -190,8 +365,10 @@ cluster_identifier_before=$(
   old_compose exec -T postgres sh -ceu \
     'psql --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" --no-psqlrc --tuples-only --no-align --command "SELECT system_identifier FROM pg_control_system()"'
 )
-test -n "$cluster_identifier_before"
+test "$cluster_identifier_before" = \
+  "$AGENTOPS_CROSS_SCHEMA_EXPECTED_SYSTEM_IDENTIFIER"
 
+assert_bound_cluster
 old_compose exec -T \
   -e "ACCEPTANCE_AUTHORITY_ID=$AGENTOPS_CROSS_SCHEMA_AUTHORITY_ID" \
   postgres sh -ceu \
@@ -227,6 +404,7 @@ AGENTOPS_BYOC_ENV_FILE="$AGENTOPS_CROSS_SCHEMA_OLD_ENV_FILE" \
 test "$(cat "$AGENTOPS_CROSS_SCHEMA_BACKUP_BUNDLE/COMMITTED")" = \
   'agentops_byoc_backup_bundle_v2'
 
+assert_bound_cluster
 target_compose run --rm migrate >"$migration_output"
 awk '/^\{.*\}$/{line=$0} END{if(line) print line}' \
   "$migration_output" >"$migration_receipt"
@@ -269,6 +447,7 @@ printf '%s\n' "$target_schema_identity" | jq -e '
 probe_user="usr_cross_schema_$AGENTOPS_CROSS_SCHEMA_PROBE_SUFFIX"
 probe_session="hss_cross_schema_$AGENTOPS_CROSS_SCHEMA_PROBE_SUFFIX"
 probe_challenge="entc_$AGENTOPS_CROSS_SCHEMA_PROBE_SUFFIX"
+assert_bound_cluster
 target_compose exec -T \
   -e "PROBE_USER=$probe_user" \
   -e "PROBE_SESSION=$probe_session" \
@@ -311,6 +490,7 @@ SQL
 test "$probe_count" = '1'
 
 target_compose stop control-plane
+assert_bound_cluster
 target_compose exec -T \
   -e "RESTORE_DATABASE=$AGENTOPS_CROSS_SCHEMA_RESTORE_DATABASE" \
   postgres sh -ceu '
@@ -339,6 +519,7 @@ jq -e '
   and .schema_object_count == 745
 ' "$old_check_receipt" >/dev/null
 
+assert_bound_cluster
 target_compose exec -T \
   -e "RESTORE_DATABASE=$AGENTOPS_CROSS_SCHEMA_RESTORE_DATABASE" \
   -e "QUARANTINE_DATABASE=$AGENTOPS_CROSS_SCHEMA_QUARANTINE_DATABASE" \
@@ -383,6 +564,7 @@ SQL
 )
 test "$rollback_evidence" = '1|true|10'
 
+assert_bound_cluster
 old_compose exec -T \
   -e "QUARANTINE_DATABASE=$AGENTOPS_CROSS_SCHEMA_QUARANTINE_DATABASE" \
   postgres sh -ceu \
@@ -393,6 +575,7 @@ target_role_count=$(
     'psql --username "$POSTGRES_USER" --dbname postgres --no-psqlrc --tuples-only --no-align --command "SELECT count(*) FROM pg_roles WHERE rolname IN ('\''agentops_runtime'\'','\''agentops_entitlement_admin'\'') OR rolname LIKE '\''agentops_fn_%'\''"'
 )
 test "$target_role_count" = '3'
+assert_bound_cluster
 old_compose exec -T postgres sh -ceu \
   'psql --username "$POSTGRES_USER" --dbname postgres --no-psqlrc --set=ON_ERROR_STOP=1' \
   >/dev/null <<'SQL'
@@ -416,4 +599,4 @@ test "$(
     'psql --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" --no-psqlrc --tuples-only --no-align --command "SELECT system_identifier FROM pg_control_system()"'
 )" = "$cluster_identifier_before"
 
-printf '%s\n' '{"ok":true,"contract":"agentops_byoc_cross_schema_v9_v11_acceptance_v1","old_source_revision":"f55def1233403a503a39d9af92371a71770c23f7","source_schema_contract":"agentops_commercial_postgres_v9","target_schema_contract":"agentops_commercial_postgres_v11","source_migrations_applied":10,"forward_migrations_applied":3,"v11_data_probe_written":true,"backup_restore_authoritative":true,"down_migration_performed":false,"old_authority_preserved":true,"target_probe_removed":true,"old_image_restored":true,"postgres_volume_preserved":true,"postgres_cluster_identity_preserved":true,"target_roles_cleaned":true,"python_used":false,"sqlite_used":false,"mock_docker_used":false,"credentials_omitted":true,"row_data_omitted":true}'
+printf '%s\n' '{"ok":true,"contract":"agentops_byoc_cross_schema_v9_v11_acceptance_v1","old_source_revision":"f55def1233403a503a39d9af92371a71770c23f7","source_schema_contract":"agentops_commercial_postgres_v9","target_schema_contract":"agentops_commercial_postgres_v11","source_migrations_applied":10,"forward_migrations_applied":3,"v11_data_probe_written":true,"backup_restore_authoritative":true,"down_migration_performed":false,"old_authority_preserved":true,"target_probe_removed":true,"old_image_restored":true,"postgres_volume_preserved":true,"postgres_cluster_identity_preserved":true,"destructive_acceptance_isolation_guard":true,"prebound_cluster_verified":true,"target_roles_cleaned":true,"python_used":false,"sqlite_used":false,"mock_docker_used":false,"credentials_omitted":true,"row_data_omitted":true}'
