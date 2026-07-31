@@ -606,6 +606,14 @@ async function run() {
     restoreProvisionScript,
     /AGENTOPS_POSTGRES_ENTITLEMENT_ADMIN_DSN_FILE=\$admin_restore_dsn/,
   );
+  assert.match(
+    restoreProvisionScript,
+    /unset AGENTOPS_POSTGRES_MIGRATOR_DSN_FILE/,
+  );
+  assert.match(
+    restoreProvisionScript,
+    /rm -f "\$migrator_restore_dsn"/,
+  );
   assert.doesNotMatch(
     restoreProvisionScript,
     /if \[ "\$file_backed" = true \]/,
@@ -633,6 +641,14 @@ async function run() {
   assert.match(
     restoreRoleBoundaryCheck,
     /direct_database_secret_forbidden/,
+  );
+  assert.match(
+    restoreRoleBoundaryCheck,
+    /AGENTOPS_POSTGRES_MIGRATOR_DSN_FILE/,
+  );
+  assert.match(
+    restoreRoleBoundaryCheck,
+    /AGENTOPS_POSTGRES_MIGRATOR_PASSWORD_FILE/,
   );
   assert.match(restoreScript, /production_overwritten":false/);
   assert.match(restoreScript, /restore_provisioning_completed":true/);

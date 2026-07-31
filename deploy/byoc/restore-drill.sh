@@ -218,6 +218,10 @@ case "$validation_status" in
     printf '%s\n' "restore_entitlement_admin_role_boundary_failed" >&2
     exit 1
     ;;
+  75)
+    printf '%s\n' "restore_credential_cleanup_failed" >&2
+    exit 1
+    ;;
   *)
     printf '%s\n' "restore_validation_failed" >&2
     exit 1

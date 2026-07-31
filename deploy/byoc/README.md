@@ -243,8 +243,10 @@ This rebuilds their grants and transfers every bounded `SECURITY DEFINER`
 function to the derived `NOLOGIN` function owner. The password inputs are then
 removed from the child environment, and the manifest, fingerprint, runtime
 boundary, and entitlement-admin boundary checks consume only their respective
-derived DSN files. The v4 receipt is emitted only when both role boundaries
-explicitly verify the restricted function owner.
+derived DSN files. The migrator DSN is unset and deleted before those checks,
+whose checker also rejects any inherited migrator DSN or password input. The v4
+receipt is emitted only when both role boundaries explicitly verify the
+restricted function owner.
 
 Custom Compose deployments may supply
 `AGENTOPS_POSTGRES_MIGRATOR_DSN_FILE` to the migrator instead of component

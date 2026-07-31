@@ -126,6 +126,9 @@ unset AGENTOPS_POSTGRES_ENTITLEMENT_ADMIN_USER
 
 cd "$next_app_root"
 npm run migrate:postgres >/dev/null 2>&1 || exit 71
+unset AGENTOPS_POSTGRES_MIGRATOR_DSN_FILE
+rm -f "$migrator_restore_dsn" || exit 75
+derived_dsn_files="$runtime_restore_dsn $admin_restore_dsn"
 unset AGENTOPS_POSTGRES_DSN AGENTOPS_POSTGRES_PASSWORD
 unset AGENTOPS_POSTGRES_RUNTIME_PASSWORD
 unset AGENTOPS_POSTGRES_HOST AGENTOPS_POSTGRES_PORT
