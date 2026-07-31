@@ -9,6 +9,7 @@ const EXPECTED_ACTION_REFS = new Set([
 ]);
 const EXPECTED_LOCAL_WORKFLOW_REFS = new Set([
   "./.github/workflows/byoc-compose-acceptance.yml",
+  "./.github/workflows/byoc-cross-schema-v9-v11-acceptance.yml",
 ]);
 const POSTGRES_IMAGE =
   "postgres:16-alpine@sha256:57c72fd2a128e416c7fcc499958864df5301e940bca0a56f58fddf30ffc07777";
@@ -103,6 +104,7 @@ async function run() {
   assert.match(ci, /test:schema-fingerprint-postgres-contract/);
   assert.match(ci, /test:commercial-health-postgres-contract/);
   assert.match(ci, /test:byoc-backup-restore-behavior-contract/);
+  assert.match(ci, /byoc_restore_guardian_real_postgres_smoke\.py/);
   assert.match(
     ci,
     /test:byoc-retained-data-lifecycle-packaging-contract/,
@@ -114,6 +116,19 @@ async function run() {
   assert.match(
     ci,
     /uses:\s+\.\/\.github\/workflows\/byoc-compose-acceptance\.yml/,
+  );
+  assert.match(
+    ci,
+    /uses:\s+\.\/\.github\/workflows\/byoc-cross-schema-v9-v11-acceptance\.yml/,
+  );
+  assert.match(ci, /name:\s+Commercial promotion gate/);
+  assert.match(
+    ci,
+    /needs:[\s\S]*backend-deterministic[\s\S]*ui-build[\s\S]*commercial-next-boundary[\s\S]*byoc-compose-acceptance[\s\S]*byoc-cross-schema-acceptance/,
+  );
+  assert.match(
+    ci,
+    /test "\$BYOC_COMPOSE_RESULT" = success[\s\S]*test "\$BYOC_CROSS_SCHEMA_RESULT" = success/,
   );
 
   const byoc = workflows.find((workflow) =>
@@ -155,6 +170,7 @@ async function run() {
       "/byoc-cross-schema-v9-v11-acceptance.yml",
     ))?.source || "";
   assert.match(crossSchema, /^\s+workflow_dispatch:\s*$/m);
+  assert.match(crossSchema, /^\s+workflow_call:\s*$/m);
   assert.match(crossSchema, /^\s+pull_request:\s*$/m);
   assert.match(crossSchema, /persist-credentials:\s+false/g);
   assert.match(
@@ -228,6 +244,7 @@ async function run() {
     retained_postgres_volume_verified: true,
     rollback_data_authority_verified: true,
     real_byoc_cross_schema_upgrade_gate_in_ci: true,
+    aggregate_commercial_promotion_gate_in_ci: true,
     historical_byoc_image_inputs_pinned: true,
     byoc_upgrade_rollback_claimed: false,
     credentials_omitted: true,

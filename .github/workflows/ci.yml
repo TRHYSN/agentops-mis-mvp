@@ -448,3 +448,33 @@ jobs:
   byoc-compose-acceptance:
     name: BYOC Docker Compose acceptance
     uses: ./.github/workflows/byoc-compose-acceptance.yml
+
+  byoc-cross-schema-acceptance:
+    name: BYOC Cross-Schema v9 to v11 acceptance
+    uses: ./.github/workflows/byoc-cross-schema-v9-v11-acceptance.yml
+
+  commercial-promotion-gate:
+    name: Commercial promotion gate
+    if: ${{ always() }}
+    needs:
+      - backend-deterministic
+      - ui-build
+      - commercial-next-boundary
+      - byoc-compose-acceptance
+      - byoc-cross-schema-acceptance
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require every commercial promotion lane
+        env:
+          BACKEND_RESULT: ${{ needs.backend-deterministic.result }}
+          UI_RESULT: ${{ needs.ui-build.result }}
+          NEXT_RESULT: ${{ needs.commercial-next-boundary.result }}
+          BYOC_COMPOSE_RESULT: ${{ needs.byoc-compose-acceptance.result }}
+          BYOC_CROSS_SCHEMA_RESULT: ${{ needs.byoc-cross-schema-acceptance.result }}
+        run: |
+          set -euo pipefail
+          test "$BACKEND_RESULT" = success
+          test "$UI_RESULT" = success
+          test "$NEXT_RESULT" = success
+          test "$BYOC_COMPOSE_RESULT" = success
+          test "$BYOC_CROSS_SCHEMA_RESULT" = success
