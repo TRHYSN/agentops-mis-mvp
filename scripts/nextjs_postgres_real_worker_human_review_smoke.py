@@ -658,12 +658,13 @@ def assert_entitlement_admin_environment_isolated(
         "AGENTOPS_ENTITLEMENT_OPERATOR_USERNAME",
         "AGENTOPS_ENTITLEMENT_CONTROL_PLANE_URL",
         "AGENTOPS_ENTITLEMENT_CONTROL_PLANE_ORIGIN",
+        "AGENTOPS_POSTGRES_SCHEMA",
         "AGENTOPS_POSTGRES_RUNTIME_API_SCHEMA",
+        "AGENTOPS_POSTGRES_ENTITLEMENT_ADMIN_ROLE",
     }
     forbidden = {
         "AGENTOPS_POSTGRES_DSN",
         "AGENTOPS_POSTGRES_MIGRATOR_DSN",
-        "AGENTOPS_POSTGRES_SCHEMA",
         "AGENTOPS_POSTGRES_RUNTIME_DSN",
         "AGENTOPS_POSTGRES_RUNTIME_ROLE",
         "AGENTOPS_POSTGRES_RUNTIME_PASSWORD",
@@ -2551,7 +2552,10 @@ def main() -> int:
         entitlement_admin_environment = {
             "AGENTOPS_DEPLOYMENT_MODE": "production",
             "AGENTOPS_CONTROL_PLANE_MODE": "postgres",
+            "AGENTOPS_POSTGRES_SCHEMA": schema,
             "AGENTOPS_POSTGRES_RUNTIME_API_SCHEMA": runtime_api_schema,
+            "AGENTOPS_POSTGRES_ENTITLEMENT_ADMIN_ROLE":
+                entitlement_admin_role,
             "AGENTOPS_POSTGRES_ENTITLEMENT_ADMIN_DSN":
                 entitlement_admin_dsn,
             "AGENTOPS_ENTITLEMENT_CONTROL_PLANE_URL": base_url,
