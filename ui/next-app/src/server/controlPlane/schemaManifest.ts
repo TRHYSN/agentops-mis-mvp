@@ -6,11 +6,11 @@ export type MigrationDefinition = Readonly<{
   checksum: string;
 }>;
 
-export const SCHEMA_CONTRACT = "agentops_commercial_postgres_v9";
+export const SCHEMA_CONTRACT = "agentops_commercial_postgres_v10";
 
 export const EXPECTED_POSTGRES_SCHEMA_FINGERPRINT = Object.freeze({
   contract: "agentops_postgres_schema_fingerprint_v1",
-  sha256: "eb482da9beb9a5c4cd1afdadaf114d3828991285107f71d0ad620a02d377f36e",
+  sha256: "912d4c25130f4db974e7256efc6047cf1a8cebe09b473fb95f149f5bffa9a9d2",
   objectCount: 745,
 });
 
@@ -84,5 +84,12 @@ export const POSTGRES_MIGRATION_MANIFEST = Object.freeze([
     schemaContract: "workspace_entitlements_v9",
     filename: "20260724_workspace_entitlements_v9.sql",
     checksum: "a22dc35565b5ae39ff553567154a80c4168957cdfecf5393d82adb3bad032419",
+  },
+  {
+    component: "workspace_membership_roles",
+    version: "20260731.10",
+    schemaContract: "workspace_membership_roles_v10",
+    filename: "20260731_workspace_membership_roles_v10.sql",
+    checksum: "7a187c43c27bcb9a660e060fc45b2ccc36d3db04f8ffc4fb31fd58615ba71486",
   },
 ] satisfies readonly MigrationDefinition[]);

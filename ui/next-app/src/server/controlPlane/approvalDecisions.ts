@@ -1,5 +1,6 @@
 import type { PoolClient } from "pg";
 
+import { decideGatewayEnrollmentApproval } from "./agentGatewayEnrollmentApprovals";
 import { verifyCurrentCustomerDeliveryPlanEvidence } from "./customerDeliveryPlanEvidence";
 import { withPostgresTransaction } from "./db";
 import {
@@ -1136,6 +1137,15 @@ export async function decideWorkspaceApproval(
     );
     if (approvalKind === "prepared_action") {
       return decidePreparedAction(
+        client,
+        identity,
+        approvalId,
+        decision,
+        idempotencyHash,
+      );
+    }
+    if (approvalKind === "agent_enrollment") {
+      return decideGatewayEnrollmentApproval(
         client,
         identity,
         approvalId,

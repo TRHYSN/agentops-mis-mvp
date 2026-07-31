@@ -347,6 +347,7 @@ jobs:
           npm run test:workspace-entitlement-administration-postgres-contract
           npm run test:gateway-lifecycle-contract
           npm run test:gateway-administration-postgres-contract
+          npm run test:enrollment-approval-gated-postgres-contract
           npm run test:agent-gateway-evidence-support-contract
           npm run test:loop-supervision-contract
           npm run test:human-read-models-contract

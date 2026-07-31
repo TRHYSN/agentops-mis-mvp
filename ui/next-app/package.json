@@ -33,6 +33,7 @@
     "test:workspace-entitlement-administration-postgres-contract": "tsx scripts/workspace-entitlement-administration-postgres-contract.ts",
     "test:gateway-lifecycle-contract": "tsx scripts/gateway-lifecycle-contract.ts",
     "test:gateway-administration-postgres-contract": "tsx scripts/gateway-administration-postgres-contract.ts",
+    "test:enrollment-approval-gated-postgres-contract": "tsx scripts/enrollment-approval-gated-postgres-contract.ts",
     "test:loop-supervision-contract": "tsx scripts/loop-supervision-contract.ts",
     "test:human-read-models-contract": "tsx scripts/human-read-models-contract.ts",
     "test:human-session-approval-contract": "tsx scripts/human-session-approval-contract.ts",

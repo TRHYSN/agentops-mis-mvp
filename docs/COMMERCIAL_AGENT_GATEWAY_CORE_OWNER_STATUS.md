@@ -1,6 +1,6 @@
 # Commercial Agent Gateway Core Owner Status
 
-Status date: 2026-07-24
+Status date: 2026-07-31
 
 ## Owned Production Boundary
 
@@ -15,6 +15,8 @@ TypeScript/PostgreSQL owners:
 - `GET /agent-gateway/status`
 - `GET /agent-gateway/enrollments`
 - `POST /agent-gateway/enrollment/create`
+- `POST /agent-gateway/enrollment/request`
+- `POST /agent-gateway/enrollment/issue-approved`
 - `POST /agent-gateway/enrollment/revoke`
 - `POST /agent-gateway/enrollment/rotate`
 - `GET /agent-gateway/tasks/pull`
@@ -82,13 +84,24 @@ schema, applies the current migration runner, and covers:
 route ownership, bounded bodies, explicit Free Local proxy switch, and absence
 of Python process/proxy calls in production owners.
 
-The schema contract is now `agentops_commercial_postgres_v9` with ten
+The schema contract is now `agentops_commercial_postgres_v10` with eleven
 checksum-pinned migrations. Workspace entitlement evaluation is serialized by
 a transaction-scoped workspace advisory lock. New enrollment, child-session,
 and run-start writes fail closed on missing, inactive, suspended, expired,
 disabled, or exhausted entitlement and commit a bounded denial audit. Existing
 idempotent writes replay before quota evaluation, enrollment rotation is
 quota-neutral, and revocation remains available while entitlement is suspended.
+Remote enrollment requests are authenticated as the requesting Agent with the
+`approvals:request` scope. They create no credential and cannot create or
+rewrite Agent identity. Only `workspace-admin` or `owner` Human Sessions can
+decide and issue an approved request; issuance rechecks current entitlement,
+returns the raw token once, and stores only its SHA-256 hash.
+
+`enrollment-approval-gated-postgres-contract.ts` covers Agent self-request,
+Human and cross-workspace rejection, admin-only decision and issue, concurrent
+single-winner transitions, task/run/Agent/config drift, entitlement denial
+evidence, one-time credential delivery, replay omission, and a database-wide
+raw-token scan.
 
 The complete Human review acceptance also covers the first-party Human Session
 owners for login, logout, current session, approval list/detail/decision,
@@ -104,8 +117,7 @@ TypeScript Worker and PostgreSQL 16, performed a real provider call with
 The broader commercial product still needs direct production ownership and
 acceptance for:
 
-- approval-gated enrollment request, Human decision, and one-time
-  issue-after-approval ownership
+- approval-gated enrollment browser workflow and operator queue presentation
 - remaining commercial policy and entitlement administration surfaces
 - remaining browser dashboard, agent, connector, and deployment workflows
 - BYOC packaging, upgrade, backup/restore, rollback, and promotion receipts

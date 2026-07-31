@@ -109,6 +109,18 @@ type IssueInput = {
   label: string;
 };
 
+type IssueOperation = "create" | "rotate" | "issue_approved";
+
+type IssueEvidenceBinding = Readonly<{
+  requestId: string;
+  approvalId: string;
+  taskId: string;
+  runId: string;
+}>;
+
+export type GatewayEnrollmentIssueInput = IssueInput;
+export type GatewayEnrollmentTokenRow = TokenRow;
+
 type TokenRequestIdentity = {
   idempotencyKeyHash: string;
   requestBindingHash: string;
@@ -229,12 +241,23 @@ function parseStoredScopes(value: string) {
   }
 }
 
+export function parseGatewayTokenScopes(value: string) {
+  return parseStoredScopes(value);
+}
+
 function safeRef(kind: "token" | "session" | "request", value: string) {
   const digest = createHash("sha256")
     .update(`${kind}:${value}`, "utf8")
     .digest("hex")
     .slice(0, 16);
   return `${kind}_ref_${digest}`;
+}
+
+export function gatewayOpaqueReference(
+  kind: "token" | "session" | "request",
+  value: string,
+) {
+  return safeRef(kind, value);
 }
 
 function tokenHash(value: string) {
@@ -262,6 +285,10 @@ function requireAdministrator(identity: HumanSessionIdentity) {
       "Enrollment administration requires workspace-admin or owner authority.",
     );
   }
+}
+
+export function requireGatewayAdministrator(identity: HumanSessionIdentity) {
+  requireAdministrator(identity);
 }
 
 function queryWorkspace(request: Request) {
@@ -395,6 +422,12 @@ function issueInput(body: Record<string, unknown>): IssueInput {
   };
 }
 
+export function parseGatewayEnrollmentIssueInput(
+  body: Record<string, unknown>,
+) {
+  return issueInput(body);
+}
+
 async function ensureEnrollmentAgent(
   client: PoolClient,
   identity: HumanSessionIdentity,
@@ -469,6 +502,56 @@ async function ensureEnrollmentAgent(
   );
 }
 
+async function assertExistingEnrollmentAgent(
+  client: PoolClient,
+  identity: HumanSessionIdentity,
+  input: IssueInput,
+) {
+  await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1,0))", [
+    `gateway-admin-agent:${input.agentId}`,
+  ]);
+  const existing = (await client.query<AgentRow>(
+    `SELECT agent_id,name,role,runtime_type,status,owner_user_id
+    FROM agents WHERE agent_id=$1 FOR UPDATE`,
+    [input.agentId],
+  )).rows[0];
+  if (
+    !existing
+    || existing.status === "disabled"
+    || existing.name !== input.name
+    || existing.role !== input.role
+    || existing.runtime_type !== input.runtimeType
+  ) {
+    throw new ControlPlaneHttpError(
+      409,
+      "approved_enrollment_agent_binding_invalid",
+      "Approved enrollment must match an existing active Agent identity exactly.",
+    );
+  }
+  const foreignBinding = await client.query<{ workspace_id: string }>(
+    `SELECT workspace_id
+    FROM (
+      SELECT workspace_id,created_at
+      FROM agent_gateway_tokens
+      WHERE agent_id=$1 AND workspace_id<>$2
+      UNION ALL
+      SELECT workspace_id,created_at
+      FROM agent_gateway_enrollment_requests
+      WHERE agent_id=$1 AND workspace_id<>$2
+    ) binding
+    ORDER BY created_at DESC,workspace_id
+    LIMIT 1`,
+    [input.agentId, identity.workspaceId],
+  );
+  if (foreignBinding.rows[0]) {
+    throw new ControlPlaneHttpError(
+      409,
+      "agent_workspace_binding_conflict",
+      "The agent id already has enrollment history in another workspace.",
+    );
+  }
+}
+
 function tokenSnapshot(row: TokenRow) {
   return {
     token_ref: safeRef("token", row.token_id),
@@ -488,7 +571,7 @@ function tokenSnapshot(row: TokenRow) {
 
 function issueRequestBinding(
   input: IssueInput,
-  operation: "create" | "rotate",
+  operation: IssueOperation,
   replacingEnrollmentId?: string,
 ) {
   return {
@@ -510,7 +593,7 @@ function issueRequestBinding(
 function tokenRequestIdentity(
   identity: HumanSessionIdentity,
   requestKey: string,
-  operation: "create" | "rotate",
+  operation: IssueOperation,
   requestBinding: unknown,
 ): TokenRequestIdentity {
   const idempotencyKeyHash = stableHash({
@@ -674,11 +757,13 @@ async function issueToken(
   identity: HumanSessionIdentity,
   input: IssueInput,
   requestKey: string,
-  operation: "create" | "rotate",
+  operation: IssueOperation,
   options: Readonly<{
     replacingEnrollmentId?: string;
     entitlementDecision?: WorkspaceEntitlementDecision;
     requestBinding?: unknown;
+    evidence?: IssueEvidenceBinding;
+    existingAgentOnly?: boolean;
   }> = {},
 ) {
   const requestIdentity = tokenRequestIdentity(
@@ -780,8 +865,10 @@ async function issueToken(
       actorType: "user",
       actorId: identity.userId,
       action: "agent_gateway.enrollment_entitlement_denied",
-      entityType: "workspace_entitlements",
-      entityId: identity.workspaceId,
+      entityType: options.evidence
+        ? "agent_gateway_enrollment_requests"
+        : "workspace_entitlements",
+      entityId: options.evidence?.requestId || identity.workspaceId,
       after: {
         decision: entitlementDecision.decision,
         reason_code: entitlementDecision.reason_code,
@@ -800,11 +887,32 @@ async function issueToken(
         credential_generated: false,
         token_omitted: true,
         raw_config_omitted: true,
+        idempotency_owner: "gateway_admin_token_issue",
         idempotency_key_hash: idempotencyKeyHash,
         request_binding_hash: requestBindingHash,
+        ...(options.evidence
+          ? {
+            enrollment_request_id: options.evidence.requestId,
+            approval_id: options.evidence.approvalId,
+            task_id: options.evidence.taskId,
+            run_id: options.evidence.runId,
+          }
+          : {}),
       },
       requestHash,
     });
+    if (options.evidence) {
+      await appendRuntimeEvent(client, {
+        workspaceId: identity.workspaceId,
+        eventType: "agent.enrollment.issue_denied",
+        status: "blocked",
+        runId: options.evidence.runId,
+        taskId: options.evidence.taskId,
+        agentId: input.agentId,
+        outputSummary: "Approved enrollment issue was blocked by workspace entitlement.",
+        rawPayloadHash: requestHash,
+      });
+    }
     return entitlementDenialResult(
       identity,
       input.agentId,
@@ -813,7 +921,11 @@ async function issueToken(
     );
   }
 
-  await ensureEnrollmentAgent(client, identity, input);
+  if (options.existingAgentOnly) {
+    await assertExistingEnrollmentAgent(client, identity, input);
+  } else {
+    await ensureEnrollmentAgent(client, identity, input);
+  }
   const now = new Date();
   const createdAt = now.toISOString();
   const expiresAt = new Date(
@@ -864,8 +976,18 @@ async function issueToken(
       session_ref: identity.sessionRef,
       membership_role: identity.membershipRole,
       request_ref: safeRef("request", idempotencyKeyHash),
+      idempotency_owner: "gateway_admin_token_issue",
       idempotency_key_hash: idempotencyKeyHash,
       request_binding_hash: requestBindingHash,
+      enrollment_operation: operation,
+      ...(options.evidence
+        ? {
+          enrollment_request_id: options.evidence.requestId,
+          approval_id: options.evidence.approvalId,
+          task_id: options.evidence.taskId,
+          run_id: options.evidence.runId,
+        }
+        : {}),
       one_time_credential_response: true,
       token_hash_omitted: true,
       token_omitted: true,
@@ -876,6 +998,8 @@ async function issueToken(
     workspaceId: identity.workspaceId,
     eventType: `agent.enrollment.${operation}`,
     status: "completed",
+    runId: options.evidence?.runId,
+    taskId: options.evidence?.taskId,
     agentId: input.agentId,
     outputSummary: `${operation === "rotate" ? "Rotated" : "Issued"} scoped enrollment ${safeRef("token", row.token_id)}.`,
     rawPayloadHash: requestHash,
@@ -899,6 +1023,41 @@ async function issueToken(
       token_omitted: false,
     },
   };
+}
+
+export function approvedGatewayEnrollmentIdempotencyKeyHash(
+  identity: Pick<HumanSessionIdentity, "userId" | "workspaceId">,
+  requestKey: string,
+) {
+  return stableHash({
+    workspace_id: identity.workspaceId,
+    user_id: identity.userId,
+    request_key: requestKey,
+    operation: "issue_approved",
+  });
+}
+
+export async function issueApprovedGatewayEnrollmentToken(
+  client: PoolClient,
+  identity: HumanSessionIdentity,
+  input: GatewayEnrollmentIssueInput,
+  requestKey: string,
+  evidence: IssueEvidenceBinding,
+  requestBinding: unknown,
+) {
+  requireAdministrator(identity);
+  return issueToken(
+    client,
+    identity,
+    input,
+    requestKey,
+    "issue_approved",
+    {
+      requestBinding,
+      evidence,
+      existingAgentOnly: true,
+    },
+  );
 }
 
 async function activeChildSessions(
