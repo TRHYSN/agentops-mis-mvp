@@ -30,7 +30,8 @@ from typing import Any
 DEFAULT_SOURCE_ROOT = Path(__file__).resolve().parents[1]
 ROOT = DEFAULT_SOURCE_ROOT
 NEXT_APP = ROOT / "ui" / "next-app"
-CONTRACT_ID = "nextjs_postgres_real_worker_human_review_v4"
+CONTRACT_ID = "nextjs_postgres_real_worker_human_review_v5"
+NEXT_RUNTIME_MUTABLE_ARTIFACT_PATHS = ("cache", "trace")
 WORKSPACE_ID = "ws_real_worker_human_review"
 OTHER_WORKSPACE_ID = "ws_real_worker_human_review_other"
 REQUESTER_ID = "usr_founder"
@@ -245,15 +246,23 @@ def _hash_field(digest: Any, value: bytes) -> None:
     digest.update(value)
 
 
-def stable_tree_sha256(root: Path) -> str:
-    """Hash tree paths, entry types, and contents without filesystem metadata."""
+def stable_next_release_artifact_sha256(root: Path) -> str:
+    """Hash immutable Next release files while omitting documented runtime state."""
     if root.is_symlink() or not root.is_dir():
         raise RuntimeError("next_build_artifact_missing_or_unsafe")
-    entries = sorted(root.rglob("*"), key=lambda item: os.fsencode(item.relative_to(root).as_posix()))
+    entries = sorted(
+        (
+            item
+            for item in root.rglob("*")
+            if item.relative_to(root).parts[0]
+            not in NEXT_RUNTIME_MUTABLE_ARTIFACT_PATHS
+        ),
+        key=lambda item: os.fsencode(item.relative_to(root).as_posix()),
+    )
     if not entries:
         raise RuntimeError("next_build_artifact_empty")
     digest = hashlib.sha256()
-    _hash_field(digest, b"agentops-stable-tree-sha256-v1")
+    _hash_field(digest, b"agentops-next-release-artifact-sha256-v1")
     for path in entries:
         relative = os.fsencode(path.relative_to(root).as_posix())
         metadata = path.lstat()
@@ -2253,7 +2262,9 @@ def main() -> int:
                 "Next production build failed "
                 f"(code={built.returncode}): {(built.stdout or '')[-1200:]} {(built.stderr or '')[-1200:]}"
             )
-        next_artifact_sha256 = stable_tree_sha256(NEXT_APP / ".next")
+        next_artifact_sha256 = stable_next_release_artifact_sha256(
+            NEXT_APP / ".next"
+        )
         tracked_after_prepare = tracked_worktree_fingerprint(ROOT)
         if tracked_after_prepare != tracked_before:
             raise RuntimeError(
@@ -2494,7 +2505,7 @@ def main() -> int:
         ):
             raise RuntimeError("owner_bootstrap_identity_unverified")
 
-        next_artifact_before_start_sha256 = stable_tree_sha256(
+        next_artifact_before_start_sha256 = stable_next_release_artifact_sha256(
             NEXT_APP / ".next"
         )
         if next_artifact_before_start_sha256 != next_artifact_sha256:
@@ -2856,7 +2867,7 @@ def main() -> int:
             or process_stop_receipt.get("errors")
         ):
             raise RuntimeError("next_process_stop_failed")
-        next_artifact_after_acceptance_sha256 = stable_tree_sha256(
+        next_artifact_after_acceptance_sha256 = stable_next_release_artifact_sha256(
             NEXT_APP / ".next"
         )
         if next_artifact_after_acceptance_sha256 != next_artifact_sha256:
@@ -2877,7 +2888,7 @@ def main() -> int:
             function_owner_role,
         )
         fixture_cleanup_complete = True
-        next_artifact_after_cleanup_sha256 = stable_tree_sha256(
+        next_artifact_after_cleanup_sha256 = stable_next_release_artifact_sha256(
             NEXT_APP / ".next"
         )
         if next_artifact_after_cleanup_sha256 != next_artifact_sha256:
@@ -2914,6 +2925,8 @@ def main() -> int:
             "next_artifact_after_cleanup_sha256":
                 next_artifact_after_cleanup_sha256,
             "next_artifact_identity_verified": True,
+            "next_runtime_mutable_artifact_paths_omitted":
+                list(NEXT_RUNTIME_MUTABLE_ARTIFACT_PATHS),
             "next_build_completed": True,
             "source_commit": source_commit,
             "tracked_worktree_clean": True,
@@ -3022,7 +3035,7 @@ def main() -> int:
                 function_owner_role,
             )
             fixture_cleanup_complete = True
-            next_artifact_after_cleanup_sha256 = stable_tree_sha256(
+            next_artifact_after_cleanup_sha256 = stable_next_release_artifact_sha256(
                 NEXT_APP / ".next"
             )
         except Exception as cleanup_exc:
@@ -3071,6 +3084,8 @@ def main() -> int:
             "next_artifact_after_cleanup_sha256":
                 next_artifact_after_cleanup_sha256 or None,
             "next_build_completed": True,
+            "next_runtime_mutable_artifact_paths_omitted":
+                list(NEXT_RUNTIME_MUTABLE_ARTIFACT_PATHS),
             "source_commit": source_commit or None,
             "tracked_worktree_clean": clean_after_failure,
             "tracked_worktree_fingerprint_before": tracked_before,
