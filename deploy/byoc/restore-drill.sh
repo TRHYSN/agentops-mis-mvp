@@ -259,6 +259,7 @@ docker compose --env-file "$env_file" -f "$compose_file" exec -T postgres \
     lease_key=7157544864185932631
     lease_ready=$(mktemp)
     lease_pid=
+    lease_backend_pid=
     lease_acquired=false
     restore_pid=
     restore_input_open=true
@@ -299,6 +300,22 @@ docker compose --env-file "$env_file" -f "$compose_file" exec -T postgres \
         exec 3<&-
         restore_input_open=false
       fi
+      if [ "$lease_acquired" = true ] && [ -n "$lease_backend_pid" ]; then
+        printf "%s\n" \
+          "SELECT pg_terminate_backend(pid)" \
+          "FROM pg_stat_activity" \
+          "WHERE pid=:'guardian_pid'::integer" \
+          "  AND application_name='agentops_byoc_restore_guardian'" \
+          "  AND datname='postgres'" \
+          "  AND usename=current_user;" |
+          psql \
+            --username "$POSTGRES_USER" \
+            --dbname postgres \
+            --no-psqlrc \
+            --set ON_ERROR_STOP=1 \
+            --set guardian_pid="$lease_backend_pid" \
+            >/dev/null 2>&1 || :
+      fi
       if [ -n "$lease_pid" ]; then
         kill "$lease_pid" 2>/dev/null || :
         wait "$lease_pid" 2>/dev/null || :
@@ -312,13 +329,17 @@ docker compose --env-file "$env_file" -f "$compose_file" exec -T postgres \
     trap "exit 129" 1
     trap "exit 130" 2
     trap "exit 143" 15
-    psql \
+    PGAPPNAME=agentops_byoc_restore_guardian psql \
       --username "$POSTGRES_USER" \
       --dbname postgres \
       --no-psqlrc \
+      --tuples-only \
+      --no-align \
       --set ON_ERROR_STOP=1 >/dev/null <<SQL &
 SELECT pg_advisory_lock($lease_key);
-\! printf "%s\n" ready > "$lease_ready"
+\o $lease_ready
+SELECT pg_backend_pid();
+\o /dev/null
 SELECT pg_sleep(86400);
 SQL
     lease_pid=$!
@@ -335,6 +356,13 @@ SQL
       fi
       sleep 0.1
     done
+    lease_backend_pid=$(cat "$lease_ready")
+    case "$lease_backend_pid" in
+      ""|*[!0-9]*)
+        printf "%s\n" restore_database_lease_identity_invalid >&2
+        exit 1
+        ;;
+    esac
     lease_acquired=true
     pg_restore --username "$POSTGRES_USER" --dbname "$1" --no-owner --no-privileges --exit-on-error <&3 &
     restore_pid=$!

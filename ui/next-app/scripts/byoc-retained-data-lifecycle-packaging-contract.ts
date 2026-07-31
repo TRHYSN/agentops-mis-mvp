@@ -207,6 +207,17 @@ assert.match(restore, /kill "\$restore_pid"/);
 assert.match(restore, /exec 3<&0/);
 assert.match(restore, /pg_restore[\s\S]*<&3 &/);
 assert.match(restore, /wait_for_lease_release/);
+assert.match(restore, /SELECT pg_backend_pid\(\)/);
+assert.match(restore, /SELECT pg_terminate_backend\(pid\)/);
+assert.match(
+  restore,
+  /PGAPPNAME=agentops_byoc_restore_guardian psql/,
+);
+assert.match(
+  restore,
+  /application_name='agentops_byoc_restore_guardian'/,
+);
+assert.match(restore, /lease_backend_pid=\$\(cat "\$lease_ready"\)/);
 assert.ok(
   restore.indexOf('kill "$restore_pid"')
     < restore.indexOf('kill "$lease_pid"'),
@@ -270,6 +281,8 @@ console.log(JSON.stringify({
   restore_database_lease_guardian_packaged: true,
   restore_process_stops_before_lease_release: true,
   restore_input_fd_preserved_for_supervision: true,
+  restore_guardian_backend_identity_bound: true,
+  restore_guardian_server_termination_packaged: true,
   restore_failure_waits_for_lease_release: true,
   stale_lock_database_lease_probe_packaged: true,
   external_dba_ddl_trust_boundary_documented: true,
