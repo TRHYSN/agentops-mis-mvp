@@ -28,6 +28,23 @@ services:
       dockerfile: deploy/byoc/Dockerfile
     image: ${AGENTOPS_IMAGE:-agentops-mis-byoc:local}
     restart: "no"
+    user: "0:0"
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - DAC_OVERRIDE
+      - SETGID
+      - SETUID
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /run/agentops-runtime-secrets:rw,noexec,nosuid,size=1m,mode=0700,uid=1000,gid=1000
+    entrypoint:
+      - node
+      - /usr/local/lib/agentops/node-secret-entrypoint.mjs
+      - --postgres
+      - --
     command: ["npm", "run", "migrate:postgres"]
     environment: &control_plane_database_environment
       AGENTOPS_DEPLOYMENT_MODE: production
@@ -36,7 +53,7 @@ services:
       AGENTOPS_POSTGRES_PORT: "5432"
       AGENTOPS_POSTGRES_DATABASE: ${AGENTOPS_POSTGRES_DATABASE:-agentops}
       AGENTOPS_POSTGRES_USER: ${AGENTOPS_POSTGRES_USER:-agentops}
-      AGENTOPS_POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
+      AGENTOPS_POSTGRES_PASSWORD_SOURCE_FILE: /run/secrets/postgres_password
       AGENTOPS_POSTGRES_SSL: "false"
     secrets:
       - postgres_password
@@ -49,9 +66,27 @@ services:
   control-plane:
     image: ${AGENTOPS_IMAGE:-agentops-mis-byoc:local}
     restart: unless-stopped
+    user: "0:0"
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - DAC_OVERRIDE
+      - SETGID
+      - SETUID
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /run/agentops-runtime-secrets:rw,noexec,nosuid,size=1m,mode=0700,uid=1000,gid=1000
+    entrypoint:
+      - node
+      - /usr/local/lib/agentops/node-secret-entrypoint.mjs
+      - --postgres
+      - --human-session
+      - --
     environment:
       <<: *control_plane_database_environment
-      AGENTOPS_HUMAN_SESSION_HMAC_KEY_FILE: /run/secrets/human_session_hmac_key
+      AGENTOPS_HUMAN_SESSION_HMAC_KEY_SOURCE_FILE: /run/secrets/human_session_hmac_key
       AGENTOPS_ALLOWED_ORIGINS: ${AGENTOPS_ALLOWED_ORIGINS:?set AGENTOPS_ALLOWED_ORIGINS}
       AGENTOPS_NEXT_HOST: 0.0.0.0
       AGENTOPS_NEXT_PORT: "3001"
@@ -65,8 +100,7 @@ services:
       test:
         - CMD
         - node
-        - -e
-        - fetch('http://127.0.0.1:3001/api/mis/health').then(async r=>{if(!r.ok)throw new Error(await r.text())})
+        - /usr/local/lib/agentops/node-healthcheck.mjs
       interval: 10s
       timeout: 5s
       retries: 12

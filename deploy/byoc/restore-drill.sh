@@ -1,5 +1,6 @@
 #!/bin/sh
 set -eu
+umask 077
 
 if [ "$#" -ne 1 ]; then
   printf '%s\n' "usage: deploy/byoc/restore-drill.sh BACKUP.bundle" >&2
@@ -21,6 +22,54 @@ for required_file in "$backup" "$checksum_file" "$commit_file"; do
     exit 1
   fi
 done
+
+staging=
+remove_restore_staging() {
+  if [ -n "$staging" ]; then
+    if [ -d "$staging" ] && [ ! -L "$staging" ]; then
+      chmod 700 "$staging" || return 1
+    fi
+    rm -rf "$staging"
+    staging=
+  fi
+}
+
+cleanup_staging_on_exit() {
+  status=$?
+  trap - 0 1 2 15
+  remove_restore_staging || status=1
+  exit "$status"
+}
+trap cleanup_staging_on_exit 0
+trap 'exit 129' 1
+trap 'exit 130' 2
+trap 'exit 143' 15
+
+if ! staging=$(mktemp -d "${TMPDIR:-/tmp}/agentops-byoc-restore.XXXXXXXX"); then
+  printf '%s\n' "restore_staging_failed" >&2
+  exit 1
+fi
+chmod 700 "$staging"
+if ! cp -P "$backup" "$staging/database.dump" ||
+  ! cp -P "$checksum_file" "$staging/SHA256SUMS" ||
+  ! cp -P "$commit_file" "$staging/COMMITTED"
+then
+  printf '%s\n' "restore_staging_failed" >&2
+  exit 1
+fi
+
+bundle=$staging
+backup="$bundle/database.dump"
+checksum_file="$bundle/SHA256SUMS"
+commit_file="$bundle/COMMITTED"
+for staged_file in "$backup" "$checksum_file" "$commit_file"; do
+  if [ ! -f "$staged_file" ] || [ -L "$staged_file" ]; then
+    printf '%s\n' "restore_staging_invalid" >&2
+    exit 1
+  fi
+done
+chmod 400 "$backup" "$checksum_file" "$commit_file"
+chmod 500 "$staging"
 if [ ! -s "$backup" ] || [ ! -s "$checksum_file" ]; then
   printf '%s\n' "restore_bundle_incomplete" >&2
   exit 1
@@ -120,8 +169,12 @@ cleanup_on_exit() {
       if [ "$cleanup_failure_reported" != true ]; then
         printf '%s\n' "restore_cleanup_failed" >&2
       fi
-      exit 1
+      status=1
     fi
+  fi
+  if ! remove_restore_staging; then
+    printf '%s\n' "restore_staging_cleanup_failed" >&2
+    status=1
   fi
   exit "$status"
 }
@@ -140,16 +193,32 @@ docker compose --env-file "$env_file" -f "$compose_file" exec -T postgres \
 
 if ! docker compose --env-file "$env_file" -f "$compose_file" run --rm \
   migrate sh -ceu '
-    if [ -n "${AGENTOPS_POSTGRES_HOST:-}" ] &&
+    dsn_configured=false
+    [ -z "${AGENTOPS_POSTGRES_DSN_FILE:-}" ] || dsn_configured=true
+    if [ "$dsn_configured" = true ] &&
+      [ -n "${AGENTOPS_POSTGRES_HOST:-}" ]
+    then
+      exit 65
+    elif [ -n "${AGENTOPS_POSTGRES_HOST:-}" ] &&
       [ -n "${AGENTOPS_POSTGRES_PASSWORD_FILE:-}" ]
     then
       AGENTOPS_POSTGRES_DATABASE=$1
       export AGENTOPS_POSTGRES_DATABASE
       unset AGENTOPS_POSTGRES_DSN AGENTOPS_POSTGRES_DSN_FILE
-    elif [ -n "${AGENTOPS_POSTGRES_DSN:-}" ]; then
-      base=${AGENTOPS_POSTGRES_DSN%/*}
-      AGENTOPS_POSTGRES_DSN="${base}/$1"
-      export AGENTOPS_POSTGRES_DSN
+    elif [ "$dsn_configured" = true ]; then
+      restore_dsn_file="${AGENTOPS_POSTGRES_DSN_FILE}.restore.$$"
+      remove_restore_dsn_file() {
+        [ -z "$restore_dsn_file" ] || rm -f "$restore_dsn_file"
+      }
+      trap remove_restore_dsn_file 0
+      trap "exit 129" 1
+      trap "exit 130" 2
+      trap "exit 143" 15
+      node /usr/local/lib/agentops/postgres-dsn-for-restore.mjs \
+        "$1" "$restore_dsn_file"
+      AGENTOPS_POSTGRES_DSN_FILE=$restore_dsn_file
+      export AGENTOPS_POSTGRES_DSN_FILE
+      unset AGENTOPS_POSTGRES_DSN
     else
       exit 65
     fi
@@ -175,5 +244,9 @@ else
   cleanup_confirmed=true
 fi
 
+if ! remove_restore_staging; then
+  printf '%s\n' "restore_staging_cleanup_failed" >&2
+  exit 1
+fi
 trap - 0 1 2 15
-printf '{"ok":true,"contract":"agentops_byoc_restore_drill_v2","checksum_verified":true,"migration_manifest_verified":true,"schema_fingerprint_verified":true,"production_overwritten":false,"restore_database_kept":%s,"cleanup_confirmed":%s,"restore_disposition_confirmed":true,"credentials_omitted":true}\n' "$kept" "$cleanup_confirmed"
+printf '{"ok":true,"contract":"agentops_byoc_restore_drill_v3","staged_object_verified":true,"staged_object_read_only":true,"checksum_verified":true,"migration_manifest_verified":true,"schema_fingerprint_verified":true,"production_overwritten":false,"restore_database_kept":%s,"cleanup_confirmed":%s,"restore_disposition_confirmed":true,"credentials_omitted":true}\n' "$kept" "$cleanup_confirmed"

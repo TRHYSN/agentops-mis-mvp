@@ -5,10 +5,12 @@ import {
   appendFile,
   chmod,
   cp,
+  lstat,
   mkdir,
   mkdtemp,
   readFile,
   readdir,
+  rename,
   rm,
   symlink,
   writeFile,
@@ -28,6 +30,14 @@ type ShellResult = {
 const repositoryRoot = resolve(fileURLToPath(new URL("../../../", import.meta.url)));
 const backupScript = join(repositoryRoot, "deploy/byoc/backup.sh");
 const restoreScript = join(repositoryRoot, "deploy/byoc/restore-drill.sh");
+const restoreDsnScript = join(
+  repositoryRoot,
+  "deploy/byoc/postgres-dsn-for-restore.mjs",
+);
+const secretEntrypoint = join(
+  repositoryRoot,
+  "deploy/byoc/node-secret-entrypoint.mjs",
+);
 const secretSentinel = "byoc-fixture-password-must-not-leak";
 const dsnSentinel = [
   "postgresql",
@@ -81,6 +91,33 @@ async function runShell(
   environment: NodeJS.ProcessEnv,
 ) {
   return startShell(script, args, environment).result;
+}
+
+async function runNode(
+  args: string[],
+  environment: NodeJS.ProcessEnv,
+) {
+  const child = spawn(process.execPath, args, {
+    cwd: repositoryRoot,
+    env: environment,
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  let stdout = "";
+  let stderr = "";
+  child.stdout.setEncoding("utf8");
+  child.stderr.setEncoding("utf8");
+  child.stdout.on("data", (chunk: string) => {
+    stdout += chunk;
+  });
+  child.stderr.on("data", (chunk: string) => {
+    stderr += chunk;
+  });
+  return new Promise<ShellResult>((resolveResult, reject) => {
+    child.once("error", reject);
+    child.once("close", (code, signal) => {
+      resolveResult({ code, signal, stdout, stderr });
+    });
+  });
 }
 
 async function pathExists(path: string) {
@@ -177,9 +214,22 @@ async function run() {
       "  *createdb*)",
       '    log "createdb:$last"',
       '    mkdir "$FAKE_DB_STATE/$last"',
+      '    if [ -n "${FAKE_CREATEDB_GATE:-}" ]; then',
+      '      : > "${FAKE_CREATEDB_GATE}.started"',
+      "      attempts=0",
+      '      while [ ! -e "${FAKE_CREATEDB_GATE}.release" ]; do',
+      "        attempts=$((attempts + 1))",
+      '        [ "$attempts" -lt 200 ] || exit 71',
+      "        sleep 0.05",
+      "      done",
+      "    fi",
       "    ;;",
       "  *pg_restore*)",
-      "    cat >/dev/null",
+      '    if [ -n "${FAKE_RESTORE_INPUT:-}" ]; then',
+      '      cat > "$FAKE_RESTORE_INPUT"',
+      "    else",
+      "      cat >/dev/null",
+      "    fi",
       '    log "pg_restore:$last"',
       '    [ "${FAKE_PG_RESTORE_FAIL:-false}" != true ] || exit 41',
       '    [ -d "$FAKE_DB_STATE/$last" ] || exit 42',
@@ -311,6 +361,203 @@ async function run() {
       baseEnvironment,
     );
     assertSucceeded(validBackup);
+
+    const stableBundle = join(fixtureRoot, "stable.bundle");
+    const replacedDump = join(fixtureRoot, "replaced-after-validation.dump");
+    const restoreInput = join(fixtureRoot, "stable-restore-input.dump");
+    const createdbGate = join(fixtureRoot, "createdb-gate");
+    const stableDatabase = "restore_stable_object";
+    activeCheck = "stable_restore_object";
+    await cp(validBundle, stableBundle, { recursive: true });
+    const expectedRestoreInput = await readFile(
+      join(stableBundle, "database.dump"),
+    );
+    const stableRestore = startShell(restoreScript, [stableBundle], {
+      ...baseEnvironment,
+      AGENTOPS_RESTORE_DATABASE: stableDatabase,
+      FAKE_CREATEDB_GATE: createdbGate,
+      FAKE_RESTORE_INPUT: restoreInput,
+    });
+    await waitForPath(`${createdbGate}.started`);
+    await rename(join(stableBundle, "database.dump"), replacedDump);
+    await writeFile(
+      join(stableBundle, "database.dump"),
+      "replacement after checksum validation\n",
+      { mode: 0o600 },
+    );
+    await writeFile(`${createdbGate}.release`, "", { mode: 0o600 });
+    const stableRestoreResult = await stableRestore.result;
+    assertSucceeded(stableRestoreResult);
+    assert.match(
+      stableRestoreResult.stdout,
+      /"staged_object_verified":true/,
+    );
+    assert.match(
+      stableRestoreResult.stdout,
+      /"staged_object_read_only":true/,
+    );
+    assert.deepEqual(await readFile(restoreInput), expectedRestoreInput);
+    assert.equal(await pathExists(join(databaseState, stableDatabase)), false);
+
+    activeCheck = "restore_dsn_rewrite";
+    const directDsnEnvironment = { ...process.env };
+    delete directDsnEnvironment.AGENTOPS_POSTGRES_DSN_FILE;
+    directDsnEnvironment.AGENTOPS_POSTGRES_DSN =
+      `${dsnSentinel}?sslmode=verify-full&application_name=restore-contract`;
+    const directDsnProgram = [
+      `import { postgresDsnForRestore } from ${JSON.stringify(
+        `file://${restoreDsnScript}`,
+      )};`,
+      'const parsed = new URL(postgresDsnForRestore("restore_query_preserved"));',
+      "process.stdout.write(JSON.stringify({",
+      "  pathname: parsed.pathname,",
+      '  sslmode: parsed.searchParams.get("sslmode"),',
+      '  applicationName: parsed.searchParams.get("application_name"),',
+      "}));",
+    ].join("\n");
+    const directDsnResult = await runNode(
+      ["--input-type=module", "--eval", directDsnProgram],
+      directDsnEnvironment,
+    );
+    assert.equal(directDsnResult.code, 0);
+    const directDsn = JSON.parse(directDsnResult.stdout);
+    assert.equal(directDsn.pathname, "/restore_query_preserved");
+    assert.equal(directDsn.sslmode, "verify-full");
+    assert.equal(directDsn.applicationName, "restore-contract");
+
+    const dsnFile = join(fixtureRoot, "postgres-dsn");
+    await writeFile(
+      dsnFile,
+      `${dsnSentinel}?sslmode=require&connect_timeout=9\n`,
+      { mode: 0o600 },
+    );
+    const fileDsnEnvironment = { ...process.env };
+    delete fileDsnEnvironment.AGENTOPS_POSTGRES_DSN;
+    fileDsnEnvironment.AGENTOPS_POSTGRES_DSN_FILE = dsnFile;
+    const restoreDsnFile = join(fixtureRoot, "postgres-restore-dsn");
+    const fileDsnResult = await runNode(
+      [restoreDsnScript, "restore_from_file", restoreDsnFile],
+      fileDsnEnvironment,
+    );
+    assert.equal(fileDsnResult.code, 0);
+    assert.equal(fileDsnResult.stdout, "");
+    const restoreDsnState = await lstat(restoreDsnFile);
+    assert.equal(restoreDsnState.mode & 0o777, 0o400);
+    const fileDsn = new URL(await readFile(restoreDsnFile, "utf8"));
+    assert.equal(fileDsn.pathname, "/restore_from_file");
+    assert.equal(fileDsn.searchParams.get("sslmode"), "require");
+    assert.equal(fileDsn.searchParams.get("connect_timeout"), "9");
+
+    const existingDsnOutput = join(fixtureRoot, "postgres-existing-dsn");
+    const existingDsnContent = "existing output must remain unchanged\n";
+    await writeFile(existingDsnOutput, existingDsnContent, { mode: 0o600 });
+    const existingDsnResult = await runNode(
+      [restoreDsnScript, "restore_existing", existingDsnOutput],
+      fileDsnEnvironment,
+    );
+    assertFailed(existingDsnResult, /restore_dsn_invalid/);
+    assert.equal(
+      await readFile(existingDsnOutput, "utf8"),
+      existingDsnContent,
+    );
+
+    const ambiguousDsnResult = await runNode(
+      [
+        restoreDsnScript,
+        "restore_ambiguous",
+        join(fixtureRoot, "postgres-ambiguous-dsn"),
+      ],
+      {
+        ...fileDsnEnvironment,
+        AGENTOPS_POSTGRES_DSN: dsnSentinel,
+      },
+    );
+    assertFailed(ambiguousDsnResult, /restore_dsn_invalid/);
+
+    activeCheck = "node_secret_staging";
+    const hostSecret = join(fixtureRoot, "host-secret-0600");
+    const stagedSecretDirectory = join(fixtureRoot, "staged-secret");
+    await writeFile(hostSecret, `${secretSentinel}\n`, { mode: 0o600 });
+    await mkdir(stagedSecretDirectory, { mode: 0o700 });
+    const stageProgram = [
+      `import { stageSecretFile } from ${JSON.stringify(
+        `file://${secretEntrypoint}`,
+      )};`,
+      'import { lstatSync } from "node:fs";',
+      "const target = stageSecretFile({",
+      "  sourcePath: process.env.SOURCE_SECRET,",
+      "  targetDirectory: process.env.TARGET_DIRECTORY,",
+      '  targetName: "prepared",',
+      "  targetUid: process.getuid(),",
+      "  targetGid: process.getgid(),",
+      "});",
+      "const state = lstatSync(target);",
+      "process.stdout.write(JSON.stringify({",
+      "  regular: state.isFile(),",
+      "  mode: state.mode & 0o777,",
+      "  uid: state.uid,",
+      "  gid: state.gid,",
+      "  expectedUid: process.getuid(),",
+      "  expectedGid: process.getgid(),",
+      "}));",
+    ].join("\n");
+    const stagedSecret = await runNode(
+      ["--input-type=module", "--eval", stageProgram],
+      {
+        ...process.env,
+        SOURCE_SECRET: hostSecret,
+        TARGET_DIRECTORY: stagedSecretDirectory,
+      },
+    );
+    assert.equal(stagedSecret.code, 0);
+    const stagedState = JSON.parse(stagedSecret.stdout) as {
+      regular: boolean;
+      mode: number;
+      uid: number;
+      gid: number;
+      expectedUid: number;
+      expectedGid: number;
+    };
+    assert.deepEqual(stagedState, {
+      regular: true,
+      mode: 0o400,
+      uid: stagedState.expectedUid,
+      gid: stagedState.expectedGid,
+      expectedUid: stagedState.expectedUid,
+      expectedGid: stagedState.expectedGid,
+    });
+    assert.equal(
+      await readFile(join(stagedSecretDirectory, "prepared"), "utf8"),
+      `${secretSentinel}\n`,
+    );
+
+    const symlinkSecret = join(fixtureRoot, "host-secret-symlink");
+    const symlinkSecretTarget = join(fixtureRoot, "host-secret-target");
+    await writeFile(symlinkSecretTarget, `${secretSentinel}\n`, {
+      mode: 0o600,
+    });
+    await symlink(symlinkSecretTarget, symlinkSecret);
+    const rejectedSecretDirectory = join(
+      fixtureRoot,
+      "rejected-secret-staging",
+    );
+    await mkdir(rejectedSecretDirectory, { mode: 0o700 });
+    const rejectedSymlinkSecret = await runNode(
+      ["--input-type=module", "--eval", stageProgram],
+      {
+        ...process.env,
+        SOURCE_SECRET: symlinkSecret,
+        TARGET_DIRECTORY: rejectedSecretDirectory,
+      },
+    );
+    assert.notEqual(rejectedSymlinkSecret.code, 0);
+    assert.equal(
+      `${rejectedSymlinkSecret.stdout}\n${rejectedSymlinkSecret.stderr}`.includes(
+        secretSentinel,
+      ),
+      false,
+    );
+    assert.deepEqual(await readdir(rejectedSecretDirectory), []);
 
     const internalSymlinkBundle = join(
       fixtureRoot,
@@ -449,7 +696,15 @@ async function run() {
       existing_output_fail_closed: true,
       symlink_output_fail_closed: true,
       internal_symlink_fail_closed: true,
+      stable_restore_object: true,
+      stable_restore_object_read_only: true,
       checksum_tamper_rejected_before_restore: true,
+      dsn_file_supported: true,
+      dsn_file_remains_file_backed: true,
+      dsn_existing_output_preserved: true,
+      dsn_query_parameters_preserved: true,
+      node_secret_0600_staged_as_0400: true,
+      node_secret_symlink_rejected: true,
       restore_failure_cleanup: true,
       schema_failure_cleanup: true,
       schema_fingerprint_verified: true,

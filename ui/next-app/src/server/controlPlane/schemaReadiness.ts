@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
-import { fileURLToPath } from "node:url";
+import { join, resolve } from "node:path";
 
 import { Client, type ClientBase, type ClientConfig } from "pg";
 
@@ -120,9 +120,7 @@ const REQUIRED_COLUMNS = Object.freeze([
   ["workspace_entitlements", "updated_by_user_id"],
 ] as const);
 
-const MIGRATION_ROOT = fileURLToPath(
-  new URL("../../../../../migrations/postgres/", import.meta.url),
-);
+const MIGRATION_ROOT = resolve(process.cwd(), "../../migrations/postgres");
 const ADVISORY_LOCK_KEY = "7157544864185932631";
 
 function sha256(value: string) {
@@ -134,7 +132,7 @@ async function loadManifest(): Promise<readonly LoadedMigration[]> {
   for (const migration of POSTGRES_MIGRATION_MANIFEST) {
     let sql: string;
     try {
-      sql = await readFile(`${MIGRATION_ROOT}${migration.filename}`, "utf8");
+      sql = await readFile(join(MIGRATION_ROOT, migration.filename), "utf8");
     } catch {
       throw new SchemaReadinessError("migration_file_missing");
     }
