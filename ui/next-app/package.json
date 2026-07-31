@@ -26,6 +26,7 @@
     "test:byoc-packaging-contract": "tsx scripts/byoc-packaging-contract.ts",
     "test:byoc-backup-restore-behavior-contract": "tsx scripts/byoc-backup-restore-behavior-contract.ts",
     "test:byoc-retained-data-lifecycle-behavior-contract": "tsx scripts/byoc-retained-data-lifecycle-behavior-contract.ts",
+    "test:byoc-retained-data-lifecycle-lock-behavior-contract": "tsx scripts/byoc-retained-data-lifecycle-lock-behavior-contract.ts",
     "test:byoc-retained-data-lifecycle-packaging-contract": "tsx scripts/byoc-retained-data-lifecycle-packaging-contract.ts",
     "test:commercial-health-postgres-contract": "tsx scripts/commercial-health-postgres-contract.ts",
     "test:customer-delivery-approval-request-contract": "tsx scripts/customer-delivery-approval-request-contract.ts",

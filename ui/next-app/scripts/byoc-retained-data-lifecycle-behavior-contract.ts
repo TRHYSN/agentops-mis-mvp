@@ -130,7 +130,11 @@ function createFakeDriver() {
     controlPlaneRunning: true,
     productionDatabase: "agentops",
     runtimeDatabase: "agentops",
+    clusterSystemIdentifier: "7390012345678901234",
     databases: new Set(["agentops"]),
+    databaseOids: new Map([["agentops", "16384"]]),
+    databaseMarkers: new Map<string, string>(),
+    nextDatabaseOid: 16385,
     restoreDatabases: new Set<string>(),
     sql: [] as string[],
   };
@@ -234,6 +238,17 @@ function createFakeDriver() {
               .join("\n") + "\n",
           );
         }
+        if (sql === "SELECT system_identifier::text FROM pg_control_system()") {
+          return ok(`${state.clusterSystemIdentifier}\n`);
+        }
+        if (sql.startsWith("SELECT oid::text || '|'")) {
+          const match = sql.match(/WHERE datname='([^']+)'$/);
+          const database = match?.[1] || "";
+          const oid = state.databaseOids.get(database);
+          return oid
+            ? ok(`${oid}|${state.databaseMarkers.get(database) || ""}\n`)
+            : ok();
+        }
         const rename = sql.match(
           /^ALTER DATABASE "([^"]+)" RENAME TO "([^"]+)"$/,
         );
@@ -244,6 +259,13 @@ function createFakeDriver() {
           }
           state.databases.delete(from);
           state.databases.add(to);
+          const oid = state.databaseOids.get(from);
+          if (!oid) return failed("rename_identity_missing");
+          state.databaseOids.delete(from);
+          state.databaseOids.set(to, oid);
+          const marker = state.databaseMarkers.get(from);
+          state.databaseMarkers.delete(from);
+          if (marker) state.databaseMarkers.set(to, marker);
           if (
             state.failAfterProductionRenameOnce
             && from === "agentops"
@@ -265,6 +287,8 @@ function createFakeDriver() {
         const drop = sql.match(/^DROP DATABASE IF EXISTS "([^"]+)"$/);
         if (drop) {
           state.databases.delete(drop[1]);
+          state.databaseOids.delete(drop[1]);
+          state.databaseMarkers.delete(drop[1]);
           return ok();
         }
         return ok();
@@ -318,9 +342,21 @@ function createFakeDriver() {
       assert.equal(options.env?.AGENTOPS_RESTORE_KEEP, "true");
       assert.equal(image, FROM_IMAGE_ID);
       const restoreDatabase = String(options.env?.AGENTOPS_RESTORE_DATABASE || "");
+      const restoreMarker = String(
+        options.env?.AGENTOPS_RESTORE_OPERATION_MARKER || "",
+      );
       assert.match(restoreDatabase, /^agentops_restore_[0-9a-f]{12}$/);
+      assert.match(
+        restoreMarker,
+        /^agentops_byoc_restore_v1:byoc_lifecycle_[0-9a-f]{20}:[0-9a-f]{64}$/,
+      );
       state.restoreDatabases.add(restoreDatabase);
       state.databases.add(restoreDatabase);
+      state.databaseOids.set(
+        restoreDatabase,
+        String(state.nextDatabaseOid++),
+      );
+      state.databaseMarkers.set(restoreDatabase, restoreMarker);
       if (state.failRestoreDrillAfterCreate) {
         state.failRestoreDrillAfterCreate = false;
         return failed("restore_drill_interrupted");
@@ -710,6 +746,21 @@ async function proveRestoreIntentOrphanRecovery(root: string) {
   );
 
   driver.state.failRestoreDatabaseDrop = false;
+  const orphanRestore = [...driver.state.databases].find((database) =>
+    database.startsWith("agentops_restore_"));
+  assert.ok(orphanRestore);
+  const restoreMarker = driver.state.databaseMarkers.get(orphanRestore);
+  assert.ok(restoreMarker);
+  driver.state.databaseMarkers.set(orphanRestore, "untrusted_restore_object");
+  await expectFailure(
+    () => runLifecycle([
+      "rollback",
+      "--confirm-restore-from-backup",
+      planned.operation_id,
+    ], options),
+    "lifecycle_database_object_identity_changed",
+  );
+  driver.state.databaseMarkers.set(orphanRestore, restoreMarker);
   const resumed = await runLifecycle([
     "rollback",
     "--confirm-restore-from-backup",
@@ -744,6 +795,10 @@ async function proveQuarantineCleanupIsRecoverable(root: string) {
     /^agentops_quarantine_[0-9a-f]{12}$/,
   );
   await expectFailure(
+    () => runLifecycle(["plan", "--to-image", TO_REFERENCE], options),
+    "lifecycle_cleanup_required",
+  );
+  await expectFailure(
     () => runLifecycle([
       "cleanup",
       "--confirm-operation-id",
@@ -752,6 +807,19 @@ async function proveQuarantineCleanupIsRecoverable(root: string) {
     "lifecycle_cleanup_confirmation_required",
   );
   driver.state.failQuarantineDrop = false;
+  const quarantineDatabase = status.state.operation.quarantine_database;
+  const quarantineOid = driver.state.databaseOids.get(quarantineDatabase);
+  assert.ok(quarantineOid);
+  driver.state.databaseOids.set(quarantineDatabase, "99999");
+  await expectFailure(
+    () => runLifecycle([
+      "cleanup",
+      "--confirm-operation-id",
+      planned.operation_id,
+    ], options),
+    "lifecycle_database_object_identity_changed",
+  );
+  driver.state.databaseOids.set(quarantineDatabase, quarantineOid);
   const cleaned = await runLifecycle([
     "cleanup",
     "--confirm-operation-id",
@@ -827,6 +895,40 @@ async function proveAuthorityDatabaseBinding(root: string) {
   assert.equal(status.state.operation.backup, null);
 }
 
+async function provePostgresObjectIdentityBinding(root: string) {
+  const clusterState = join(root, "postgres-cluster-drift-state");
+  const clusterDriver = createFakeDriver();
+  const clusterOptions = await lifecycleOptions(root, clusterState, clusterDriver);
+  const clusterPlan = await runLifecycle(
+    ["plan", "--to-image", TO_REFERENCE],
+    clusterOptions,
+  );
+  clusterDriver.state.clusterSystemIdentifier = "7390099999999999999";
+  await expectFailure(
+    () => runLifecycle(
+      ["apply", "--plan-id", clusterPlan.operation_id],
+      clusterOptions,
+    ),
+    "lifecycle_postgres_cluster_identity_changed",
+  );
+
+  const oidState = join(root, "authority-database-oid-drift-state");
+  const oidDriver = createFakeDriver();
+  const oidOptions = await lifecycleOptions(root, oidState, oidDriver);
+  const oidPlan = await runLifecycle(
+    ["plan", "--to-image", TO_REFERENCE],
+    oidOptions,
+  );
+  oidDriver.state.databaseOids.set("agentops", "99998");
+  await expectFailure(
+    () => runLifecycle(
+      ["apply", "--plan-id", oidPlan.operation_id],
+      oidOptions,
+    ),
+    "lifecycle_database_object_identity_changed",
+  );
+}
+
 async function proveConfigurationDriftFailsClosed(root: string) {
   const stateDirectory = join(root, "configuration-drift-state");
   const driver = createFakeDriver();
@@ -855,6 +957,7 @@ try {
   await proveQuarantineCleanupIsRecoverable(root);
   await proveFailureDoesNotPromote(root);
   await proveAuthorityDatabaseBinding(root);
+  await provePostgresObjectIdentityBinding(root);
   await proveConfigurationDriftFailsClosed(root);
   console.log(JSON.stringify({
     contract: "agentops_byoc_retained_data_lifecycle_behavior_contract_v1",
@@ -875,9 +978,14 @@ try {
     rollback_post_rename_crash_resume_verified: true,
     restore_intent_orphan_recovery_verified: true,
     authority_database_binding_verified: true,
+    postgres_cluster_identity_binding_verified: true,
+    database_oid_binding_verified: true,
+    restore_operation_marker_binding_verified: true,
+    destructive_cleanup_identity_guard_verified: true,
     stopped_backup_order_verified: true,
     cleanup_failure_does_not_block_restart: true,
     quarantine_cleanup_pending_is_recoverable: true,
+    pending_cleanup_blocks_new_plan: true,
     explicit_cleanup_retry_verified: true,
     backup_restore_rollback_verified: true,
     explicit_rollback_confirmation_verified: true,

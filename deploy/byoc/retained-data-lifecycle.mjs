@@ -11,6 +11,7 @@ import {
   lifecycleLockStatus,
   lifecycleStateDirectory,
   readLifecycleState,
+  recoverStaleLifecycleLock,
   sha256,
   sha256File,
   withLifecycleLock,
@@ -26,6 +27,10 @@ const IMAGE_ID = /^sha256:[0-9a-f]{64}$/;
 const SHA256 = /^[0-9a-f]{64}$/;
 const SAFE_DATABASE_IDENTIFIER = /^[a-z][a-z0-9_]{0,62}$/;
 const OPERATION_ID = /^byoc_lifecycle_[0-9a-f]{20}$/;
+const POSTGRES_SYSTEM_IDENTIFIER = /^[1-9][0-9]{9,24}$/;
+const POSTGRES_DATABASE_OID = /^[1-9][0-9]{0,9}$/;
+const RESTORE_DATABASE_MARKER =
+  /^agentops_byoc_restore_v1:byoc_lifecycle_[0-9a-f]{20}:[0-9a-f]{64}$/;
 const TERMINAL_PHASES = new Set(["applied", "rolled_back"]);
 const DATABASE_SWAP_PHASES = new Set([
   "restore_intent",
@@ -130,7 +135,14 @@ function appendEvent(operation, stage, outcome, now) {
 
 function parseArguments(arguments_) {
   const [command, ...tokens] = arguments_;
-  if (!new Set(["plan", "status", "apply", "rollback", "cleanup"]).has(command)) {
+  if (!new Set([
+    "plan",
+    "status",
+    "apply",
+    "rollback",
+    "cleanup",
+    "recover-lock",
+  ]).has(command)) {
     throw new LifecycleError("lifecycle_command_invalid", "arguments");
   }
   const values = {};
@@ -153,7 +165,9 @@ function parseArguments(arguments_) {
         ? new Set(["--confirm-restore-from-backup"])
         : command === "cleanup"
           ? new Set(["--confirm-operation-id"])
-        : new Set();
+          : command === "recover-lock"
+            ? new Set(["--confirm-operation-id"])
+            : new Set();
   if (Object.keys(values).some((key) => !allowed.has(key))) {
     throw new LifecycleError("lifecycle_arguments_invalid", "arguments");
   }
@@ -735,6 +749,79 @@ async function postgresQuery(context, sql, code, stage) {
   );
 }
 
+async function postgresClusterSystemIdentifier(context, stage) {
+  const identifier = await postgresQuery(
+    context,
+    "SELECT system_identifier::text FROM pg_control_system()",
+    "lifecycle_postgres_cluster_identity_failed",
+    stage,
+  );
+  if (!POSTGRES_SYSTEM_IDENTIFIER.test(identifier)) {
+    throw new LifecycleError(
+      "lifecycle_postgres_cluster_identity_invalid",
+      stage,
+    );
+  }
+  return identifier;
+}
+
+async function assertPostgresClusterIdentity(context, expected, stage) {
+  if (
+    !POSTGRES_SYSTEM_IDENTIFIER.test(String(expected || ""))
+    || await postgresClusterSystemIdentifier(context, stage) !== expected
+  ) {
+    throw new LifecycleError(
+      "lifecycle_postgres_cluster_identity_changed",
+      stage,
+    );
+  }
+}
+
+async function databaseObjectIdentity(context, database, stage) {
+  const output = await postgresQuery(
+    context,
+    `SELECT oid::text || '|' || COALESCE(shobj_description(oid, 'pg_database'), '') FROM pg_database WHERE datname=${quoteDatabaseLiteral(database)}`,
+    "lifecycle_database_object_identity_failed",
+    stage,
+  );
+  if (!output) return null;
+  const lines = output.split(/\r?\n/).filter(Boolean);
+  if (lines.length !== 1) {
+    throw new LifecycleError("lifecycle_database_object_identity_invalid", stage);
+  }
+  const separator = lines[0].indexOf("|");
+  const oid = separator === -1 ? "" : lines[0].slice(0, separator);
+  const marker = separator === -1 ? "" : lines[0].slice(separator + 1);
+  if (!POSTGRES_DATABASE_OID.test(oid)) {
+    throw new LifecycleError("lifecycle_database_object_identity_invalid", stage);
+  }
+  return { oid, marker };
+}
+
+async function assertDatabaseObjectIdentity(
+  context,
+  database,
+  expectedOid,
+  expectedMarker,
+  stage,
+) {
+  const identity = await databaseObjectIdentity(context, database, stage);
+  if (
+    !identity
+    || (expectedOid !== null && (
+      !POSTGRES_DATABASE_OID.test(String(expectedOid || ""))
+      || identity.oid !== expectedOid
+    ))
+    || (expectedMarker !== null && (
+      !RESTORE_DATABASE_MARKER.test(String(expectedMarker || ""))
+      || identity.marker !== expectedMarker
+    ))
+  ) {
+    throw new LifecycleError("lifecycle_database_object_identity_changed", stage);
+  }
+  return identity;
+}
+
 async function databasePresence(context, databases) {
   const expected = new Set(databases);
   const output = await postgresQuery(
@@ -786,7 +873,50 @@ async function dropDatabase(context, database, stage = "database_cleanup") {
   );
 }
 
-async function runRestoreDrill(context, bundle, image, restoreDatabase) {
+async function dropBoundDatabase(
+  context,
+  database,
+  expectedOid,
+  expectedMarker,
+  stage = "database_cleanup",
+) {
+  await assertDatabaseObjectIdentity(
+    context,
+    database,
+    expectedOid,
+    expectedMarker,
+    stage,
+  );
+  await dropDatabase(context, database, stage);
+}
+
+async function dropBoundDatabaseIfPresent(
+  context,
+  database,
+  expectedOid,
+  expectedMarker,
+  stage = "database_cleanup",
+) {
+  const identity = await databaseObjectIdentity(context, database, stage);
+  if (!identity) return false;
+  await assertDatabaseObjectIdentity(
+    context,
+    database,
+    expectedOid,
+    expectedMarker,
+    stage,
+  );
+  await dropDatabase(context, database, stage);
+  return true;
+}
+
+async function runRestoreDrill(
+  context,
+  bundle,
+  image,
+  restoreDatabase,
+  restoreMarker,
+) {
   checked(
     await context.runner(
       "/bin/sh",
@@ -799,6 +929,7 @@ async function runRestoreDrill(context, bundle, image, restoreDatabase) {
           AGENTOPS_BYOC_ENV_FILE: context.envFile,
           AGENTOPS_RESTORE_DATABASE: restoreDatabase,
           AGENTOPS_RESTORE_KEEP: "true",
+          AGENTOPS_RESTORE_OPERATION_MARKER: restoreMarker,
         },
       },
     ),
@@ -816,6 +947,14 @@ function validatedDatabaseSwap(operation) {
     || !SAFE_DATABASE_IDENTIFIER.test(String(swap.authority_database || ""))
     || !SAFE_DATABASE_IDENTIFIER.test(String(swap.restore_database || ""))
     || !SAFE_DATABASE_IDENTIFIER.test(String(swap.quarantine_database || ""))
+    || swap.cluster_system_identifier
+      !== operation.postgres_cluster_system_identifier
+    || swap.authority_database_oid !== operation.authority_database_oid
+    || !RESTORE_DATABASE_MARKER.test(String(swap.restore_database_marker || ""))
+    || (
+      swap.restore_database_oid !== null
+      && !POSTGRES_DATABASE_OID.test(String(swap.restore_database_oid || ""))
+    )
     || !DATABASE_SWAP_PHASES.has(String(swap.phase || ""))
   ) {
     throw new LifecycleError(
@@ -894,6 +1033,9 @@ async function plan(context, values) {
   }
   return withLifecycleLock(context.stateDirectory, async () => {
     const existing = await readLifecycleState(context.stateDirectory);
+    if (existing?.operation?.quarantine_cleanup_pending === true) {
+      throw new LifecycleError("lifecycle_cleanup_required", "plan");
+    }
     if (existing?.operation && !TERMINAL_PHASES.has(existing.operation.phase)) {
       throw new LifecycleError("lifecycle_operation_already_active", "plan");
     }
@@ -901,6 +1043,21 @@ async function plan(context, values) {
     const currentImage = await runningInstallation(context);
     const currentSchema = await runningSchemaIdentity(context);
     const authorityDatabase = await boundAuthorityDatabase(context);
+    const postgresClusterIdentity = await postgresClusterSystemIdentifier(
+      context,
+      "plan_database_identity",
+    );
+    const authorityDatabaseIdentity = await databaseObjectIdentity(
+      context,
+      authorityDatabase,
+      "plan_database_identity",
+    );
+    if (!authorityDatabaseIdentity) {
+      throw new LifecycleError(
+        "lifecycle_authority_database_changed",
+        "plan_database_identity",
+      );
+    }
     await schemaReadiness(
       context,
       currentImage.image_id,
@@ -937,6 +1094,8 @@ async function plan(context, values) {
       ),
       configuration,
       authority_database: authorityDatabase,
+      authority_database_oid: authorityDatabaseIdentity.oid,
+      postgres_cluster_system_identifier: postgresClusterIdentity,
       plan_preflight: {
         active_run_count: activeRuns,
         apply_blocked: activeRuns !== 0,
@@ -976,6 +1135,8 @@ async function plan(context, values) {
       active_run_count: activeRuns,
       apply_blocked: activeRuns !== 0,
       authority_database_bound: true,
+      authority_database_oid_bound: true,
+      postgres_cluster_identity_bound: true,
       state_generation: state.generation,
     });
   });
@@ -988,6 +1149,31 @@ async function status(context) {
     operation_locked: await lifecycleLockStatus(context.stateDirectory),
     state,
   });
+}
+
+async function recoverLock(context, values) {
+  const confirmation = String(
+    values["--confirm-operation-id"] || "",
+  ).trim();
+  if (!OPERATION_ID.test(confirmation)) {
+    throw new LifecycleError(
+      "lifecycle_lock_recovery_confirmation_required",
+      "lock_recovery",
+    );
+  }
+  try {
+    const recovered = await recoverStaleLifecycleLock(
+      context.stateDirectory,
+      confirmation,
+    );
+    return receipt("recover-lock", {
+      operation_id: recovered.operation_id,
+      stale_lock_recovered: recovered.recovered === true,
+      owner_identity_verified_stale: true,
+    });
+  } catch (error) {
+    throw asLifecycleError(error, "lock_recovery");
+  }
 }
 
 async function apply(context, values) {
@@ -1023,6 +1209,18 @@ async function apply(context, values) {
         context,
         state.operation.authority_database,
       );
+      await assertPostgresClusterIdentity(
+        context,
+        state.operation.postgres_cluster_system_identifier,
+        "apply_database_identity",
+      );
+      await assertDatabaseObjectIdentity(
+        context,
+        state.operation.authority_database,
+        state.operation.authority_database_oid,
+        null,
+        "apply_database_identity",
+      );
       await schemaReadiness(
         context,
         state.operation.from.image_id,
@@ -1055,6 +1253,18 @@ async function apply(context, values) {
           "database_identity_preflight",
         );
       }
+      await assertPostgresClusterIdentity(
+        context,
+        state.operation.postgres_cluster_system_identifier,
+        "backup_database_identity",
+      );
+      await assertDatabaseObjectIdentity(
+        context,
+        state.operation.authority_database,
+        state.operation.authority_database_oid,
+        null,
+        "backup_database_identity",
+      );
       const backupPath = plannedBackupPath(context, state.operation);
       await runBackup(context, backupPath);
       const backup = await validateBackupBundle(backupPath);
@@ -1244,6 +1454,11 @@ async function rollback(context, values) {
         await assertNoActiveRuns(context);
       }
       const authorityDatabase = state.operation.authority_database;
+      await assertPostgresClusterIdentity(
+        context,
+        state.operation.postgres_cluster_system_identifier,
+        "rollback_database_preflight",
+      );
       if (
         !SAFE_DATABASE_IDENTIFIER.test(String(authorityDatabase || ""))
         || authorityDatabase === "postgres"
@@ -1258,6 +1473,13 @@ async function rollback(context, values) {
       await stopControlPlane(context);
 
       if (!swap) {
+        await assertDatabaseObjectIdentity(
+          context,
+          authorityDatabase,
+          state.operation.authority_database_oid,
+          null,
+          "rollback_database_preflight",
+        );
         await assertNoActiveRuns(context);
         const suffix = state.operation.operation_id.slice(-12);
         const restoreDatabase = `agentops_restore_${suffix}`;
@@ -1279,7 +1501,13 @@ async function rollback(context, values) {
         }
         swap = {
           authority_database: authorityDatabase,
+          authority_database_oid: state.operation.authority_database_oid,
+          cluster_system_identifier:
+            state.operation.postgres_cluster_system_identifier,
           restore_database: restoreDatabase,
+          restore_database_marker:
+            `agentops_byoc_restore_v1:${state.operation.operation_id}:${state.operation.backup.database_dump_sha256}`,
+          restore_database_oid: null,
           quarantine_database: quarantineDatabase,
           phase: "restore_intent",
           updated_at: context.now().toISOString(),
@@ -1309,9 +1537,11 @@ async function rollback(context, values) {
           );
         }
         if (beforeRestore.has(swap.restore_database)) {
-          await dropDatabase(
+          await dropBoundDatabase(
             context,
             swap.restore_database,
+            swap.restore_database_oid,
+            swap.restore_database_marker,
             "rollback_orphan_restore_cleanup",
           );
         }
@@ -1320,6 +1550,7 @@ async function rollback(context, values) {
           state.operation.backup.path,
           state.operation.from.image_id,
           swap.restore_database,
+          swap.restore_database_marker,
         );
         const afterRestore = await databasePresence(context, [
           authorityDatabase,
@@ -1336,6 +1567,17 @@ async function rollback(context, values) {
             "rollback_restore_verification",
           );
         }
+        const restoreIdentity = await assertDatabaseObjectIdentity(
+          context,
+          swap.restore_database,
+          null,
+          swap.restore_database_marker,
+          "rollback_restore_verification",
+        );
+        swap = {
+          ...swap,
+          restore_database_oid: restoreIdentity.oid,
+        };
         state = await recordDatabaseSwapPhase(
           context,
           state,
@@ -1372,8 +1614,49 @@ async function rollback(context, values) {
           "database_swap_recovery",
         );
       }
+      if (productionQuarantined || restorePromoted) {
+        await assertDatabaseObjectIdentity(
+          context,
+          quarantineDatabase,
+          swap.authority_database_oid,
+          null,
+          "database_swap_recovery",
+        );
+      }
+      if (productionQuarantined) {
+        await assertDatabaseObjectIdentity(
+          context,
+          restoreDatabase,
+          swap.restore_database_oid,
+          swap.restore_database_marker,
+          "database_swap_recovery",
+        );
+      }
+      if (restorePromoted) {
+        await assertDatabaseObjectIdentity(
+          context,
+          production,
+          swap.restore_database_oid,
+          swap.restore_database_marker,
+          "database_swap_recovery",
+        );
+      }
 
       if (beforeProductionRename) {
+        await assertDatabaseObjectIdentity(
+          context,
+          production,
+          swap.authority_database_oid,
+          null,
+          "production_rename_identity",
+        );
+        await assertDatabaseObjectIdentity(
+          context,
+          restoreDatabase,
+          swap.restore_database_oid,
+          swap.restore_database_marker,
+          "production_rename_identity",
+        );
         state = await recordDatabaseSwapPhase(
           context,
           state,
@@ -1396,6 +1679,13 @@ async function rollback(context, values) {
           restoreDatabase,
           quarantineDatabase,
         ]);
+        await assertDatabaseObjectIdentity(
+          context,
+          quarantineDatabase,
+          swap.authority_database_oid,
+          null,
+          "production_quarantine_identity",
+        );
       } else {
         swapMutationArmed = true;
       }
@@ -1405,6 +1695,20 @@ async function rollback(context, values) {
         && present.has(restoreDatabase)
         && present.has(quarantineDatabase)
       ) {
+        await assertDatabaseObjectIdentity(
+          context,
+          quarantineDatabase,
+          swap.authority_database_oid,
+          null,
+          "restore_promotion_identity",
+        );
+        await assertDatabaseObjectIdentity(
+          context,
+          restoreDatabase,
+          swap.restore_database_oid,
+          swap.restore_database_marker,
+          "restore_promotion_identity",
+        );
         state = await recordDatabaseSwapPhase(
           context,
           state,
@@ -1425,6 +1729,13 @@ async function rollback(context, values) {
           restoreDatabase,
           quarantineDatabase,
         ]);
+        await assertDatabaseObjectIdentity(
+          context,
+          production,
+          swap.restore_database_oid,
+          swap.restore_database_marker,
+          "restore_promoted_identity",
+        );
       }
       if (
         !present.has(production)
@@ -1492,7 +1803,12 @@ async function rollback(context, values) {
       let quarantineRemoved = false;
       let cleanupStatePersisted = false;
       try {
-        await dropDatabase(context, quarantineDatabase);
+        await dropBoundDatabase(
+          context,
+          quarantineDatabase,
+          swap.authority_database_oid,
+          null,
+        );
         quarantineRemoved = true;
         const cleanupRecordedAt = context.now().toISOString();
         const cleanupState = {
@@ -1547,9 +1863,16 @@ async function rollback(context, values) {
         const restoreDatabase = checkpoint?.restore_database;
         if (restoreDatabase) {
           try {
-            await dropDatabase(
+            await assertPostgresClusterIdentity(
+              context,
+              checkpoint.cluster_system_identifier,
+              "rollback_compensation",
+            );
+            await dropBoundDatabaseIfPresent(
               context,
               restoreDatabase,
+              checkpoint.restore_database_oid,
+              checkpoint.restore_database_marker,
               "rollback_compensation",
             );
           } catch {
@@ -1646,6 +1969,18 @@ async function cleanup(context, values) {
       context,
       state.operation.authority_database,
     );
+    await assertPostgresClusterIdentity(
+      context,
+      state.operation.postgres_cluster_system_identifier,
+      "cleanup_preflight",
+    );
+    await assertDatabaseObjectIdentity(
+      context,
+      swap.authority_database,
+      swap.restore_database_oid,
+      swap.restore_database_marker,
+      "cleanup_preflight",
+    );
     let present = await databasePresence(context, [
       swap.authority_database,
       swap.restore_database,
@@ -1671,9 +2006,11 @@ async function cleanup(context, values) {
       );
     }
     if (quarantinePresent) {
-      await dropDatabase(
+      await dropBoundDatabase(
         context,
         swap.quarantine_database,
+        swap.authority_database_oid,
+        null,
         "rollback_quarantine_cleanup",
       );
     }
@@ -1754,6 +2091,9 @@ export async function runLifecycle(arguments_, options = {}) {
   };
   if (parsed.command === "plan") return plan(context, parsed.values);
   if (parsed.command === "status") return status(context);
+  if (parsed.command === "recover-lock") {
+    return recoverLock(context, parsed.values);
+  }
   if (parsed.command === "apply") return apply(context, parsed.values);
   if (parsed.command === "rollback") return rollback(context, parsed.values);
   return cleanup(context, parsed.values);

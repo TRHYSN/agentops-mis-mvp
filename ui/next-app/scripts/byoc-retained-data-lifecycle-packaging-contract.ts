@@ -26,9 +26,11 @@ const [
     source("../../../deploy/byoc/restore-drill.sh"),
   ]);
 
-assert.match(cli, /plan", "status", "apply", "rollback", "cleanup"/);
+assert.match(cli, /"recover-lock"/);
 assert.match(cli, /--confirm-restore-from-backup/);
 assert.match(cli, /--confirm-operation-id/);
+assert.match(cli, /recoverStaleLifecycleLock/);
+assert.match(cli, /lifecycle_cleanup_required/);
 assert.match(cli, /lifecycle_plan_id_required/);
 assert.match(cli, /lifecycle_active_runs_must_be_drained/);
 assert.match(cli, /configurationSnapshot/);
@@ -47,6 +49,12 @@ assert.match(cli, /rollback_authority: "backup_restore"/);
 assert.match(cli, /down_migration_performed: false/);
 assert.match(cli, /quarantine_cleanup_pending: true/);
 assert.match(cli, /boundAuthorityDatabase/);
+assert.match(cli, /postgresClusterSystemIdentifier/);
+assert.match(cli, /pg_control_system/);
+assert.match(cli, /shobj_description/);
+assert.match(cli, /authority_database_oid/);
+assert.match(cli, /restore_database_marker/);
+assert.match(cli, /dropBoundDatabase/);
 assert.match(cli, /databasePresence/);
 assert.match(cli, /restore_intent/);
 assert.match(cli, /production_rename_started/);
@@ -73,6 +81,9 @@ assert.match(state, /\.operation\.lock/);
 assert.match(state, /open\(temporary, "wx", 0o600\)/);
 assert.match(state, /open\(join\(lock, "owner\.json"\), "wx", 0o600\)/);
 assert.match(state, /mode: 0o700/);
+assert.match(state, /agentops_byoc_lifecycle_lock_v2/);
+assert.match(state, /recoverStaleLifecycleLock/);
+assert.match(state, /lifecycle_lock_recovery_cross_host_refused/);
 
 assert.match(schemaIdentity, /SCHEMA_CONTRACT/);
 assert.match(schemaIdentity, /EXPECTED_POSTGRES_SCHEMA_FINGERPRINT/);
@@ -97,6 +108,10 @@ assert.equal(
   "tsx scripts/byoc-retained-data-lifecycle-behavior-contract.ts",
 );
 assert.equal(
+  scripts["test:byoc-retained-data-lifecycle-lock-behavior-contract"],
+  "tsx scripts/byoc-retained-data-lifecycle-lock-behavior-contract.ts",
+);
+assert.equal(
   scripts["test:byoc-retained-data-lifecycle-packaging-contract"],
   "tsx scripts/byoc-retained-data-lifecycle-packaging-contract.ts",
 );
@@ -107,6 +122,7 @@ assert.match(readme, /retained-data-lifecycle\.mjs status/);
 assert.match(readme, /retained-data-lifecycle\.mjs apply/);
 assert.match(readme, /retained-data-lifecycle\.mjs rollback/);
 assert.match(readme, /retained-data-lifecycle\.mjs cleanup/);
+assert.match(readme, /retained-data-lifecycle\.mjs recover-lock/);
 assert.match(readme, /--confirm-restore-from-backup/);
 assert.match(readme, /--confirm-operation-id/);
 assert.match(readme, /runtime connection's actual\s+authority database/);
@@ -129,6 +145,8 @@ assert.match(backup, /fs\.fsyncSync/);
 assert.match(backup, /fsync_path "\$output"/);
 assert.match(backup, /fsync_path "\$output_parent"/);
 assert.match(restore, /restore_database_must_not_be_production/);
+assert.match(restore, /AGENTOPS_RESTORE_OPERATION_MARKER/);
+assert.match(restore, /COMMENT ON DATABASE/);
 assert.match(restore, /restore_provisioning_completed/);
 
 const executable = await stat(
@@ -147,6 +165,10 @@ console.log(JSON.stringify({
   restore_authoritative_rollback_packaged: true,
   orphan_restore_recovery_packaged: true,
   explicit_cleanup_retry_packaged: true,
+  stale_lock_recovery_packaged: true,
+  pending_cleanup_blocks_new_plan: true,
+  postgres_cluster_and_database_oid_binding_packaged: true,
+  restore_operation_marker_packaged: true,
   in_place_down_migration_forbidden: true,
   runtime_claims_omitted: true,
   credentials_omitted: true,

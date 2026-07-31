@@ -133,6 +133,14 @@ restore_database=${AGENTOPS_RESTORE_DATABASE:-agentops_restore_$(date -u +%Y%m%d
 case "$restore_database" in
   *[!A-Za-z0-9_]*|"") printf '%s\n' "restore_database_invalid" >&2; exit 2 ;;
 esac
+restore_operation_marker=${AGENTOPS_RESTORE_OPERATION_MARKER:-}
+if [ -n "$restore_operation_marker" ] &&
+  ! printf '%s\n' "$restore_operation_marker" |
+    grep -Eq '^agentops_byoc_restore_v1:byoc_lifecycle_[0-9a-f]{20}:[0-9a-f]{64}$'
+then
+  printf '%s\n' "restore_operation_marker_invalid" >&2
+  exit 2
+fi
 
 keep_requested=${AGENTOPS_RESTORE_KEEP:-false}
 case "$keep_requested" in
@@ -199,6 +207,11 @@ trap 'exit 143' 15
 docker compose --env-file "$env_file" -f "$compose_file" exec -T postgres \
   sh -ceu 'createdb --username "$POSTGRES_USER" "$1"' sh "$restore_database"
 created=true
+if [ -n "$restore_operation_marker" ]; then
+  docker compose --env-file "$env_file" -f "$compose_file" exec -T postgres \
+    sh -ceu 'psql --username "$POSTGRES_USER" --dbname postgres --no-psqlrc --set ON_ERROR_STOP=1 --command "COMMENT ON DATABASE \"$1\" IS '\''$2'\''"' \
+    sh "$restore_database" "$restore_operation_marker"
+fi
 
 docker compose --env-file "$env_file" -f "$compose_file" exec -T postgres \
   sh -ceu 'pg_restore --username "$POSTGRES_USER" --dbname "$1" --no-owner --no-privileges --exit-on-error' sh "$restore_database" \

@@ -18,6 +18,8 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 
 // @ts-expect-error The BYOC lifecycle state helper is intentionally plain ESM.
 import * as lifecycleState from "../../../deploy/byoc/retained-data-lifecycle-state.mjs";
+// @ts-expect-error The BYOC lifecycle CLI is intentionally plain ESM.
+import { runLifecycle } from "../../../deploy/byoc/retained-data-lifecycle.mjs";
 
 const {
   LIFECYCLE_STATE_CONTRACT,
@@ -192,6 +194,26 @@ try {
   assert.doesNotMatch(JSON.stringify(recovery), new RegExp(SECRET_CANARY, "i"));
   assert.equal(await lifecycleLockStatus(deadDirectory), false);
 
+  const cliDirectory = await createStateDirectory("cli-dead-owner");
+  await leaveDeadOwnerLock(cliDirectory);
+  const cliRecovery = await runLifecycle([
+    "recover-lock",
+    "--confirm-operation-id",
+    OPERATION_ID,
+  ], { stateDirectory: cliDirectory });
+  assert.deepEqual(cliRecovery, {
+    contract: "agentops_byoc_retained_data_lifecycle_v1",
+    ok: true,
+    operation: "recover-lock",
+    operation_id: OPERATION_ID,
+    stale_lock_recovered: true,
+    owner_identity_verified_stale: true,
+    credentials_omitted: true,
+    sql_omitted: true,
+    row_data_omitted: true,
+  });
+  assert.equal(await lifecycleLockStatus(cliDirectory), false);
+
   const isolatedDirectory = await createStateDirectory("isolated-dead-owner");
   await leaveDeadOwnerLock(isolatedDirectory);
   await rename(
@@ -243,6 +265,7 @@ try {
     atomic_private_lock_publication: true,
     live_owner_recovery_refused: true,
     dead_pid_recovery_verified: true,
+    operator_cli_recovery_verified: true,
     interrupted_isolation_recovery_verified: true,
     exact_operation_confirmation_verified: true,
     concurrent_acquisition_refused: true,

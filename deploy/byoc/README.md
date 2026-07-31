@@ -313,6 +313,12 @@ database-role boundary pass. A failure after recovery is armed leaves the
 service stopped, keeps the state at `backup_ready`, and marks
 `recovery_required=true`; it never reports the target as installed.
 
+The plan also binds PostgreSQL's cluster system identifier and the authority
+database OID. Apply and rollback re-check both values. Database renames preserve
+the bound OID, allowing recovery to distinguish the recorded authority,
+quarantine, and restored objects from unrelated databases that happen to reuse
+the same names.
+
 Rollback is destructive and requires the operation ID as explicit confirmation:
 
 ```bash
@@ -320,6 +326,9 @@ deploy/byoc/retained-data-lifecycle.mjs rollback \
   --confirm-restore-from-backup byoc_lifecycle_<20-hex-id>
 
 deploy/byoc/retained-data-lifecycle.mjs cleanup \
+  --confirm-operation-id byoc_lifecycle_<20-hex-id>
+
+deploy/byoc/retained-data-lifecycle.mjs recover-lock \
   --confirm-operation-id byoc_lifecycle_<20-hex-id>
 ```
 
@@ -331,8 +340,13 @@ production/quarantine database-name swap. The state checkpoints
 `production_quarantined`, `restore_promotion_started`, `restore_promoted`, and
 `rollback_verified`. A restore database is never created before its
 deterministic name is durable. If an interruption leaves that database behind
-before verification is recorded, the next confirmed rollback deletes it and
-rebuilds it from the bound backup instead of adopting an unverified orphan.
+before verification is recorded, the next confirmed rollback deletes it only
+after its PostgreSQL database comment matches the operation ID and committed
+backup hash, then rebuilds it from the bound backup instead of adopting an
+unverified orphan. An unmarked or differently marked same-name database fails
+closed and is not deleted. The restored database OID is checkpointed before any
+production rename; later promotion and cleanup require the recorded OIDs and
+cluster identity to match.
 After a host interruption, rerunning the same confirmed rollback reads
 `pg_database` and resumes from the persisted checkpoint instead of guessing
 from process memory. It starts the recorded source image and verifies health,
@@ -349,10 +363,20 @@ image. A failure after a rename checkpoint keeps the service stopped and marks
 recovery required; rerunning the same explicit rollback continues the verified
 database swap.
 
+A new `plan` is refused while
+`quarantine_cleanup_pending=true`; the recorded quarantine must be verified and
+removed with the confirmed `cleanup` command before operation history can
+advance.
+
 Do not remove the lifecycle state directory or its backup bundle while an
-operation is active. An operation lock left by process or host failure is not
-automatically broken; first prove no lifecycle process is running and preserve
-the state and backup before a Human operator performs recovery. Never run
+operation is active. An operation lock left by process or host failure is never
+broken automatically. After proving no lifecycle process is running and
+preserving the state and backup, a Human operator may run the confirmed
+`recover-lock` command. Recovery validates the exact operation ID, private lock
+metadata, host identity, boot identity, PID, and process-start identity; it
+refuses a live owner, cross-host owner, changed/tampered owner, unsafe path, or
+unverifiable identity. A successful recovery removes only the verified stale
+lock and does not change lifecycle state. Never run
 `docker compose down --volumes` as part of this workflow.
 
 The lifecycle contracts use an offline injected Docker driver to exercise the
