@@ -510,6 +510,7 @@ export class CommercialWorker {
         agent_plan_id: plan.planId,
         plan_hash: planHash,
         runtime_type: this.#config.runtime,
+        estimated_cost_usd: this.#config.estimatedCostUsd,
         input_summary:
           `TypeScript worker adapter=${this.#config.runtime} `
           + `task=${redactText(task.title, 120)}`,
@@ -635,7 +636,7 @@ export class CommercialWorker {
         output_summary: result.outputSummary,
         duration_ms: result.durationMs,
         output_tokens: result.outputTokens,
-        cost_usd: 0,
+        cost_usd: this.#config.estimatedCostUsd,
         error_type: result.errorType,
         error_message: result.errorMessage,
       },

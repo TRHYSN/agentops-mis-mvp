@@ -93,6 +93,7 @@ export type CommercialWorkerConfig = {
   workspaceId: string;
   agentId: string;
   runtime: CommercialRuntime;
+  estimatedCostUsd: string;
   taskId?: string;
   statuses?: string[];
   allowHighRisk?: boolean;

@@ -15,6 +15,7 @@ type CliOptions = {
   workspaceId: string;
   agentId: string;
   taskId?: string;
+  estimatedCostUsd: string;
   confirmRun: boolean;
   allowHighRisk: boolean;
   allowInsecureLoopback: boolean;
@@ -37,6 +38,18 @@ function envBoolean(name: string, fallback = false) {
   const value = String(process.env[name] || "").trim().toLowerCase();
   if (!value) return fallback;
   return ["1", "true", "yes", "on"].includes(value);
+}
+
+function positiveCost(value: unknown) {
+  const normalized = String(value ?? "").trim();
+  if (
+    !/^(?:0|[1-9]\d{0,11})(?:\.\d{1,6})?$/.test(normalized)
+    || /^0(?:\.0{1,6})?$/.test(normalized)
+  ) {
+    throw new Error("commercial_worker_estimated_cost_required");
+  }
+  const [integer, fraction = ""] = normalized.split(".");
+  return `${integer}.${fraction.padEnd(6, "0")}`;
 }
 
 function argumentMap(argv: string[]) {
@@ -81,6 +94,7 @@ function cliOptions(argv: string[]): CliOptions {
     "--poll-interval-ms",
     "--max-tasks",
     "--max-adapter-attempts",
+    "--estimated-cost-usd",
     "--hermes-gateway-url",
     "--hermes-model",
     "--hermes-timeout-ms",
@@ -116,6 +130,10 @@ function cliOptions(argv: string[]): CliOptions {
       || process.env.AGENTOPS_AGENT_ID
       || "",
     taskId: values.get("--task-id") || process.env.AGENTOPS_TASK_ID || undefined,
+    estimatedCostUsd: positiveCost(
+      values.get("--estimated-cost-usd")
+      || process.env.AGENTOPS_RUN_ESTIMATED_COST_USD,
+    ),
     confirmRun: flags.has("--confirm-run")
       || envBoolean("AGENTOPS_CONFIRM_RUN"),
     allowHighRisk: flags.has("--allow-high-risk")
@@ -233,6 +251,7 @@ async function main() {
     workspaceId: options.workspaceId,
     agentId: options.agentId,
     runtime: options.adapter,
+    estimatedCostUsd: options.estimatedCostUsd,
     taskId: options.taskId,
     confirmRun: options.confirmRun,
     allowHighRisk: options.allowHighRisk,

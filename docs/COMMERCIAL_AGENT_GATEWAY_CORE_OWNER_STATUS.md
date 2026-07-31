@@ -84,7 +84,7 @@ schema, applies the current migration runner, and covers:
 route ownership, bounded bodies, explicit Free Local proxy switch, and absence
 of Python process/proxy calls in production owners.
 
-The schema contract is now `agentops_commercial_postgres_v10` with eleven
+The schema contract is now `agentops_commercial_postgres_v10` with twelve
 checksum-pinned migrations. Workspace entitlement evaluation is serialized by
 a transaction-scoped workspace advisory lock. New enrollment, child-session,
 and run-start writes fail closed on missing, inactive, suspended, expired,
@@ -102,6 +102,18 @@ Human and cross-workspace rejection, admin-only decision and issue, concurrent
 single-winner transitions, task/run/Agent/config drift, entitlement denial
 evidence, one-time credential delivery, replay omission, and a database-wide
 raw-token scan.
+
+Run start now requires a positive `estimated_cost_usd` and assigns
+`started_at` from the PostgreSQL control-plane transaction. The same
+transaction reserves concurrent-run, monthly-run, and monthly-cost capacity.
+Running heartbeats cannot reduce cost or exceed the reservation and atomically
+renew the bounded concurrency lease. Lease expiry does not erase monthly run or
+estimated-cost usage, and an expired run can renew or settle without being
+counted as a new monthly run. Gateway heartbeat, approval rejection,
+PreparedAction success/failure/timeout, and enrollment management decisions all
+close cost state in their owning transaction. Reservation estimate, observed,
+and settled amounts plus the `runs.cost_usd` compatibility projection are
+`NUMERIC(18,6)`.
 
 The complete Human review acceptance also covers the first-party Human Session
 owners for login, logout, current session, approval list/detail/decision,

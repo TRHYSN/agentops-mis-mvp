@@ -12,6 +12,15 @@ import { withPostgresTransaction } from "./db";
 import { ControlPlaneHttpError } from "./http";
 import { appendAudit, appendRuntimeEvent, newLedgerId, pythonFloat, stableHash } from "./ledger";
 import {
+  heartbeatRunCost,
+  nonNegativeActualCost,
+  positiveCostEstimate,
+  reserveRunCost,
+  settleRunCost,
+  type PublicRunCostReservation,
+  type RunCostReservationDenialReason,
+} from "./runCostReservations";
+import {
   evaluateWorkspaceEntitlement,
   type WorkspaceEntitlementDecision,
 } from "./workspaceEntitlements";
@@ -72,7 +81,7 @@ type RunRow = {
   input_tokens: number;
   output_tokens: number;
   reasoning_tokens: number;
-  cost_usd: number;
+  cost_usd: number | string;
   error_type: string | null;
   error_message: string | null;
   trace_id: string | null;
@@ -128,15 +137,6 @@ function nonNegativeInteger(value: unknown, field: string) {
   return parsed;
 }
 
-function nonNegativeNumber(value: unknown, field: string) {
-  if (value === undefined || value === null || value === "") return 0;
-  const parsed = Number(value);
-  if (!Number.isFinite(parsed) || parsed < 0) {
-    throw new ControlPlaneHttpError(400, `${field}_invalid`, `${field} must be a non-negative number.`);
-  }
-  return parsed;
-}
-
 function boolean(value: unknown) {
   return value === true || value === 1 || ["1", "true", "yes", "on"].includes(String(value ?? "").trim().toLowerCase());
 }
@@ -150,8 +150,12 @@ function collaborators(task: TaskRow) {
   }
 }
 
-function runAuditSnapshot(row: RunRow) {
+function publicRun(row: RunRow) {
   return { ...row, cost_usd: pythonFloat(Number(row.cost_usd)) };
+}
+
+function runAuditSnapshot(row: RunRow) {
+  return publicRun(row);
 }
 
 function taskAuditSnapshot(row: TaskRow) {
@@ -164,7 +168,12 @@ function defaultDelegationId(taskId: string, agentId: string) {
   return slug && slug.length <= 64 ? `del_${slug}` : `del_${stableHash(raw).slice(0, 16)}`;
 }
 
-function response(run: RunRow, outcome: "created" | "unchanged", agentPlanId?: string | null) {
+function response(
+  run: RunRow,
+  outcome: "created" | "unchanged",
+  agentPlanId?: string | null,
+  costReservation?: PublicRunCostReservation,
+) {
   return {
     status: outcome === "created" ? 201 : 200,
     body: {
@@ -173,16 +182,29 @@ function response(run: RunRow, outcome: "created" | "unchanged", agentPlanId?: s
       control_plane: "typescript_postgres",
       operation: "run_start",
       outcome,
-      run,
+      run: publicRun(run),
       run_id: run.run_id,
       workspace_id: run.workspace_id,
       ...(agentPlanId ? { agent_plan_id: agentPlanId } : {}),
+      ...(costReservation ? { cost_reservation: costReservation } : {}),
       token_omitted: true,
     },
   };
 }
 
-function entitlementDeniedResponse(decision: WorkspaceEntitlementDecision) {
+function costReservationDeniedResponse(
+  workspaceId: string,
+  agentId: string,
+  reason: RunCostReservationDenialReason,
+  entitlementDecision: WorkspaceEntitlementDecision,
+) {
+  const reasonCode = entitlementDecision.allow
+    ? reason === "monthly_run_limit_exceeded"
+      ? "monthly_run_quota_exceeded"
+      : reason === "monthly_cost_reservation_limit_exceeded"
+        ? "monthly_cost_quota_exceeded"
+        : reason
+    : entitlementDecision.reason_code;
   return {
     status: 403,
     body: {
@@ -192,10 +214,18 @@ function entitlementDeniedResponse(decision: WorkspaceEntitlementDecision) {
       operation: "run_start",
       error: "workspace_entitlement_denied",
       message: "Workspace entitlement does not allow a new Agent Gateway run.",
-      reason_code: decision.reason_code,
-      workspace_id: decision.workspace_id,
-      agent_id: decision.agent_id,
-      entitlement_decision: decision,
+      reason_code: reasonCode,
+      workspace_id: workspaceId,
+      agent_id: agentId,
+      entitlement_decision: entitlementDecision.allow
+        ? {
+          ...entitlementDecision,
+          allow: false,
+          decision: "deny",
+          reason_code: reasonCode,
+        }
+        : entitlementDecision,
+      reservation_created: false,
       token_omitted: true,
       credentials_omitted: true,
       raw_config_omitted: true,
@@ -203,7 +233,11 @@ function entitlementDeniedResponse(decision: WorkspaceEntitlementDecision) {
   };
 }
 
-function heartbeatResponse(run: RunRow, outcome: "updated" | "unchanged") {
+function heartbeatResponse(
+  run: RunRow,
+  outcome: "updated" | "unchanged",
+  costReservation?: PublicRunCostReservation,
+) {
   return {
     status: 200,
     body: {
@@ -212,9 +246,10 @@ function heartbeatResponse(run: RunRow, outcome: "updated" | "unchanged") {
       control_plane: "typescript_postgres",
       operation: "run_heartbeat",
       outcome,
-      run,
+      run: publicRun(run),
       run_id: run.run_id,
       workspace_id: run.workspace_id,
+      ...(costReservation ? { cost_reservation: costReservation } : {}),
       token_omitted: true,
     },
   };
@@ -255,6 +290,14 @@ export async function startAgentGatewayRun(request: Request) {
     }
     const taskId = identifier(body.task_id, "task_id");
     const runId = body.run_id ? identifier(body.run_id, "run_id") : newLedgerId("run_gw");
+    if (body.cost_usd !== undefined) {
+      throw new ControlPlaneHttpError(
+        400,
+        "run_cost_usd_server_owned",
+        "Run cost_usd is reported through heartbeat; use estimated_cost_usd to reserve budget.",
+      );
+    }
+    const estimatedCostUsd = positiveCostEstimate(body.estimated_cost_usd);
     const taskResult = await client.query<TaskRow>(
       "SELECT * FROM tasks WHERE task_id=$1 AND workspace_id=$2 FOR UPDATE",
       [taskId, identity.workspaceId],
@@ -303,9 +346,93 @@ export async function startAgentGatewayRun(request: Request) {
         "A new run must start in running status.",
       );
     }
+    if (body.started_at !== undefined) {
+      throw new ControlPlaneHttpError(
+        400,
+        "run_started_at_server_owned",
+        "Run started_at is assigned by the control plane.",
+      );
+    }
+    const reservationRequestBinding = {
+      workspace_id: identity.workspaceId,
+      run_id: runId,
+      task_id: taskId,
+      agent_id: identity.agentId,
+      runtime_type: runtimeType,
+      parent_run_id: parentRunId,
+      delegation_id: delegationId,
+      requested_agent_plan_id: body.agent_plan_id === undefined
+        ? null
+        : String(body.agent_plan_id),
+      requested_plan_hash: body.plan_hash === undefined
+        ? null
+        : String(body.plan_hash),
+      approval_required: boolean(body.approval_required),
+      estimated_cost_usd: estimatedCostUsd,
+    };
     await client.query("SELECT pg_advisory_xact_lock(hashtext($1))", [`agentops-run:${runId}`]);
     const existingResult = await client.query<RunRow>("SELECT * FROM runs WHERE run_id=$1 FOR UPDATE", [runId]);
     const existing = existingResult.rows[0];
+    const reservationResult = await reserveRunCost(client, {
+      workspaceId: identity.workspaceId,
+      runId,
+      estimatedCostUsd,
+      requestBinding: reservationRequestBinding,
+    });
+    if (!reservationResult.allowed) {
+      const entitlementDecision = await evaluateWorkspaceEntitlement(client, {
+        workspaceId: identity.workspaceId,
+        operation: "run_start",
+        agentId: identity.agentId,
+        estimatedCostUsd: Number(estimatedCostUsd),
+      });
+      const denialReason = entitlementDecision.allow
+        ? reservationResult.reason
+        : entitlementDecision.reason_code;
+      await appendAudit(client, {
+        workspaceId: identity.workspaceId,
+        actorType: "agent",
+        actorId: identity.agentId,
+        action: "agent_gateway.run_start.entitlement_denied",
+        entityType: "runs",
+        entityId: runId,
+        after: {
+          decision: "deny",
+          reason_code: denialReason,
+          reservation_created: false,
+          entitlement_decision: entitlementDecision,
+        },
+        metadata: {
+          workspace_id: identity.workspaceId,
+          task_id: taskId,
+          operation: "run_start",
+          reason_code: denialReason,
+          entitlement_decision: entitlementDecision,
+          request_hash: reservationResult.requestHash,
+          idempotency_key_hash: reservationResult.idempotencyKeyHash,
+          credentials_omitted: true,
+          raw_config_omitted: true,
+        },
+        requestHash: reservationResult.requestHash,
+      });
+      return costReservationDeniedResponse(
+        identity.workspaceId,
+        identity.agentId,
+        reservationResult.reason,
+        entitlementDecision,
+      );
+    }
+    const expectedReservationState = existing
+      && ["completed", "failed", "blocked"].includes(existing.status)
+      ? "settled"
+      : "reserved";
+    if (reservationResult.row.state !== expectedReservationState) {
+      throw new ControlPlaneHttpError(
+        409,
+        "run_cost_reservation_state_conflict",
+        "Run replay does not match its cost reservation state.",
+      );
+    }
     if (existing) {
       const immutableConflict = existing.workspace_id !== identity.workspaceId
         || existing.task_id !== taskId
@@ -348,35 +475,12 @@ export async function startAgentGatewayRun(request: Request) {
           );
         }
       }
-      return response(existing, "unchanged");
-    }
-    const costUsd = nonNegativeNumber(body.cost_usd, "cost_usd");
-    const entitlementDecision = await evaluateWorkspaceEntitlement(client, {
-      workspaceId: identity.workspaceId,
-      operation: "run_start",
-      agentId: identity.agentId,
-      estimatedCostUsd: costUsd,
-    });
-    if (!entitlementDecision.allow) {
-      await appendAudit(client, {
-        workspaceId: identity.workspaceId,
-        actorType: "agent",
-        actorId: identity.agentId,
-        action: "agent_gateway.run_start.entitlement_denied",
-        entityType: "runs",
-        entityId: runId,
-        after: entitlementDecision,
-        metadata: {
-          workspace_id: identity.workspaceId,
-          task_id: taskId,
-          operation: "run_start",
-          reason_code: entitlementDecision.reason_code,
-          entitlement_decision: entitlementDecision,
-          credentials_omitted: true,
-          raw_config_omitted: true,
-        },
-      });
-      return entitlementDeniedResponse(entitlementDecision);
+      return response(
+        existing,
+        "unchanged",
+        existing.agent_plan_id,
+        reservationResult.reservation,
+      );
     }
     let agentPlanId: string | null = null;
     let planHash: string | null = null;
@@ -446,7 +550,6 @@ export async function startAgentGatewayRun(request: Request) {
     }
 
     const now = new Date().toISOString();
-    const startedAt = optionalIso(body.started_at, "started_at") || now;
     const run: RunRow = {
       run_id: runId,
       workspace_id: identity.workspaceId,
@@ -454,7 +557,7 @@ export async function startAgentGatewayRun(request: Request) {
       agent_id: identity.agentId,
       runtime_type: runtimeType,
       status: requestedStartStatus,
-      started_at: startedAt,
+      started_at: now,
       ended_at: optionalIso(body.ended_at, "ended_at"),
       duration_ms: body.duration_ms === undefined || body.duration_ms === null || body.duration_ms === ""
         ? null
@@ -468,7 +571,7 @@ export async function startAgentGatewayRun(request: Request) {
       input_tokens: nonNegativeInteger(body.input_tokens, "input_tokens"),
       output_tokens: nonNegativeInteger(body.output_tokens, "output_tokens"),
       reasoning_tokens: nonNegativeInteger(body.reasoning_tokens, "reasoning_tokens"),
-      cost_usd: costUsd,
+      cost_usd: 0,
       error_type: text(body.error_type, 80) || null,
       error_message: text(body.error_message, 200) || null,
       trace_id: body.trace_id ? identifier(body.trace_id, "trace_id") : newLedgerId("trace"),
@@ -533,6 +636,25 @@ export async function startAgentGatewayRun(request: Request) {
         plan_hash: planHash,
       },
     });
+    await appendAudit(client, {
+      workspaceId: identity.workspaceId,
+      actorType: "agent",
+      actorId: identity.agentId,
+      action: "agent_gateway.run_cost_reserved",
+      entityType: "run_cost_reservations",
+      entityId: reservationResult.reservation.reservation_ref,
+      after: reservationResult.reservation,
+      metadata: {
+        workspace_id: identity.workspaceId,
+        run_id: runId,
+        task_id: taskId,
+        request_hash: reservationResult.requestHash,
+        idempotency_key_hash: reservationResult.idempotencyKeyHash,
+        raw_config_omitted: true,
+        credentials_omitted: true,
+      },
+      requestHash: reservationResult.requestHash,
+    });
     if (task.status !== "running" || !task.owner_agent_id) {
       const taskUpdate = await client.query<TaskRow>(
         `UPDATE tasks SET status='running',owner_agent_id=COALESCE(NULLIF(owner_agent_id,''),$1),updated_at=$2
@@ -561,7 +683,12 @@ export async function startAgentGatewayRun(request: Request) {
       agentId: identity.agentId,
       inputSummary: run.input_summary,
     });
-    return response(run, "created", agentPlanId);
+    return response(
+      run,
+      "created",
+      agentPlanId,
+      reservationResult.reservation,
+    );
   });
 }
 
@@ -683,9 +810,14 @@ export async function heartbeatAgentGatewayRun(request: Request, requestedRunId:
     const outputTokens = body.output_tokens === undefined || body.output_tokens === null || body.output_tokens === ""
       ? Number(before.output_tokens || 0)
       : nonNegativeInteger(body.output_tokens, "output_tokens");
-    const costUsd = body.cost_usd === undefined || body.cost_usd === null || body.cost_usd === ""
-      ? Number(before.cost_usd || 0)
-      : nonNegativeNumber(body.cost_usd, "cost_usd");
+    const actualCostUsd = nonNegativeActualCost(
+      body.cost_usd === undefined
+        || body.cost_usd === null
+        || body.cost_usd === ""
+        ? before.cost_usd || 0
+        : body.cost_usd,
+    );
+    const costUsd = Number(actualCostUsd);
     const candidateAfter: RunRow = {
       ...before,
       status,
@@ -707,8 +839,24 @@ export async function heartbeatAgentGatewayRun(request: Request, requestedRunId:
         `Run ${runId} is terminal and its receipt is immutable.`,
       );
     }
+    const costAuthority = terminal
+      ? await settleRunCost(client, {
+        workspaceId: identity.workspaceId,
+        runId,
+        actualCostUsd,
+        terminalStatus: status,
+      })
+      : await heartbeatRunCost(client, {
+        workspaceId: identity.workspaceId,
+        runId,
+        actualCostUsd,
+      });
     if (sameHeartbeatState(before, candidateAfter)) {
-      return heartbeatResponse(before, "unchanged");
+      return heartbeatResponse(
+        before,
+        "unchanged",
+        costAuthority.reservation,
+      );
     }
 
     const updateResult = await client.query<RunRow>(
@@ -738,10 +886,31 @@ export async function heartbeatAgentGatewayRun(request: Request, requestedRunId:
       entityId: runId,
       before: runAuditSnapshot(before),
       after: runAuditSnapshot(after),
-      metadata: { workspace_id: identity.workspaceId, status, raw_payload_omitted: true },
+      metadata: {
+        workspace_id: identity.workspaceId,
+        status,
+        cost_reservation: costAuthority.reservation,
+        raw_payload_omitted: true,
+      },
     });
 
     if (terminal) {
+      await appendAudit(client, {
+        workspaceId: identity.workspaceId,
+        actorType: "agent",
+        actorId: identity.agentId,
+        action: "agent_gateway.run_cost_settled",
+        entityType: "run_cost_reservations",
+        entityId: costAuthority.reservation.reservation_ref,
+        after: costAuthority.reservation,
+        metadata: {
+          workspace_id: identity.workspaceId,
+          run_id: runId,
+          task_id: before.task_id,
+          terminal_status: status,
+          raw_payload_omitted: true,
+        },
+      });
       const taskStatus = status === "completed" ? "completed" : status === "blocked" ? "blocked" : "failed";
       if (task.status !== taskStatus) {
         const taskUpdate = await client.query<TaskRow>(
@@ -773,6 +942,6 @@ export async function heartbeatAgentGatewayRun(request: Request, requestedRunId:
       outputSummary,
       errorMessage,
     });
-    return heartbeatResponse(after, "updated");
+    return heartbeatResponse(after, "updated", costAuthority.reservation);
   });
 }

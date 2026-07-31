@@ -53,7 +53,9 @@ Commercial 的 production/shared 模式禁止把控制面写请求代理给 Pyth
 
 ```bash
 cd ui/next-app
-npm run worker:commercial -- --adapter hermes --confirm-run
+export AGENTOPS_RUN_ESTIMATED_COST_USD=1.000000
+npm run worker:commercial -- --adapter hermes \
+  --estimated-cost-usd "$AGENTOPS_RUN_ESTIMATED_COST_USD" --confirm-run
 ```
 
 它只调用 `/api/mis/agent-gateway/*`，不直接依赖 Python、SQLite 或

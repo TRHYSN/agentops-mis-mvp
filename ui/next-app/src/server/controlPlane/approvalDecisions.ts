@@ -13,6 +13,7 @@ import {
 import { ControlPlaneHttpError } from "./http";
 import { appendAudit, appendRuntimeEvent, stableHash } from "./ledger";
 import { preparedActionHash } from "./preparedActions";
+import { settleExistingTerminalRunCost } from "./terminalRunCost";
 
 type ApprovalDecision = "approved" | "rejected";
 
@@ -653,6 +654,13 @@ async function decidePreparedAction(
   let task = graph.task;
   let run = graph.run;
   let tool = graph.tool;
+  const terminalCost = decision === "rejected"
+    ? await settleExistingTerminalRunCost(client, {
+      workspaceId: identity.workspaceId,
+      runId: graph.run.run_id,
+      terminalStatus: "blocked",
+    })
+    : null;
   if (decision === "rejected") {
     task = (await client.query<TaskRow>(
       `UPDATE tasks SET status='blocked',updated_at=$1
@@ -718,6 +726,8 @@ async function decidePreparedAction(
       action_hash: action.action_hash,
       request_hash: requestHash,
       idempotency_key_hash: idempotencyHash,
+      run_cost_closure: terminalCost?.mode || null,
+      run_cost_reservation_state: terminalCost?.reservation?.state || null,
       side_effect_performed: false,
       raw_body_omitted: true,
       token_omitted: true,
@@ -738,6 +748,8 @@ async function decidePreparedAction(
       run_id: run.run_id,
       tool_call_id: tool.tool_call_id,
       request_hash: requestHash,
+      run_cost_closure: terminalCost?.mode || null,
+      run_cost_reservation_state: terminalCost?.reservation?.state || null,
       side_effect_performed: false,
       token_omitted: true,
     },

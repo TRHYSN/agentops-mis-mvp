@@ -503,6 +503,15 @@ async function sourceBoundaryContract() {
   assert.doesNotMatch(cliSource, /values\.get\("--(?:api-key|token)/);
   assert.match(realAcceptanceSource, /default="typescript"/);
   assert.match(realAcceptanceSource, /commercial-worker\.ts/);
+  assert.doesNotMatch(realAcceptanceSource, /agent_worker\.py/);
+  assert.match(
+    realAcceptanceSource,
+    /nextjs_postgres_real_worker_human_review_v4/,
+  );
+  assert.match(realAcceptanceSource, /"--estimated-cost-usd"/);
+  assert.match(realAcceptanceSource, /max_concurrent_runs/);
+  assert.match(realAcceptanceSource, /candidate_source_worktree_not_clean/);
+  assert.match(realAcceptanceSource, /"source_commit"/);
   assert.match(realAcceptanceSource, /"python_worker_started"/);
   assert.match(realAcceptanceSource, /"typescript_worker_started"/);
   return { files: sources.length, python_dependency: false, sqlite_dependency: false };
@@ -576,6 +585,7 @@ async function main() {
       workspaceId: WORKSPACE_ID,
       agentId: AGENT_ID,
       runtime: "hermes",
+      estimatedCostUsd: "1.000000",
       confirmRun: false,
     });
     await assert.rejects(
@@ -611,6 +621,7 @@ async function main() {
       workspaceId: WORKSPACE_ID,
       agentId: AGENT_ID,
       runtime: "hermes",
+      estimatedCostUsd: "1.000000",
       confirmRun: true,
       requestCustomerDeliveryApproval: true,
       maxAdapterAttempts: 2,
@@ -638,6 +649,17 @@ async function main() {
     assert.equal(JSON.stringify(happy).includes(OUTPUT_CANARY), false);
     assert.match(happy.output_summary || "", /\[REDACTED_CANARY\]/);
     assert.equal(JSON.stringify(happyRequests).includes(TOKEN), false);
+    const runStartBody = bodyFor(
+      "/api/mis/agent-gateway/runs/start",
+      happyRequests,
+    );
+    assert.equal(runStartBody.estimated_cost_usd, "1.000000");
+    const runHeartbeat = happyRequests.find((item) => (
+      item.path.startsWith("/api/mis/agent-gateway/runs/")
+      && item.path.endsWith("/heartbeat")
+    ));
+    assert.ok(runHeartbeat);
+    assert.equal(runHeartbeat.body.cost_usd, "1.000000");
 
     const runtimeBody = bodyFor(
       "/api/mis/agent-gateway/runtime-events",
@@ -724,6 +746,7 @@ async function main() {
       workspaceId: WORKSPACE_ID,
       agentId: AGENT_ID,
       runtime: "hermes",
+      estimatedCostUsd: "1.000000",
       confirmRun: true,
       maxAdapterAttempts: 1,
       retryDelayMs: 0,
@@ -757,6 +780,7 @@ async function main() {
         workspaceId: WORKSPACE_ID,
         agentId: AGENT_ID,
         runtime: "hermes",
+        estimatedCostUsd: "1.000000",
         confirmRun: true,
         maxAdapterAttempts: 1,
         retryDelayMs: 0,

@@ -22,6 +22,7 @@ import {
 } from "./humanSession";
 import { ControlPlaneHttpError } from "./http";
 import { appendAudit, appendRuntimeEvent, stableHash } from "./ledger";
+import { settleExistingTerminalRunCost } from "./terminalRunCost";
 
 export const ENROLLMENT_APPROVAL_MAX_BODY_BYTES = 16 * 1024;
 
@@ -770,13 +771,13 @@ export async function requestGatewayEnrollment(
     );
     await client.query(
       `INSERT INTO runs(
-        run_id,workspace_id,task_id,agent_id,runtime_type,status,started_at,
-        ended_at,duration_ms,input_summary,output_summary,model_provider,
-        model_name,input_tokens,output_tokens,reasoning_tokens,cost_usd,
-        error_type,error_message,trace_id,parent_run_id,delegation_id,
+        run_id,workspace_id,task_id,agent_id,runtime_type,status,billing_class,
+        started_at,ended_at,duration_ms,input_summary,output_summary,
+        model_provider,model_name,input_tokens,output_tokens,reasoning_tokens,
+        cost_usd,error_type,error_message,trace_id,parent_run_id,delegation_id,
         approval_required,agent_plan_id,plan_hash,created_at
       ) VALUES(
-        $1,$2,$3,$4,$5,'waiting_approval',$6,NULL,NULL,$7,NULL,
+        $1,$2,$3,$4,$5,'waiting_approval','nonbillable_management',$6,NULL,NULL,$7,NULL,
         'agent-gateway','enrollment-request',0,0,0,0,NULL,NULL,$8,NULL,$9,
         1,NULL,NULL,$6
       )`,
@@ -1004,6 +1005,11 @@ export async function decideGatewayEnrollmentApproval(
   );
   const taskStatus = decision === "approved" ? "completed" : "blocked";
   const runStatus = decision === "approved" ? "completed" : "blocked";
+  const terminalCost = await settleExistingTerminalRunCost(client, {
+    workspaceId: identity.workspaceId,
+    runId: graph.row.run_id,
+    terminalStatus: runStatus,
+  });
   const task = await client.query(
     `UPDATE tasks SET status=$1,updated_at=$2
     WHERE task_id=$3 AND workspace_id=$4 AND status='waiting_approval'
@@ -1064,6 +1070,8 @@ export async function decideGatewayEnrollmentApproval(
     approval_id: approvalId,
     request_binding_hash: graph.requestBindingHash,
     idempotency_key_hash: idempotencyHash,
+    run_cost_closure: terminalCost.mode,
+    run_cost_reservation_state: terminalCost.reservation?.state || null,
     entitlement_evaluated: false,
     credential_generated: false,
     raw_config_omitted: true,

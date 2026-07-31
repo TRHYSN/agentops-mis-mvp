@@ -18,6 +18,7 @@ import { boundedJsonObject } from "./boundedJson";
 import { withPostgresTransaction } from "./db";
 import { ControlPlaneHttpError } from "./http";
 import { appendAudit, appendRuntimeEvent, stableHash } from "./ledger";
+import { settleExistingTerminalRunCost } from "./terminalRunCost";
 
 export const PREPARED_ACTION_MAX_BODY_BYTES = 16 * 1024;
 
@@ -1242,6 +1243,11 @@ async function terminalizeExpiredLease(
     agent_id: graph.action.requested_by_agent_id,
     lease_expires_at: lease.expires_at,
   });
+  const terminalCost = await settleExistingTerminalRunCost(client, {
+    workspaceId: graph.action.workspace_id,
+    runId: graph.run.run_id,
+    terminalStatus: "blocked",
+  });
   const actionUpdate = await client.query(
     `UPDATE prepared_actions
     SET status='expired',result_summary=$1
@@ -1323,6 +1329,8 @@ async function terminalizeExpiredLease(
       lease_id: lease.lease_id,
       receipt_id: receipt.receipt_id,
       receipt_outcome: "unknown",
+      run_cost_closure: terminalCost.mode,
+      run_cost_reservation_state: terminalCost.reservation?.state || null,
       provider_call_may_have_completed: true,
       automatic_retry_allowed: false,
       retry_requires_new_action: true,
@@ -2597,6 +2605,11 @@ export async function failPreparedActionExecution(
       failure_detail_hash: failureDetailHash,
       rollback_performed: rollbackPerformed,
     });
+    const terminalCost = await settleExistingTerminalRunCost(client, {
+      workspaceId: graph.action.workspace_id,
+      runId: graph.run.run_id,
+      terminalStatus: "blocked",
+    });
     const actionUpdate = await client.query(
       `UPDATE prepared_actions SET status='expired',result_summary=$1
       WHERE action_id=$2 AND status='approved'`,
@@ -2713,6 +2726,8 @@ export async function failPreparedActionExecution(
         lease_id: leaseId,
         receipt_id: receipt.receipt_id,
         terminal_evidence_hash: terminalEvidenceHash,
+        run_cost_closure: terminalCost.mode,
+        run_cost_reservation_state: terminalCost.reservation?.state || null,
         failure_detail_hash: failureDetailHash,
         rollback_performed: rollbackPerformed,
         automatic_retry_allowed: false,
@@ -2938,6 +2953,11 @@ export async function resumePreparedActionExecution(
     if ((parseExpiry(lease.expires_at) ?? 0) <= Date.parse(terminalAt)) {
       return terminalizeExpiredLease(client, graph, lease);
     }
+    const terminalCost = await settleExistingTerminalRunCost(client, {
+      workspaceId: graph.action.workspace_id,
+      runId: graph.run.run_id,
+      terminalStatus: "completed",
+    });
     const resultSummary =
       `Codex workspace-write completed with verified bounded diff evidence `
       + `${evidence.diffEvidenceHash.slice(0, 16)}; raw provider output omitted.`;
@@ -3076,6 +3096,8 @@ export async function resumePreparedActionExecution(
         diff_evidence_hash: evidence.diffEvidenceHash,
         evidence_set_hash: evidence.evidenceSetHash,
         terminal_evidence_hash: evidence.terminalEvidenceHash,
+        run_cost_closure: terminalCost.mode,
+        run_cost_reservation_state: terminalCost.reservation?.state || null,
         provider_side_effect_id: providerSideEffectId,
         run_completed_in_resume: true,
         execution_checkpoint: "terminal_run_v1",

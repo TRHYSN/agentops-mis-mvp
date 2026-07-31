@@ -33,6 +33,7 @@ type EntitlementOverrides = Readonly<{
   maxAgents?: number;
   maxActiveEnrollments?: number;
   maxActiveSessionsPerAgent?: number;
+  maxConcurrentRuns?: number;
   maxMonthlyRuns?: number;
   maxMonthlyCostUsd?: number;
   effectiveAt?: Date;
@@ -67,10 +68,11 @@ async function upsertEntitlement(
     `INSERT INTO workspace_entitlements(
       workspace_id,edition,status,capabilities_json,max_agents,
       max_active_enrollments,max_active_sessions_per_agent,max_monthly_runs,
-      max_monthly_cost_usd,effective_at,expires_at,created_at,updated_at,
+      max_monthly_cost_usd,max_concurrent_runs,effective_at,expires_at,
+      created_at,updated_at,
       updated_by_user_id
     ) VALUES(
-      $1,$2,$3,$4::jsonb,$5,$6,$7,$8,$9,$10,$11,clock_timestamp(),
+      $1,$2,$3,$4::jsonb,$5,$6,$7,$8,$9,$10,$11,$12,clock_timestamp(),
       clock_timestamp(),NULL
     )
     ON CONFLICT(workspace_id) DO UPDATE SET
@@ -82,6 +84,7 @@ async function upsertEntitlement(
       max_active_sessions_per_agent=EXCLUDED.max_active_sessions_per_agent,
       max_monthly_runs=EXCLUDED.max_monthly_runs,
       max_monthly_cost_usd=EXCLUDED.max_monthly_cost_usd,
+      max_concurrent_runs=EXCLUDED.max_concurrent_runs,
       effective_at=EXCLUDED.effective_at,
       expires_at=EXCLUDED.expires_at,
       updated_at=clock_timestamp(),
@@ -96,6 +99,7 @@ async function upsertEntitlement(
       overrides.maxActiveSessionsPerAgent ?? 10,
       overrides.maxMonthlyRuns ?? 100,
       overrides.maxMonthlyCostUsd ?? 100,
+      overrides.maxConcurrentRuns ?? 10,
       effectiveAt.toISOString(),
       expiresAt?.toISOString() || null,
     ],
@@ -211,26 +215,54 @@ async function seedMonthlyRun(
 ) {
   const now = new Date().toISOString();
   const taskId = `tsk_entitlement_${suffix}`;
-  await client.query(
-    `INSERT INTO tasks(
+  const runId = `run_entitlement_${suffix}`;
+  await client.query("BEGIN");
+  try {
+    await client.query(
+      `INSERT INTO tasks(
       task_id,workspace_id,title,description,requester_id,owner_agent_id,
       collaborator_agent_ids,status,priority,due_date,acceptance_criteria,
       risk_level,budget_limit_usd,created_at,updated_at
     ) VALUES($1,$2,'Entitlement quota task',NULL,NULL,$3,'[]','running',
       'medium',NULL,NULL,'low',0,$4,$4)`,
-    [taskId, workspaceId, AGENT_A, now],
-  );
-  await client.query(
-    `INSERT INTO runs(
+      [taskId, workspaceId, AGENT_A, now],
+    );
+    await client.query(
+      `SELECT reservation_id
+      FROM agentops_reserve_run_cost_v10(
+        $1,$2,$3::numeric,$4,$5,interval '1 hour'
+      )`,
+      [
+        workspaceId,
+        runId,
+        costUsd,
+        randomBytes(32).toString("hex"),
+        randomBytes(32).toString("hex"),
+      ],
+    );
+    await client.query(
+      `INSERT INTO runs(
       run_id,workspace_id,task_id,agent_id,runtime_type,status,started_at,
       ended_at,duration_ms,input_summary,output_summary,model_provider,
       model_name,input_tokens,output_tokens,reasoning_tokens,cost_usd,
       error_type,error_message,trace_id,parent_run_id,delegation_id,
       approval_required,agent_plan_id,plan_hash,created_at
     ) VALUES($1,$2,$3,$4,'hermes','running',$5,NULL,NULL,NULL,NULL,NULL,NULL,
-      0,0,0,$6,NULL,NULL,NULL,NULL,NULL,0,NULL,NULL,$5)`,
-    [`run_entitlement_${suffix}`, workspaceId, taskId, AGENT_A, now, costUsd],
-  );
+      0,0,0,0,NULL,NULL,NULL,NULL,NULL,0,NULL,NULL,$5)`,
+      [runId, workspaceId, taskId, AGENT_A, now],
+    );
+    await client.query(
+      `SELECT reservation_id
+      FROM agentops_heartbeat_run_cost_v10(
+        $1,$2,$3::numeric,interval '1 hour'
+      )`,
+      [workspaceId, runId, costUsd],
+    );
+    await client.query("COMMIT");
+  } catch (error) {
+    await client.query("ROLLBACK");
+    throw error;
+  }
 }
 
 async function assertSchemaShape(client: Client) {
@@ -262,6 +294,7 @@ async function assertSchemaShape(client: Client) {
       "created_at",
       "updated_at",
       "updated_by_user_id",
+      "max_concurrent_runs",
     ],
   );
   assert.equal(

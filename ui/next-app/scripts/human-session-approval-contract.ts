@@ -70,6 +70,50 @@ function sha(value: string) {
   return createHash("sha256").update(value, "utf8").digest("hex");
 }
 
+async function reserveHistoricalRunCost(
+  client: Client,
+  workspaceId: string,
+  runId: string,
+  createdAt: string,
+) {
+  await client.query(
+    `INSERT INTO run_cost_reservations(
+      reservation_id,workspace_id,run_id,billing_class,billing_month_utc,
+      state,estimated_cost_usd,observed_cost_usd,idempotency_key_hash,
+      request_hash,reserved_at,expires_at,updated_at
+    ) VALUES(
+      $1,$2,$3,'historical_execution',
+      date_trunc('month',$4::timestamptz)::date,'reserved',1,0,$5,$6,
+      $4::timestamptz,$4::timestamptz+interval '1 hour',$4::timestamptz
+    )`,
+    [
+      `rsv_${runId}`,
+      workspaceId,
+      runId,
+      createdAt,
+      sha(`historical-reserve:${workspaceId}:${runId}`),
+      sha(`historical-request:${workspaceId}:${runId}`),
+    ],
+  );
+}
+
+async function settleHistoricalRunCost(
+  client: Client,
+  workspaceId: string,
+  runId: string,
+) {
+  await client.query(
+    `SELECT reservation_id
+    FROM agentops_settle_run_cost_v10($1,$2,0,$3,$4)`,
+    [
+      workspaceId,
+      runId,
+      sha(`historical-settle:${workspaceId}:${runId}`),
+      sha(`historical-settle-request:${workspaceId}:${runId}`),
+    ],
+  );
+}
+
 function scopedDsn(baseDsn: string, schema: string) {
   const parsed = new URL(baseDsn);
   parsed.searchParams.set("options", `-csearch_path=${schema}`);
@@ -357,15 +401,22 @@ async function seedDeliveryEvidence(
       createdAt,
     ],
   );
+  await reserveHistoricalRunCost(
+    client,
+    WORKSPACE,
+    runId,
+    createdAt,
+  );
   await client.query(
     `INSERT INTO runs(
       run_id,workspace_id,task_id,agent_id,runtime_type,status,started_at,
       ended_at,duration_ms,input_summary,output_summary,model_provider,
       model_name,input_tokens,output_tokens,reasoning_tokens,cost_usd,
       error_type,error_message,trace_id,parent_run_id,delegation_id,
-      approval_required,agent_plan_id,plan_hash,created_at
+      approval_required,agent_plan_id,plan_hash,billing_class,created_at
     ) VALUES($1,$2,$3,$4,$5,'completed',$6,$7,1000,NULL,NULL,$5,
-      'contract-model',0,0,0,0,NULL,NULL,NULL,NULL,NULL,0,$8,$9,$6)`,
+      'contract-model',0,0,0,0,NULL,NULL,NULL,NULL,NULL,0,$8,$9,
+      'historical_execution',$6)`,
     [
       runId,
       WORKSPACE,
@@ -377,6 +428,11 @@ async function seedDeliveryEvidence(
       planId,
       planHash,
     ],
+  );
+  await settleHistoricalRunCost(
+    client,
+    WORKSPACE,
+    runId,
   );
   await client.query(
     "UPDATE agent_plans SET run_id=$1 WHERE plan_id=$2",

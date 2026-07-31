@@ -99,6 +99,7 @@ type EntitlementRow = {
   max_agents: number;
   max_active_enrollments: number;
   max_active_sessions_per_agent: number;
+  max_concurrent_runs: number;
   max_monthly_runs: number;
   max_monthly_cost_usd: string;
   effective_at: Date | string;
@@ -213,6 +214,7 @@ function entitlementState(
     row.max_agents,
     row.max_active_enrollments,
     row.max_active_sessions_per_agent,
+    row.max_concurrent_runs,
     row.max_monthly_runs,
   ].every((value) => nonNegativeInteger(value) !== null)
     && nonNegativeNumber(row.max_monthly_cost_usd) !== null;
@@ -429,7 +431,7 @@ export async function evaluateWorkspaceEntitlement(
   const entitlementResult = await client.query<EntitlementRow>(
     `SELECT workspace_id,edition,status,capabilities_json,max_agents,
       max_active_enrollments,max_active_sessions_per_agent,max_monthly_runs,
-      max_monthly_cost_usd,effective_at,expires_at
+      max_monthly_cost_usd,max_concurrent_runs,effective_at,expires_at
     FROM workspace_entitlements
     WHERE workspace_id=$1
     FOR SHARE`,

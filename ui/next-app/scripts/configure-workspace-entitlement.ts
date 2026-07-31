@@ -56,6 +56,7 @@ const VALUE_ARGUMENTS = new Set([
   "--max-agents",
   "--max-active-enrollments",
   "--max-active-sessions-per-agent",
+  "--max-concurrent-runs",
   "--max-monthly-runs",
   "--max-monthly-cost-usd",
   "--effective-at",
@@ -75,6 +76,7 @@ const REQUIRED_VALUE_ARGUMENTS = Object.freeze([
   "--max-agents",
   "--max-active-enrollments",
   "--max-active-sessions-per-agent",
+  "--max-concurrent-runs",
   "--max-monthly-runs",
   "--max-monthly-cost-usd",
   "--effective-at",
@@ -107,6 +109,7 @@ export type WorkspaceEntitlementConfiguration = Readonly<{
   maxAgents: number;
   maxActiveEnrollments: number;
   maxActiveSessionsPerAgent: number;
+  maxConcurrentRuns: number;
   maxMonthlyRuns: number;
   maxMonthlyCostUsd: string;
   effectiveAt: Date;
@@ -165,6 +168,7 @@ type EntitlementRow = {
   max_agents: number;
   max_active_enrollments: number;
   max_active_sessions_per_agent: number;
+  max_concurrent_runs: number;
   max_monthly_runs: number;
   max_monthly_cost_usd: string;
   effective_at: Date | string;
@@ -206,6 +210,7 @@ type CanonicalConfiguration = Readonly<{
   max_agents: number;
   max_active_enrollments: number;
   max_active_sessions_per_agent: number;
+  max_concurrent_runs: number;
   max_monthly_runs: number;
   max_monthly_cost_usd: string;
   effective_at: string;
@@ -413,6 +418,7 @@ function validateConfiguration(
       "max_active_sessions_per_agent",
       configuration.maxActiveSessionsPerAgent,
     ],
+    ["max_concurrent_runs", configuration.maxConcurrentRuns],
     ["max_monthly_runs", configuration.maxMonthlyRuns],
   ] as const;
   for (const [field, quota] of integerQuotas) {
@@ -560,22 +566,30 @@ function validateConfiguration(
       "Disabled session_issue requires a zero active-session quota.",
     );
   }
-  if (capabilities.run_start && configuration.maxMonthlyRuns === 0) {
+  if (
+    capabilities.run_start
+    && (
+      configuration.maxMonthlyRuns === 0
+      || configuration.maxConcurrentRuns === 0
+      || maxMonthlyCostUsd === "0.000000"
+    )
+  ) {
     throw administrationError(
       "run_capability_quota_invalid",
-      "run_start requires a positive monthly run quota.",
+      "run_start requires positive concurrent, monthly run, and monthly cost quotas.",
     );
   }
   if (
     !capabilities.run_start
     && (
       configuration.maxMonthlyRuns !== 0
+      || configuration.maxConcurrentRuns !== 0
       || maxMonthlyCostUsd !== "0.000000"
     )
   ) {
     throw administrationError(
       "disabled_run_quota_nonzero",
-      "Disabled run_start requires zero monthly run and cost quotas.",
+      "Disabled run_start requires zero concurrent, monthly run, and cost quotas.",
     );
   }
   return Object.freeze({
@@ -589,6 +603,7 @@ function validateConfiguration(
     maxAgents: configuration.maxAgents,
     maxActiveEnrollments: configuration.maxActiveEnrollments,
     maxActiveSessionsPerAgent: configuration.maxActiveSessionsPerAgent,
+    maxConcurrentRuns: configuration.maxConcurrentRuns,
     maxMonthlyRuns: configuration.maxMonthlyRuns,
     maxMonthlyCostUsd,
     effectiveAt: new Date(configuration.effectiveAt.getTime()),
@@ -703,6 +718,10 @@ export function parseWorkspaceEntitlementArguments(
         String(values.get("--max-active-sessions-per-agent") || ""),
         "max_active_sessions_per_agent",
       ),
+      maxConcurrentRuns: parseInteger(
+        String(values.get("--max-concurrent-runs") || ""),
+        "max_concurrent_runs",
+      ),
       maxMonthlyRuns: parseInteger(
         String(values.get("--max-monthly-runs") || ""),
         "max_monthly_runs",
@@ -755,6 +774,7 @@ function canonicalDesired(
     max_active_enrollments: configuration.maxActiveEnrollments,
     max_active_sessions_per_agent:
       configuration.maxActiveSessionsPerAgent,
+    max_concurrent_runs: configuration.maxConcurrentRuns,
     max_monthly_runs: configuration.maxMonthlyRuns,
     max_monthly_cost_usd: configuration.maxMonthlyCostUsd,
     effective_at: configuration.effectiveAt.toISOString(),
@@ -786,6 +806,7 @@ function canonicalStored(row: EntitlementRow): CanonicalConfiguration {
     max_active_enrollments: Number(row.max_active_enrollments),
     max_active_sessions_per_agent:
       Number(row.max_active_sessions_per_agent),
+    max_concurrent_runs: Number(row.max_concurrent_runs),
     max_monthly_runs: Number(row.max_monthly_runs),
     max_monthly_cost_usd: canonicalStoredCost(
       row.max_monthly_cost_usd,
@@ -942,7 +963,7 @@ async function readEntitlement(
   const result = await client.query<EntitlementRow>(
     `SELECT workspace_id,edition,status,capabilities_json,max_agents,
       max_active_enrollments,max_active_sessions_per_agent,max_monthly_runs,
-      max_monthly_cost_usd::text AS max_monthly_cost_usd,
+      max_monthly_cost_usd::text AS max_monthly_cost_usd,max_concurrent_runs,
       effective_at,expires_at,updated_by_user_id,
       to_char(
         updated_at AT TIME ZONE 'UTC',
@@ -966,11 +987,12 @@ async function insertEntitlement(
       `INSERT INTO workspace_entitlements(
         workspace_id,edition,status,capabilities_json,max_agents,
         max_active_enrollments,max_active_sessions_per_agent,max_monthly_runs,
-        max_monthly_cost_usd,effective_at,expires_at,created_at,updated_at,
+        max_monthly_cost_usd,max_concurrent_runs,effective_at,expires_at,created_at,updated_at,
         updated_by_user_id
       ) VALUES(
-        $1,$2,$3,$4::jsonb,$5,$6,$7,$8,$9::numeric,$10::timestamptz,
-        $11::timestamptz,clock_timestamp(),clock_timestamp(),$12
+        $1,$2,$3,$4::jsonb,$5,$6,$7,$8,$9::numeric,$10,
+        $11::timestamptz,$12::timestamptz,
+        clock_timestamp(),clock_timestamp(),$13
       )
       RETURNING to_char(
         updated_at AT TIME ZONE 'UTC',
@@ -986,6 +1008,7 @@ async function insertEntitlement(
         configuration.maxActiveSessionsPerAgent,
         configuration.maxMonthlyRuns,
         configuration.maxMonthlyCostUsd,
+        configuration.maxConcurrentRuns,
         configuration.effectiveAt.toISOString(),
         configuration.expiresAt?.toISOString() || null,
         request.operatorUserId,
@@ -1033,15 +1056,16 @@ async function updateEntitlement(
       max_active_sessions_per_agent=$7,
       max_monthly_runs=$8,
       max_monthly_cost_usd=$9::numeric,
-      effective_at=$10::timestamptz,
-      expires_at=$11::timestamptz,
+      max_concurrent_runs=$10,
+      effective_at=$11::timestamptz,
+      expires_at=$12::timestamptz,
       updated_at=GREATEST(
         clock_timestamp(),
         updated_at + interval '1 microsecond'
       ),
-      updated_by_user_id=$12
+      updated_by_user_id=$13
     WHERE workspace_id=$1
-      AND updated_at=$13::timestamptz
+      AND updated_at=$14::timestamptz
     RETURNING to_char(
       updated_at AT TIME ZONE 'UTC',
       'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'
@@ -1056,6 +1080,7 @@ async function updateEntitlement(
       configuration.maxActiveSessionsPerAgent,
       configuration.maxMonthlyRuns,
       configuration.maxMonthlyCostUsd,
+      configuration.maxConcurrentRuns,
       configuration.effectiveAt.toISOString(),
       configuration.expiresAt?.toISOString() || null,
       request.operatorUserId,

@@ -83,6 +83,7 @@ const REQUIRED_RELATIONS = Object.freeze([
   "human_memory_review_requests",
   "human_approval_decision_requests",
   "workspace_entitlements",
+  "run_cost_reservations",
   "idx_audit_logs_workspace_created",
   "idx_approvals_customer_delivery_run_unique",
   "idx_workspace_entitlements_updated_by_v9",
@@ -113,11 +114,20 @@ const REQUIRED_COLUMNS = Object.freeze([
   ["workspace_entitlements", "max_active_sessions_per_agent"],
   ["workspace_entitlements", "max_monthly_runs"],
   ["workspace_entitlements", "max_monthly_cost_usd"],
+  ["workspace_entitlements", "max_concurrent_runs"],
   ["workspace_entitlements", "effective_at"],
   ["workspace_entitlements", "expires_at"],
   ["workspace_entitlements", "created_at"],
   ["workspace_entitlements", "updated_at"],
   ["workspace_entitlements", "updated_by_user_id"],
+  ["runs", "billing_class"],
+  ["runs", "cost_usd"],
+  ["run_cost_reservations", "billing_class"],
+  ["run_cost_reservations", "billing_month_utc"],
+  ["run_cost_reservations", "estimated_cost_usd"],
+  ["run_cost_reservations", "observed_cost_usd"],
+  ["run_cost_reservations", "settled_cost_usd"],
+  ["run_cost_reservations", "state"],
 ] as const);
 
 const MIGRATION_ROOT = resolve(process.cwd(), "../../migrations/postgres");

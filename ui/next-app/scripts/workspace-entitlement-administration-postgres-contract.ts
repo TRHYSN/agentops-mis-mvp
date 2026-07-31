@@ -35,6 +35,7 @@ const OPERATOR_PASSWORD = `${randomBytes(24).toString("base64url")}Aa1!`;
 const ORIGIN = "https://entitlement.example.test";
 const LOGIN_APPLICATION_NAME =
   `agentops-entitlement-login-${randomBytes(4).toString("hex")}`;
+let contractStage = "initialize";
 
 type HumanSession = Readonly<{
   cookie: string;
@@ -50,6 +51,7 @@ type ArgumentOverrides = Readonly<{
   maxAgents?: string;
   maxActiveEnrollments?: string;
   maxActiveSessionsPerAgent?: string;
+  maxConcurrentRuns?: string;
   maxMonthlyRuns?: string;
   maxMonthlyCostUsd?: string;
   effectiveAt?: string;
@@ -94,6 +96,8 @@ function entitlementArguments(
     overrides.maxActiveEnrollments || "20",
     "--max-active-sessions-per-agent",
     overrides.maxActiveSessionsPerAgent || "5",
+    "--max-concurrent-runs",
+    overrides.maxConcurrentRuns || "4",
     "--max-monthly-runs",
     overrides.maxMonthlyRuns || "1000",
     "--max-monthly-cost-usd",
@@ -529,12 +533,14 @@ async function assertCreateUpdateAndReplay(
     max_agents: number;
     max_active_enrollments: number;
     max_active_sessions_per_agent: number;
+    max_concurrent_runs: number;
     max_monthly_runs: number;
     max_monthly_cost_usd: string;
     updated_by_user_id: string;
   }>(
     `SELECT edition,status,capabilities_json,max_agents,
-      max_active_enrollments,max_active_sessions_per_agent,max_monthly_runs,
+      max_active_enrollments,max_active_sessions_per_agent,max_concurrent_runs,
+      max_monthly_runs,
       max_monthly_cost_usd::text AS max_monthly_cost_usd,
       updated_by_user_id
     FROM workspace_entitlements WHERE workspace_id=$1`,
@@ -551,6 +557,7 @@ async function assertCreateUpdateAndReplay(
   assert.equal(createRow.max_agents, 10);
   assert.equal(createRow.max_active_enrollments, 20);
   assert.equal(createRow.max_active_sessions_per_agent, 5);
+  assert.equal(createRow.max_concurrent_runs, 4);
   assert.equal(createRow.max_monthly_runs, 1000);
   assert.equal(createRow.max_monthly_cost_usd, "5000.250000");
   assert.equal(createRow.updated_by_user_id, OPERATOR_ID);
@@ -906,6 +913,10 @@ function assertParserValidation() {
     "max_agents_invalid",
   );
   expectParserError(
+    replaceArgument(valid, "--max-concurrent-runs", "-1"),
+    "max_concurrent_runs_invalid",
+  );
+  expectParserError(
     replaceArgument(valid, "--max-monthly-cost-usd", "-1"),
     "max_monthly_cost_usd_invalid",
   );
@@ -916,6 +927,10 @@ function assertParserValidation() {
   expectParserError(
     replaceArgument(valid, "--max-monthly-cost-usd", "Infinity"),
     "max_monthly_cost_usd_invalid",
+  );
+  expectParserError(
+    replaceArgument(valid, "--max-monthly-cost-usd", "0"),
+    "run_capability_quota_invalid",
   );
   expectParserError(
     replaceArgument(
@@ -1024,6 +1039,10 @@ function assertParserValidation() {
     "required_argument_missing",
   );
   expectParserError(
+    removeArgument(valid, "--max-concurrent-runs"),
+    "required_argument_missing",
+  );
+  expectParserError(
     replaceArgument(valid, "--expires-at", "not-a-time"),
     "expires_at_invalid",
   );
@@ -1112,8 +1131,11 @@ async function run() {
   };
 
   try {
+    contractStage = "parser_validation";
     assertParserValidation();
+    contractStage = "static_boundary";
     await assertStaticBoundary();
+    contractStage = "postgres_bootstrap";
     await admin.connect();
     const version = await admin.query<{ server_version: string }>(
       "SHOW server_version",
@@ -1131,7 +1153,7 @@ async function run() {
       migration.applied_count,
       POSTGRES_MIGRATION_MANIFEST.length,
     );
-    assert.equal(POSTGRES_MIGRATION_MANIFEST.length, 10);
+    assert.equal(POSTGRES_MIGRATION_MANIFEST.length, 12);
     await runPostgresSchemaCommand("check", { connectionString });
     process.env.AGENTOPS_POSTGRES_DSN = connectionString;
     delete process.env.AGENTOPS_POSTGRES_DSN_FILE;
@@ -1150,19 +1172,26 @@ async function run() {
     });
     await fixture.connect();
     try {
+      contractStage = "plan_only_zero_write";
       await assertPlanOnlyZeroWrite(connectionString, fixture);
+      contractStage = "login_entitlement_lock_order";
       const humanSession = await assertLoginEntitlementLockOrder(
         connectionString,
         fixture,
       );
+      contractStage = "membership_workspace_lock_order";
       await assertMembershipBeforeWorkspaceLockOrder(
         connectionString,
         fixture,
         humanSession,
       );
+      contractStage = "create_update_replay";
       await assertCreateUpdateAndReplay(connectionString, fixture);
+      contractStage = "concurrent_single_winner";
       await assertConcurrentSingleWinner(connectionString, fixture);
+      contractStage = "operator_absent_guards";
       await assertOperatorAndAbsentGuards(connectionString, fixture);
+      contractStage = "direct_core_validation";
       await assertDirectCoreValidation(connectionString, fixture);
       assert.equal(externalNetworkCalls, 0);
     } finally {
@@ -1243,6 +1272,7 @@ run().catch((error: unknown) => {
       "agentops_workspace_entitlement_administration_postgres_contract_v1",
     ok: false,
     error_code: errorCode,
+    stage: contractStage,
     credentials_omitted: true,
     dsn_omitted: true,
     raw_config_omitted: true,

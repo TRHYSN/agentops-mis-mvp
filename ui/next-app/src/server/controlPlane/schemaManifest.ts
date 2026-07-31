@@ -10,8 +10,8 @@ export const SCHEMA_CONTRACT = "agentops_commercial_postgres_v10";
 
 export const EXPECTED_POSTGRES_SCHEMA_FINGERPRINT = Object.freeze({
   contract: "agentops_postgres_schema_fingerprint_v1",
-  sha256: "912d4c25130f4db974e7256efc6047cf1a8cebe09b473fb95f149f5bffa9a9d2",
-  objectCount: 745,
+  sha256: "913f37ffc650fce78b2d80a9ffa58c423b7f9183a5fe29ccf9766e9d09137143",
+  objectCount: 813,
 });
 
 export const POSTGRES_MIGRATION_MANIFEST = Object.freeze([
@@ -91,5 +91,12 @@ export const POSTGRES_MIGRATION_MANIFEST = Object.freeze([
     schemaContract: "workspace_membership_roles_v10",
     filename: "20260731_workspace_membership_roles_v10.sql",
     checksum: "7a187c43c27bcb9a660e060fc45b2ccc36d3db04f8ffc4fb31fd58615ba71486",
+  },
+  {
+    component: "run_cost_reservations",
+    version: "20260731.10.1",
+    schemaContract: "run_cost_reservations_v10",
+    filename: "20260731_cost_reservations_v10.sql",
+    checksum: "e0c090db9f361664e3cce44bf699753465014ddbbed2654885a30d120db2166e",
   },
 ] satisfies readonly MigrationDefinition[]);

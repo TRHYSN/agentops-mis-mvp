@@ -44,6 +44,7 @@ export AGENTOPS_BASE_URL="https://mis.example.com"
 export AGENTOPS_WORKSPACE_ID="workspace-id"
 export AGENTOPS_AGENT_ID="agent-id"
 export AGENTOPS_AGENT_TOKEN="<agent-token>"
+export AGENTOPS_RUN_ESTIMATED_COST_USD="1.000000"
 ```
 
 Run Hermes:
@@ -51,6 +52,7 @@ Run Hermes:
 ```bash
 npm run worker:commercial -- \
   --adapter hermes \
+  --estimated-cost-usd "$AGENTOPS_RUN_ESTIMATED_COST_USD" \
   --confirm-run
 ```
 
@@ -60,6 +62,7 @@ Run OpenClaw:
 export OPENCLAW_BIN="$(command -v openclaw)"
 npm run worker:commercial -- \
   --adapter openclaw \
+  --estimated-cost-usd "$AGENTOPS_RUN_ESTIMATED_COST_USD" \
   --confirm-run
 ```
 
@@ -80,6 +83,7 @@ The daemon uses the same one-task transaction repeatedly and stops cleanly on
 ```bash
 npm run worker:commercial -- \
   --adapter hermes \
+  --estimated-cost-usd "$AGENTOPS_RUN_ESTIMATED_COST_USD" \
   --confirm-run \
   --daemon \
   --poll-interval-ms 5000
@@ -88,6 +92,16 @@ npm run worker:commercial -- \
 `--max-tasks` can bound a maintenance or acceptance run. High or critical risk
 tasks require `--allow-high-risk`; external-write detection still remains
 PreparedAction-gated.
+
+The estimate is reserved transactionally against the workspace's concurrent,
+monthly-run, and monthly-cost limits. It must be positive, cannot be supplied
+as start-time `cost_usd`, and terminal heartbeat cost cannot exceed the
+reservation. Until an adapter supplies a trusted provider billing receipt, the
+Worker settles the approved estimate instead of reporting an unverified zero.
+The estimate is a trusted Worker-side worst-case bound, not an Agent Gateway
+token's provider-spend authority. Provider credentials remain inside the
+Worker/runtime boundary, and the Gateway rejects any observed or settled cost
+above the reservation.
 
 ## Evidence Semantics
 
@@ -113,7 +127,8 @@ source plus explicitly confirmed real Hermes and OpenClaw runs.
 ## Real Runtime Acceptance
 
 Run the frozen-source acceptance harness against an isolated PostgreSQL
-database and the production Next.js server:
+database and the production Next.js server. Its current receipt contract is
+`nextjs_postgres_real_worker_human_review_v4`:
 
 ```bash
 python3 scripts/nextjs_postgres_real_worker_human_review_smoke.py \
@@ -125,5 +140,7 @@ python3 scripts/nextjs_postgres_real_worker_human_review_smoke.py \
 
 The Python process is test orchestration only. A passing commercial receipt
 must report the TypeScript Worker started, the Python Worker and Python API did
-not start, a real provider call ran with `dry_run=false`, and the tracked source
-fingerprint remained unchanged for the full run.
+not start, a real provider call ran with `dry_run=false`, and `source_commit`
+matches the clean candidate `HEAD`. The harness rejects tracked or untracked
+worktree changes before execution and requires the tracked source fingerprint
+and Git identity to remain unchanged for the full run.

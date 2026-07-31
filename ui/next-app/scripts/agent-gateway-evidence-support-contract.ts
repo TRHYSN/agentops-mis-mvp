@@ -8,6 +8,7 @@ import { Client } from "pg";
 import {
   POSTGRES_MIGRATION_MANIFEST,
   runPostgresSchemaCommand,
+  SCHEMA_CONTRACT,
 } from "../src/server/controlPlane/schemaReadiness";
 
 const baseDsn = String(process.env.AGENTOPS_POSTGRES_DSN || "").trim();
@@ -108,19 +109,52 @@ async function seedFixture(client: Client) {
     ["b".repeat(64), now, "c".repeat(64)],
   );
   await client.query(
-    `INSERT INTO runs(
-      run_id,workspace_id,task_id,agent_id,runtime_type,status,started_at,
-      approval_required,agent_plan_id,plan_hash,created_at
+    `INSERT INTO workspace_entitlements(
+      workspace_id,edition,status,capabilities_json,max_agents,
+      max_active_enrollments,max_active_sessions_per_agent,max_monthly_runs,
+      max_monthly_cost_usd,max_concurrent_runs,effective_at,expires_at
     ) VALUES(
-      'run_evidence','ws_evidence','tsk_evidence','agt_evidence','hermes',
-      'running',$1,0,'plan_evidence',$2,$1
+      'ws_evidence','team_governance','active',
+      jsonb_build_object('run_start',true),10,10,10,100,100,10,
+      clock_timestamp()-interval '1 hour',
+      clock_timestamp()+interval '1 year'
     )`,
-    [now, "b".repeat(64)],
   );
-  await client.query(
-    `UPDATE agent_plans SET run_id='run_evidence'
-    WHERE plan_id='plan_evidence'`,
-  );
+  await client.query("BEGIN");
+  try {
+    await client.query(
+      `SELECT reservation_id
+      FROM agentops_reserve_run_cost_v10(
+        'ws_evidence','run_evidence',1.000000,$1,$2,interval '1 hour'
+      )`,
+      [
+        createHash("sha256")
+          .update("metered-reserve:ws_evidence:run_evidence")
+          .digest("hex"),
+        createHash("sha256")
+          .update("metered-request:ws_evidence:run_evidence")
+          .digest("hex"),
+      ],
+    );
+    await client.query(
+      `INSERT INTO runs(
+        run_id,workspace_id,task_id,agent_id,runtime_type,status,started_at,
+        approval_required,agent_plan_id,plan_hash,billing_class,created_at
+      ) VALUES(
+        'run_evidence','ws_evidence','tsk_evidence','agt_evidence','hermes',
+        'running',$1,0,'plan_evidence',$2,'metered_execution',$1
+      )`,
+      [now, "b".repeat(64)],
+    );
+    await client.query(
+      `UPDATE agent_plans SET run_id='run_evidence'
+      WHERE plan_id='plan_evidence'`,
+    );
+    await client.query("COMMIT");
+  } catch (error) {
+    await client.query("ROLLBACK").catch(() => undefined);
+    throw error;
+  }
   await client.query(
     `INSERT INTO agent_gateway_tokens(
       token_id,token_hash,workspace_id,agent_id,scopes_json,status,label,
@@ -163,9 +197,8 @@ async function runContract() {
       "migrate",
       { connectionString },
     );
-    assert.equal(migration.schema_contract, "agentops_commercial_postgres_v9");
+    assert.equal(migration.schema_contract, SCHEMA_CONTRACT);
     assert.equal(migration.applied_count, POSTGRES_MIGRATION_MANIFEST.length);
-    assert.equal(POSTGRES_MIGRATION_MANIFEST.length, 10);
 
     process.env.AGENTOPS_POSTGRES_DSN = connectionString;
     process.env.AGENTOPS_DEPLOYMENT_MODE = "production";

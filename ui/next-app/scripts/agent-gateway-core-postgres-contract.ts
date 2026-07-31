@@ -243,6 +243,7 @@ async function setRunEntitlement(
     status?: "active" | "inactive" | "suspended" | "expired";
     runStart?: boolean;
     maxMonthlyRuns?: number;
+    maxConcurrentRuns?: number;
   } = {},
 ) {
   const now = new Date().toISOString();
@@ -252,9 +253,9 @@ async function setRunEntitlement(
       workspace_id,edition,status,capabilities_json,max_agents,
       max_active_enrollments,max_active_sessions_per_agent,max_monthly_runs,
       max_monthly_cost_usd,effective_at,expires_at,created_at,updated_at,
-      updated_by_user_id
+      updated_by_user_id,max_concurrent_runs
     ) VALUES($1,'team_governance',$2,$3,10,10,10,$4,100,$5,NULL,$6,$6,
-      'usr_gateway_core')
+      'usr_gateway_core',$7)
     ON CONFLICT(workspace_id) DO UPDATE SET
       edition=EXCLUDED.edition,
       status=EXCLUDED.status,
@@ -264,6 +265,7 @@ async function setRunEntitlement(
       max_active_sessions_per_agent=EXCLUDED.max_active_sessions_per_agent,
       max_monthly_runs=EXCLUDED.max_monthly_runs,
       max_monthly_cost_usd=EXCLUDED.max_monthly_cost_usd,
+      max_concurrent_runs=EXCLUDED.max_concurrent_runs,
       effective_at=EXCLUDED.effective_at,
       expires_at=NULL,
       updated_at=EXCLUDED.updated_at,
@@ -279,6 +281,7 @@ async function setRunEntitlement(
       options.maxMonthlyRuns ?? 10,
       effectiveAt,
       now,
+      options.maxConcurrentRuns ?? 10,
     ],
   );
 }
@@ -359,6 +362,19 @@ async function seed(client: Client) {
       [taskId, workspaceId, title, now],
     );
   }
+  await client.query(
+    `INSERT INTO tasks(
+      task_id,workspace_id,title,description,requester_id,owner_agent_id,
+      collaborator_agent_ids,status,priority,due_date,acceptance_criteria,
+      risk_level,budget_limit_usd,created_at,updated_at
+    ) VALUES(
+      'tsk_gateway_entitlement_missing',$1,'Missing entitlement',
+      'Fail closed before creating a run.','usr_gateway_core',
+      'agt_gateway_core','[]','planned','high',NULL,
+      'Reject a run without a workspace entitlement.','medium',0,$2,$2
+    )`,
+    [otherWorkspaceId, now],
+  );
 }
 
 async function runContract() {
@@ -625,6 +641,7 @@ async function runContract() {
       agent_plan_id: "plan_gateway_core",
       plan_hash: planHash,
       runtime_type: "hermes",
+      estimated_cost_usd: "1.000000",
       input_summary: "Bounded contract execution.",
     };
     const runStart = await startAgentGatewayRun(
@@ -650,10 +667,10 @@ async function runContract() {
       assert.equal(usageBeforeReplay.rows[0]?.run_count, 1);
 
       await entitlementClient.query(
-        "DELETE FROM workspace_entitlements WHERE workspace_id=$1",
+        "UPDATE workspace_entitlements SET status='suspended' WHERE workspace_id=$1",
         [workspaceId],
       );
-      const replayWithoutEntitlement = await startAgentGatewayRun(
+      const replayWhileSuspended = await startAgentGatewayRun(
         request(
           "POST",
           "/api/mis/agent-gateway/runs/start",
@@ -661,8 +678,8 @@ async function runContract() {
           runBody,
         ),
       );
-      assertRunStartAllowed(replayWithoutEntitlement, 200);
-      assert.equal(replayWithoutEntitlement.body.outcome, "unchanged");
+      assertRunStartAllowed(replayWhileSuspended, 200);
+      assert.equal(replayWhileSuspended.body.outcome, "unchanged");
       const usageAfterReplay = await entitlementClient.query<{ run_count: number }>(
         "SELECT COUNT(*)::int AS run_count FROM runs WHERE workspace_id=$1",
         [workspaceId],
@@ -670,7 +687,6 @@ async function runContract() {
       assert.equal(usageAfterReplay.rows[0]?.run_count, 1);
 
       const deniedRunIds = [
-        "run_gateway_entitlement_missing",
         "run_gateway_entitlement_capability",
         "run_gateway_entitlement_suspended",
         "run_gateway_entitlement_quota",
@@ -679,11 +695,45 @@ async function runContract() {
         request(
           "POST",
           "/api/mis/agent-gateway/runs/start",
-          token,
-          { ...runBody, run_id: deniedRunIds[0] },
+          foreignToken,
+          {
+            workspace_id: otherWorkspaceId,
+            agent_id: "agt_gateway_core",
+            task_id: "tsk_gateway_entitlement_missing",
+            run_id: "run_gateway_entitlement_missing",
+            runtime_type: "mock",
+            estimated_cost_usd: "1.000000",
+          },
+          otherWorkspaceId,
         ),
       );
       assertEntitlementDenied(missingDenied, "entitlement_missing");
+      const missingAudit = await entitlementClient.query<{
+        action: string;
+        metadata_json: string;
+      }>(
+        `SELECT action,metadata_json
+        FROM audit_logs
+        WHERE workspace_id=$1
+          AND entity_id='run_gateway_entitlement_missing'
+          AND action='agent_gateway.run_start.entitlement_denied'`,
+        [otherWorkspaceId],
+      );
+      assert.equal(missingAudit.rowCount, 1);
+      assert.equal(
+        JSON.parse(missingAudit.rows[0]?.metadata_json || "{}").reason_code,
+        "entitlement_missing",
+      );
+      const missingWrites = await entitlementClient.query<{ count: number }>(
+        `SELECT (
+          (SELECT COUNT(*) FROM runs
+            WHERE workspace_id=$1 AND run_id='run_gateway_entitlement_missing')
+          + (SELECT COUNT(*) FROM run_cost_reservations
+            WHERE workspace_id=$1 AND run_id='run_gateway_entitlement_missing')
+        )::int AS count`,
+        [otherWorkspaceId],
+      );
+      assert.equal(missingWrites.rows[0]?.count, 0);
 
       await setRunEntitlement(entitlementClient, { runStart: false });
       const capabilityDenied = await startAgentGatewayRun(
@@ -691,7 +741,7 @@ async function runContract() {
           "POST",
           "/api/mis/agent-gateway/runs/start",
           token,
-          { ...runBody, run_id: deniedRunIds[1] },
+          { ...runBody, run_id: deniedRunIds[0] },
         ),
       );
       assertEntitlementDenied(capabilityDenied, "capability_disabled");
@@ -702,7 +752,7 @@ async function runContract() {
           "POST",
           "/api/mis/agent-gateway/runs/start",
           token,
-          { ...runBody, run_id: deniedRunIds[2] },
+          { ...runBody, run_id: deniedRunIds[1] },
         ),
       );
       assertEntitlementDenied(suspendedDenied, "entitlement_suspended");
@@ -713,7 +763,7 @@ async function runContract() {
           "POST",
           "/api/mis/agent-gateway/runs/start",
           token,
-          { ...runBody, run_id: deniedRunIds[3] },
+          { ...runBody, run_id: deniedRunIds[2] },
         ),
       );
       assertEntitlementDenied(quotaDenied, "monthly_run_quota_exceeded");
@@ -739,10 +789,9 @@ async function runContract() {
       );
       assert.equal(denialAudits.rowCount, deniedRunIds.length);
       const expectedReasons = new Map([
-        [deniedRunIds[0], "entitlement_missing"],
-        [deniedRunIds[1], "capability_disabled"],
-        [deniedRunIds[2], "entitlement_suspended"],
-        [deniedRunIds[3], "monthly_run_quota_exceeded"],
+        [deniedRunIds[0], "capability_disabled"],
+        [deniedRunIds[1], "entitlement_suspended"],
+        [deniedRunIds[2], "monthly_run_quota_exceeded"],
       ]);
       for (const audit of denialAudits.rows) {
         assert.equal(audit.actor_type, "agent");
@@ -790,6 +839,7 @@ async function runContract() {
             task_id: "tsk_gateway_lock_order",
             run_id: "run_gateway_lock_order",
             runtime_type: "mock",
+            estimated_cost_usd: "1.000000",
             input_summary: "Exercise business-row-before-audit lock order.",
           },
         ),

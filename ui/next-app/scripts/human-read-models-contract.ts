@@ -55,6 +55,55 @@ function sha(value: string) {
   return createHash("sha256").update(value, "utf8").digest("hex");
 }
 
+async function reserveHistoricalRunCost(
+  client: Client,
+  workspaceId: string,
+  runId: string,
+  estimatedCostUsd: string,
+  createdAt: string,
+) {
+  await client.query(
+    `INSERT INTO run_cost_reservations(
+      reservation_id,workspace_id,run_id,billing_class,billing_month_utc,
+      state,estimated_cost_usd,observed_cost_usd,idempotency_key_hash,
+      request_hash,reserved_at,expires_at,updated_at
+    ) VALUES(
+      $1,$2,$3,'historical_execution',
+      date_trunc('month',$6::timestamptz)::date,'reserved',$4::numeric,0,
+      $5,$7,$6::timestamptz,$6::timestamptz+interval '1 hour',
+      $6::timestamptz
+    )`,
+    [
+      `rsv_${runId}`,
+      workspaceId,
+      runId,
+      estimatedCostUsd,
+      sha(`historical-reserve:${workspaceId}:${runId}`),
+      createdAt,
+      sha(`historical-request:${workspaceId}:${runId}`),
+    ],
+  );
+}
+
+async function settleHistoricalRunCost(
+  client: Client,
+  workspaceId: string,
+  runId: string,
+  actualCostUsd: string,
+) {
+  await client.query(
+    `SELECT reservation_id
+    FROM agentops_settle_run_cost_v10($1,$2,$3::numeric,$4,$5)`,
+    [
+      workspaceId,
+      runId,
+      actualCostUsd,
+      sha(`historical-settle:${workspaceId}:${runId}`),
+      sha(`historical-settle-request:${workspaceId}:${runId}`),
+    ],
+  );
+}
+
 function browserRequest(
   path: string,
   options: {
@@ -168,21 +217,36 @@ async function seed(client: Client) {
       FOREIGN_AGENT,
     ],
   );
+  await reserveHistoricalRunCost(
+    client,
+    WORKSPACE,
+    LOCAL_RUN,
+    "0.250000",
+    now,
+  );
+  await reserveHistoricalRunCost(
+    client,
+    FOREIGN_WORKSPACE,
+    FOREIGN_RUN,
+    "9.750000",
+    now,
+  );
   await client.query(
     `INSERT INTO runs(
       run_id,workspace_id,task_id,agent_id,runtime_type,status,started_at,
       ended_at,duration_ms,input_summary,output_summary,model_provider,
       model_name,input_tokens,output_tokens,reasoning_tokens,cost_usd,
       error_type,error_message,trace_id,parent_run_id,delegation_id,
-      approval_required,agent_plan_id,plan_hash,created_at
+      approval_required,agent_plan_id,plan_hash,billing_class,created_at
     ) VALUES
       ($1,$2,$3,$4,'hermes','completed',$7,$7,1200,
         'bounded input','bounded output','hermes','commercial-hermes',
-        10,12,2,0.25,NULL,NULL,'trace_human_reads',NULL,NULL,0,NULL,NULL,$7),
+        10,12,2,0.25,NULL,NULL,'trace_human_reads',NULL,NULL,0,NULL,NULL,
+        'historical_execution',$7),
       ($5,$6,$8,$9,'openclaw','failed',$7,$7,900,
         $10,$10,'openclaw','foreign-openclaw',
         8,4,1,9.75,'foreign_error',$10,'trace_human_reads_foreign',
-        NULL,NULL,1,NULL,NULL,$7)`,
+        NULL,NULL,1,NULL,NULL,'historical_execution',$7)`,
     [
       LOCAL_RUN,
       WORKSPACE,
@@ -195,6 +259,18 @@ async function seed(client: Client) {
       FOREIGN_AGENT,
       FOREIGN_CANARY,
     ],
+  );
+  await settleHistoricalRunCost(
+    client,
+    WORKSPACE,
+    LOCAL_RUN,
+    "0.250000",
+  );
+  await settleHistoricalRunCost(
+    client,
+    FOREIGN_WORKSPACE,
+    FOREIGN_RUN,
+    "9.750000",
   );
   await client.query(
     `INSERT INTO tool_calls(

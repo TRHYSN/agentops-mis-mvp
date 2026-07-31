@@ -11,13 +11,13 @@ import datetime as dt
 import hashlib
 import json
 import os
+import re
 import secrets
 import signal
 import shutil
 import socket
 import stat
 import subprocess
-import sys
 import time
 import traceback
 import urllib.error
@@ -29,13 +29,13 @@ from typing import Any
 
 DEFAULT_SOURCE_ROOT = Path(__file__).resolve().parents[1]
 ROOT = DEFAULT_SOURCE_ROOT
-SCRIPTS = ROOT / "scripts"
 NEXT_APP = ROOT / "ui" / "next-app"
-CONTRACT_ID = "nextjs_postgres_real_worker_human_review_v3"
+CONTRACT_ID = "nextjs_postgres_real_worker_human_review_v4"
 WORKSPACE_ID = "ws_real_worker_human_review"
 OTHER_WORKSPACE_ID = "ws_real_worker_human_review_other"
 REQUESTER_ID = "usr_founder"
 OWNER_USERNAME = "real-worker-owner"
+RUN_ESTIMATED_COST_USD = "1.000000"
 SCOPES = [
     "agents:write",
     "agents:heartbeat",
@@ -260,16 +260,51 @@ def tracked_worktree_fingerprint(source_root: Path) -> str:
     return digest.hexdigest()
 
 
+def git_source_state(source_root: Path) -> tuple[str, bool]:
+    git = shutil.which("git")
+    if not git:
+        raise RuntimeError("git_binary_unavailable")
+    commit = subprocess.run(
+        [git, "-C", str(source_root), "rev-parse", "--verify", "HEAD^{commit}"],
+        text=True,
+        capture_output=True,
+        timeout=30,
+        check=False,
+    )
+    source_commit = commit.stdout.strip().lower()
+    if commit.returncode != 0 or not re.fullmatch(r"[a-f0-9]{40}", source_commit):
+        raise RuntimeError("source_commit_unavailable")
+    status = subprocess.run(
+        [
+            git,
+            "-C",
+            str(source_root),
+            "status",
+            "--porcelain=v1",
+            "--untracked-files=all",
+            "-z",
+        ],
+        text=False,
+        capture_output=True,
+        timeout=30,
+        check=False,
+    )
+    if status.returncode != 0:
+        raise RuntimeError("source_worktree_status_unavailable")
+    return source_commit, status.stdout == b""
+
+
 def resolve_source_root(value: str) -> Path:
     try:
         source_root = Path(value).expanduser().resolve(strict=True)
     except OSError as exc:
         raise RuntimeError("source_root_unavailable") from exc
     required = [
-        source_root / "scripts" / "agent_worker.py",
         source_root / "migrations" / "postgres" / "20260724_current_main_commercial_baseline.sql",
+        source_root / "migrations" / "postgres" / "20260731_cost_reservations_v10.sql",
         source_root / "ui" / "next-app" / "scripts" / "bootstrap-owner.ts",
         source_root / "ui" / "next-app" / "scripts" / "commercial-worker.ts",
+        source_root / "ui" / "next-app" / "src" / "server" / "controlPlane" / "runCostReservations.ts",
         source_root / "ui" / "next-app" / "package.json",
     ]
     if not source_root.is_dir() or not all(path.is_file() for path in required):
@@ -444,9 +479,10 @@ def seed_foundation(adapter: NodePgAdapter) -> None:
         """INSERT INTO workspace_entitlements(
             workspace_id,edition,status,capabilities_json,max_agents,
             max_active_enrollments,max_active_sessions_per_agent,max_monthly_runs,
-            max_monthly_cost_usd,effective_at,expires_at,created_at,updated_at,
+            max_monthly_cost_usd,max_concurrent_runs,effective_at,expires_at,
+            created_at,updated_at,
             updated_by_user_id
-        ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+        ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (
             WORKSPACE_ID,
             "enterprise_byoc",
@@ -461,6 +497,7 @@ def seed_foundation(adapter: NodePgAdapter) -> None:
             10,
             1000,
             1000,
+            10,
             (now_value - dt.timedelta(minutes=1)).isoformat(),
             (now_value + dt.timedelta(hours=8)).isoformat(),
             now,
@@ -552,91 +589,58 @@ def run_worker(
     worker_implementation: str,
     node: str,
 ) -> dict[str, Any]:
+    if worker_implementation != "typescript":
+        raise RuntimeError("commercial_worker_implementation_must_be_typescript")
     agent_id = f"agt_real_{runtime}_review"
-    if worker_implementation == "typescript":
-        command = [
-            node,
-            str(NEXT_APP / "node_modules" / "tsx" / "dist" / "cli.mjs"),
-            str(NEXT_APP / "scripts" / "commercial-worker.ts"),
-            "--base-url",
-            base_url,
-            "--workspace-id",
-            WORKSPACE_ID,
-            "--agent-id",
-            agent_id,
-            "--task-id",
-            f"tsk_real_{runtime}_review",
-            "--adapter",
-            runtime,
-            "--once",
-            "--confirm-run",
-            "--allow-insecure-loopback",
-            "--max-adapter-attempts",
-            "1",
-        ]
-        if runtime == "hermes":
-            command.extend([
-                "--hermes-gateway-url",
-                hermes_url,
-                "--hermes-model",
-                "hermes-agent",
-                "--hermes-timeout-ms",
-                "180000",
-            ])
-        else:
-            command.extend([
-                "--openclaw-bin",
-                openclaw_bin,
-                "--openclaw-agent",
-                "main",
-                "--openclaw-timeout-seconds",
-                "180",
-                "--working-directory",
-                str(ROOT),
-            ])
+    command = [
+        node,
+        str(NEXT_APP / "node_modules" / "tsx" / "dist" / "cli.mjs"),
+        str(NEXT_APP / "scripts" / "commercial-worker.ts"),
+        "--base-url",
+        base_url,
+        "--workspace-id",
+        WORKSPACE_ID,
+        "--agent-id",
+        agent_id,
+        "--task-id",
+        f"tsk_real_{runtime}_review",
+        "--adapter",
+        runtime,
+        "--once",
+        "--confirm-run",
+        "--allow-insecure-loopback",
+        "--estimated-cost-usd",
+        RUN_ESTIMATED_COST_USD,
+        "--max-adapter-attempts",
+        "1",
+    ]
+    if runtime == "hermes":
+        command.extend([
+            "--hermes-gateway-url",
+            hermes_url,
+            "--hermes-model",
+            "hermes-agent",
+            "--hermes-timeout-ms",
+            "180000",
+        ])
     else:
-        command = [
-            sys.executable,
-            str(SCRIPTS / "agent_worker.py"),
-            "--base-url",
-            base_url,
-            "--workspace-id",
-            WORKSPACE_ID,
-            "--agent-id",
-            agent_id,
-            "--adapter",
-            runtime,
-            "--once",
-            "--confirm-run",
-            "--request-customer-delivery-approval",
-            "--adapter-max-attempts",
-            "1",
-        ]
-        if runtime == "hermes":
-            command.extend([
-                "--hermes-gateway-url",
-                hermes_url,
-                "--hermes-model",
-                "hermes-agent",
-                "--hermes-timeout",
-                "180",
-            ])
-        else:
-            command.extend([
-                "--openclaw-bin",
-                openclaw_bin,
-                "--openclaw-agent",
-                "main",
-                "--openclaw-timeout",
-                "180",
-            ])
+        command.extend([
+            "--openclaw-bin",
+            openclaw_bin,
+            "--openclaw-agent",
+            "main",
+            "--openclaw-timeout-seconds",
+            "180",
+            "--working-directory",
+            str(ROOT),
+        ])
     env = os.environ.copy()
     env["AGENTOPS_API_KEY"] = token
     env["AGENTOPS_AGENT_TOKEN"] = token
     env["NODE_ENV"] = "production"
     completed = subprocess.run(
         command,
-        cwd=NEXT_APP if worker_implementation == "typescript" else ROOT,
+        cwd=NEXT_APP,
         env=env,
         text=True,
         capture_output=True,
@@ -671,7 +675,7 @@ def run_worker(
         last_error = state.get("last_error") if isinstance(state, dict) else None
         results = payload.get("results") if isinstance(payload, dict) else None
         first_result = results[0] if isinstance(results, list) and results else None
-        direct_result = payload if worker_implementation == "typescript" else None
+        direct_result = payload
         safe_last_result = {
             key: (last_result or direct_result).get(key)
             for key in (
@@ -739,6 +743,13 @@ def check_runtime_evidence(
     ):
         raise RuntimeError(f"{runtime} Worker did not return a verified run/plan-evidence receipt")
     run = adapter.fetchone("SELECT run_id,status,runtime_type FROM runs WHERE run_id=?", (run_id,))
+    cost_reservation = adapter.fetchone(
+        """SELECT state,estimated_cost_usd::text AS estimated_cost_usd,
+        observed_cost_usd::text AS observed_cost_usd,
+        settled_cost_usd::text AS settled_cost_usd
+        FROM run_cost_reservations WHERE workspace_id=? AND run_id=?""",
+        (WORKSPACE_ID, run_id),
+    )
     tool = adapter.fetchone(
         """SELECT tool_name,status,target_resource,normalized_args_json,result_summary
         FROM tool_calls WHERE run_id=? AND agent_id=?""",
@@ -783,6 +794,16 @@ def check_runtime_evidence(
     expected_target = "/v1/chat/completions" if runtime == "hermes" else "local://openclaw/main"
     if not run or run["status"] != "completed" or run["runtime_type"] != runtime:
         raise RuntimeError(f"{runtime} run ledger did not close as completed")
+    if not (
+        cost_reservation
+        and cost_reservation["state"] == "settled"
+        and cost_reservation["estimated_cost_usd"] == RUN_ESTIMATED_COST_USD
+        and cost_reservation["observed_cost_usd"] == RUN_ESTIMATED_COST_USD
+        and cost_reservation["settled_cost_usd"] == RUN_ESTIMATED_COST_USD
+    ):
+        raise RuntimeError(
+            f"{runtime} run cost reservation did not settle the approved estimate"
+        )
     if not tool or tool["status"] != "completed" or expected_target not in str(tool["target_resource"]):
         raise RuntimeError(f"{runtime} tool evidence does not prove the real adapter target")
     try:
@@ -835,6 +856,7 @@ def check_runtime_evidence(
     evidence_text = json.dumps(
         {
             "tool": tool,
+            "cost_reservation": cost_reservation,
             "memory": memory,
             "approval": approval,
             "audit": worker_audit,
@@ -851,6 +873,8 @@ def check_runtime_evidence(
         "memory_id": str(memory["memory_id"]),
         "manifest_id": str(manifest["manifest_id"]),
         "approval_id": str(approval["approval_id"]),
+        "cost_reservation_state": str(cost_reservation["state"]),
+        "cost_reservation_settled": True,
         "source_type": str(memory["source_type"]),
         "provider_call_performed": True,
         "dry_run": False,
@@ -1762,16 +1786,16 @@ def verify_manifest_authority_guards(
 
 
 def main() -> int:
-    global ROOT, SCRIPTS, NEXT_APP
+    global ROOT, NEXT_APP
 
     parser = argparse.ArgumentParser(description="Run real Hermes/OpenClaw Worker -> Human Review through Next/Postgres only.")
     parser.add_argument("--postgres-dsn", required=True, help="External Postgres URL; the smoke uses and drops an isolated schema.")
     parser.add_argument("--adapter", action="append", choices=["hermes", "openclaw"], default=[])
     parser.add_argument(
         "--worker-implementation",
-        choices=["typescript", "python"],
+        choices=["typescript"],
         default="typescript",
-        help="Provider-executing Worker implementation; commercial acceptance defaults to TypeScript.",
+        help="Commercial provider execution is owned exclusively by the TypeScript Worker.",
     )
     parser.add_argument("--hermes-gateway-url", default=os.environ.get("HERMES_GATEWAY_URL", "http://127.0.0.1:8642"))
     parser.add_argument("--openclaw-bin", default=os.environ.get("OPENCLAW_BIN", shutil.which("openclaw") or "/opt/homebrew/bin/openclaw"))
@@ -1797,7 +1821,6 @@ def main() -> int:
             "credentials_omitted": True,
         }, [])
         return 1
-    SCRIPTS = ROOT / "scripts"
     NEXT_APP = ROOT / "ui" / "next-app"
 
     adapters = list(dict.fromkeys(args.adapter or ["hermes", "openclaw"]))
@@ -1825,7 +1848,12 @@ def main() -> int:
     tracked_before = ""
     tracked_after_build = ""
     next_artifact_sha256 = ""
+    source_commit = ""
+    tracked_worktree_clean = False
     try:
+        source_commit, tracked_worktree_clean = git_source_state(ROOT)
+        if not tracked_worktree_clean:
+            raise RuntimeError("candidate_source_worktree_not_clean")
         tracked_before = tracked_worktree_fingerprint(ROOT)
         built = run_next_build(npm)
         tracked_after_build = tracked_worktree_fingerprint(ROOT)
@@ -1846,16 +1874,37 @@ def main() -> int:
                 "acceptance_preparation_modified_tracked_source:"
                 f"before={tracked_before}:after={tracked_after_prepare}"
             )
+        source_commit_after_build, clean_after_build = git_source_state(ROOT)
+        if source_commit_after_build != source_commit or not clean_after_build:
+            raise RuntimeError("candidate_source_identity_changed_during_build")
     except Exception as exc:
         original_traceback = traceback.format_exc()
+        source_commit_after_failure = ""
+        clean_after_failure = False
         try:
             tracked_after_failure = tracked_worktree_fingerprint(ROOT) if tracked_before else ""
         except Exception:
             tracked_after_failure = ""
+        try:
+            source_commit_after_failure, clean_after_failure = git_source_state(
+                ROOT
+            )
+        except Exception:
+            pass
+        source_identity_changed = (
+            not source_commit_after_failure
+            or source_commit_after_failure != source_commit
+            or (tracked_worktree_clean and not clean_after_failure)
+        )
         mutation_detected = (
-            not tracked_before
-            or not tracked_after_failure
-            or tracked_after_failure != tracked_before
+            source_identity_changed
+            or (
+                bool(tracked_before)
+                and (
+                    not tracked_after_failure
+                    or tracked_after_failure != tracked_before
+                )
+            )
         )
         result({
             "ok": False,
@@ -1870,10 +1919,12 @@ def main() -> int:
             "next_runtime_mode": "production_start",
             "next_artifact_sha256": next_artifact_sha256 or None,
             "next_build_completed": bool(next_artifact_sha256),
+            "source_commit": source_commit or None,
+            "tracked_worktree_clean": clean_after_failure,
             "tracked_worktree_fingerprint_before": tracked_before or None,
             "tracked_worktree_fingerprint_after_build": tracked_after_build or None,
             "tracked_worktree_fingerprint_after_acceptance": tracked_after_failure or None,
-            "tracked_worktree_unchanged": not mutation_detected,
+            "tracked_worktree_unchanged": bool(tracked_before) and not mutation_detected,
             "python_api_started": False,
             "worker_implementation": args.worker_implementation,
             "python_worker_started": False,
@@ -2039,6 +2090,16 @@ def main() -> int:
                 "acceptance_modified_tracked_source:"
                 f"before={tracked_before}:after={tracked_after_acceptance}"
             )
+        source_commit_after_acceptance, clean_after_acceptance = git_source_state(
+            ROOT
+        )
+        if (
+            source_commit_after_acceptance != source_commit
+            or not clean_after_acceptance
+        ):
+            raise RuntimeError(
+                "candidate_source_identity_changed_during_acceptance"
+            )
         result({
             "ok": True,
             "contract": CONTRACT_ID,
@@ -2049,6 +2110,8 @@ def main() -> int:
             "human_session_public_origin_scheme": "https",
             "next_artifact_sha256": next_artifact_sha256,
             "next_build_completed": True,
+            "source_commit": source_commit,
+            "tracked_worktree_clean": True,
             "tracked_worktree_fingerprint_before": tracked_before,
             "tracked_worktree_fingerprint_after_build": tracked_after_build,
             "tracked_worktree_fingerprint_after_acceptance": tracked_after_acceptance,
@@ -2060,10 +2123,7 @@ def main() -> int:
                 worker_process_started
                 and args.worker_implementation == "typescript"
             ),
-            "python_worker_started": (
-                worker_process_started
-                and args.worker_implementation == "python"
-            ),
+            "python_worker_started": False,
             "real_runtime_execution_performed": all(
                 receipt.get("provider_call_performed") is True and receipt.get("dry_run") is False
                 for receipt in worker_receipts.values()
@@ -2084,6 +2144,10 @@ def main() -> int:
                 receipt.get("delivery_approval_request_outcome") == "created"
                 for receipt in worker_receipts.values()
             ),
+            "run_cost_reservations_settled": all(
+                receipt.get("cost_reservation_settled") is True
+                for receipt in worker_receipts.values()
+            ),
             "delivery_approval_creation_source": "production_next_typescript_postgres_agent_gateway_route",
             "agent_gateway_legacy_path_rewrite_verified": True,
             "raw_prompt_response_omitted": True,
@@ -2097,14 +2161,26 @@ def main() -> int:
             stop_process(next_proc)
             next_proc = None
         fingerprint_error = ""
+        source_state_error = ""
+        source_commit_after_failure = ""
+        clean_after_failure = False
         try:
             tracked_after_acceptance = tracked_worktree_fingerprint(ROOT)
         except Exception as fingerprint_exc:
             tracked_after_acceptance = ""
             fingerprint_error = str(fingerprint_exc)
+        try:
+            source_commit_after_failure, clean_after_failure = git_source_state(
+                ROOT
+            )
+        except Exception as source_state_exc:
+            source_state_error = str(source_state_exc)
         mutation_detected = (
             not tracked_after_acceptance
             or tracked_after_acceptance != tracked_before
+            or not source_commit_after_failure
+            or source_commit_after_failure != source_commit
+            or not clean_after_failure
         )
         result({
             "ok": False,
@@ -2117,10 +2193,13 @@ def main() -> int:
             ),
             "underlying_error_type": exc.__class__.__name__ if mutation_detected else None,
             "fingerprint_error": redact(fingerprint_error, sensitive) if fingerprint_error else None,
+            "source_state_error": redact(source_state_error, sensitive) if source_state_error else None,
             "traceback": redact(original_traceback, sensitive)[-4000:],
             "next_runtime_mode": "production_start",
             "next_artifact_sha256": next_artifact_sha256,
             "next_build_completed": True,
+            "source_commit": source_commit or None,
+            "tracked_worktree_clean": clean_after_failure,
             "tracked_worktree_fingerprint_before": tracked_before,
             "tracked_worktree_fingerprint_after_build": tracked_after_build,
             "tracked_worktree_fingerprint_after_acceptance": tracked_after_acceptance or None,
@@ -2131,10 +2210,7 @@ def main() -> int:
                 worker_process_started
                 and args.worker_implementation == "typescript"
             ),
-            "python_worker_started": (
-                worker_process_started
-                and args.worker_implementation == "python"
-            ),
+            "python_worker_started": False,
             "real_runtime_execution_performed": bool(worker_receipts) and all(
                 receipt.get("provider_call_performed") is True and receipt.get("dry_run") is False
                 for receipt in worker_receipts.values()

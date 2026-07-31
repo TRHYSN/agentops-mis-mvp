@@ -363,6 +363,21 @@ async function seedIdentity(
       [agentId, name, USER_ID, now.toISOString()],
     );
   }
+  await client.query(
+    `INSERT INTO workspace_entitlements(
+      workspace_id,edition,status,capabilities_json,max_agents,
+      max_active_enrollments,max_active_sessions_per_agent,max_monthly_runs,
+      max_monthly_cost_usd,effective_at,expires_at,max_concurrent_runs
+    ) VALUES(
+      $1,'enterprise_byoc','active',jsonb_build_object('run_start',true),
+      20,20,5,100,1000::numeric,$2,$3,20
+    )`,
+    [
+      WORKSPACE_ID,
+      new Date(now.getTime() - 60_000).toISOString(),
+      new Date(now.getTime() + 3_600_000).toISOString(),
+    ],
+  );
   for (const [tokenId, supplied, agentId] of [
     ["tok_prepared_action_contract", token, AGENT_ID],
     ["tok_prepared_action_other", otherToken, OTHER_AGENT_ID],
@@ -551,6 +566,18 @@ async function seedPreparedAction(
         USER_ID,
         decidedAt,
         createdAt,
+      ],
+    );
+    await client.query(
+      `SELECT reservation_id
+      FROM agentops_reserve_run_cost_v10(
+        $1,$2,5.000000::numeric,$3,$4,interval '1 hour'
+      )`,
+      [
+        WORKSPACE_ID,
+        runId,
+        sha(`prepared-reservation:${runId}`),
+        sha(`prepared-reservation-request:${runId}`),
       ],
     );
     await client.query(
@@ -1188,7 +1215,7 @@ async function main() {
     );
 
     await scopedAdmin.query(
-      "UPDATE runs SET status='blocked' WHERE run_id=$1",
+      "UPDATE runs SET status='running' WHERE run_id=$1",
       [claimRunStateDrift.runId],
     );
     await expectCode("prepared_action_parent_state_invalid", () =>

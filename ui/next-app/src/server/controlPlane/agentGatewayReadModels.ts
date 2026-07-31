@@ -24,7 +24,7 @@ type RunRow = {
   input_tokens: number | null;
   output_tokens: number | null;
   reasoning_tokens: number | null;
-  cost_usd: number | null;
+  cost_usd: number | string | null;
   error_type: string | null;
   error_message: string | null;
   trace_id: string | null;
