@@ -119,11 +119,12 @@ required for every persistent live-adapter definition.
 Preview the Task Scheduler definition:
 
 ```powershell
-agentops-worker service-install `
-  --manager windows-task `
-  --adapter mock `
+agentops `
   --base-url "https://your-private-host.example" `
   --workspace-id "local-demo" `
+  worker service-install `
+  --manager windows-task `
+  --adapter mock `
   --agent-id "agt_windows_worker" `
   --credential-source local_config
 ```
@@ -131,11 +132,12 @@ agentops-worker service-install `
 Write the credential-free XML after review:
 
 ```powershell
-agentops-worker service-install `
-  --manager windows-task `
-  --adapter mock `
+agentops `
   --base-url "https://your-private-host.example" `
   --workspace-id "local-demo" `
+  worker service-install `
+  --manager windows-task `
+  --adapter mock `
   --agent-id "agt_windows_worker" `
   --credential-source local_config `
   --confirm-install
@@ -144,12 +146,13 @@ agentops-worker service-install `
 Register and start it explicitly:
 
 ```powershell
-agentops-worker service-control `
+agentops `
+  --base-url "https://your-private-host.example" `
+  --workspace-id "local-demo" `
+  worker service-control `
   --manager windows-task `
   --action load `
   --adapter mock `
-  --base-url "https://your-private-host.example" `
-  --workspace-id "local-demo" `
   --agent-id "agt_windows_worker" `
   --credential-source local_config `
   --confirm-control
@@ -162,8 +165,8 @@ short-lived Worker Session; the enrollment token is not copied into XML.
 Inspect or remove it:
 
 ```powershell
-agentops-worker service-check --manager windows-task --adapter mock --base-url "https://your-private-host.example" --workspace-id "local-demo" --agent-id "agt_windows_worker"
-agentops-worker service-control --manager windows-task --action unload --adapter mock --base-url "https://your-private-host.example" --workspace-id "local-demo" --agent-id "agt_windows_worker" --confirm-control
+agentops --base-url "https://your-private-host.example" --workspace-id "local-demo" worker service-check --manager windows-task --adapter mock --agent-id "agt_windows_worker"
+agentops --base-url "https://your-private-host.example" --workspace-id "local-demo" worker service-control --manager windows-task --action unload --adapter mock --agent-id "agt_windows_worker" --confirm-control
 ```
 
 ## Uninstall
@@ -172,8 +175,9 @@ agentops-worker service-control --manager windows-task --action unload --adapter
 .\packaging\windows\uninstall.ps1
 ```
 
-Unload every registered `local.agentops.worker.*` task before uninstalling the
-CLI. The uninstaller fails closed while a managed scheduled Worker remains.
+Unload every registered `local.agentops.worker.*` task with `agentops worker
+service-control` before uninstalling the CLI. The uninstaller fails closed
+while a managed scheduled Worker remains.
 
 The default uninstall removes only managed CLI files and preserves config,
 Worker state, logs, and service templates. Purging data requires both

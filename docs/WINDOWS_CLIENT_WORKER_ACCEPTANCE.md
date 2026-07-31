@@ -64,9 +64,10 @@ OS gate. On `windows-2022` it must:
 
 Windows OS acceptance evidence:
 
-- Commit: `d581df80800b748e61ed466cef0dec76b56d910b`
-- Workflow run: [Windows CLI and Worker Acceptance #30657683941](https://github.com/geogejoy107-jpg/agentops-mis-mvp/actions/runs/30657683941)
+- Commit: `48530f26fefb1531e86cb6713329cc05211a2013`
+- Workflow run: [Windows CLI and Worker Acceptance #30658614146](https://github.com/geogejoy107-jpg/agentops-mis-mvp/actions/runs/30658614146)
 - Result: passed on `windows-2022`, including the installed CLI/Worker flow,
+  both `agentops` and `agentops-worker` service-management entry points, the
   real Task Scheduler lifecycle, atomic ACL failure checks, and the complete
   PowerShell install/reinstall/uninstall lifecycle.
 
