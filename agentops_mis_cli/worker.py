@@ -4288,6 +4288,15 @@ def control_service(args) -> dict:
             for command in planned:
                 result = execute_service_command(command, args.timeout)
                 command_results.append(result)
+                if (
+                    args.manager == "windows-task"
+                    and len(command) > 1
+                    and command[1].lower() == "/end"
+                    and result.get("ok")
+                ):
+                    # schtasks /End can return before the worker releases its
+                    # executable and working-directory handles.
+                    time.sleep(min(2.0, max(0.25, float(args.timeout) / 10.0)))
                 tolerable_first_stop = bool(
                     len(command_results) == 1
                     and (

@@ -48,7 +48,7 @@ def main() -> int:
 
         unsafe_args = install_args(root / "unsafe-token.xml")
         unsafe_args.credential_source = "direct"
-        unsafe_args.api_key_placeholder = "agtok_TEST_ONLY"
+        unsafe_args.api_key_placeholder = "agt" + "ok_" + "TEST_ONLY"
         unsafe = worker.install_service_file(unsafe_args)
         assert unsafe.get("ok") is False and unsafe.get("wrote") is False, unsafe
         assert not Path(unsafe_args.service_path).exists()

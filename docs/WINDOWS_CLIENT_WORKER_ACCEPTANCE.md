@@ -62,11 +62,13 @@ OS gate. On `windows-2022` it must:
 - run atomic-write and forged-service security smokes;
 - run the complete user-local PowerShell install/reinstall/uninstall lifecycle.
 
-Record the green workflow URL and exact commit here after the branch is pushed:
+Windows OS acceptance evidence:
 
-- Commit: pending
-- Workflow run: pending
-- Result: pending
+- Commit: `d581df80800b748e61ed466cef0dec76b56d910b`
+- Workflow run: [Windows CLI and Worker Acceptance #30657683941](https://github.com/geogejoy107-jpg/agentops-mis-mvp/actions/runs/30657683941)
+- Result: passed on `windows-2022`, including the installed CLI/Worker flow,
+  real Task Scheduler lifecycle, atomic ACL failure checks, and the complete
+  PowerShell install/reinstall/uninstall lifecycle.
 
 ## Physical Windows acceptance
 
