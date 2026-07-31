@@ -146,9 +146,12 @@ jobs:
       - name: Build and publish two exact-source immutable images
         run: |
           set -euo pipefail
+          failure_stage="initialize"
+          trap 'status=$?; echo "::error title=BYOC image publication failed::stage=${failure_stage}"; exit "${status}"' ERR
           source_identity="source-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           target_identity="target-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
 
+          failure_stage="build_source"
           AGENTOPS_IMAGE="${AGENTOPS_BYOC_SOURCE_IMAGE_TAG}" \
           AGENTOPS_BUILD_IDENTITY="${source_identity}" \
           AGENTOPS_SOURCE_REVISION="${GITHUB_SHA}" \
@@ -156,8 +159,10 @@ jobs:
             --env-file "${AGENTOPS_BYOC_ENV_FILE}" \
             -f "${AGENTOPS_BYOC_COMPOSE_FILE}" \
             build --pull migrate
+          failure_stage="push_source"
           docker push "${AGENTOPS_BYOC_SOURCE_IMAGE_TAG}" > /dev/null
 
+          failure_stage="build_target"
           AGENTOPS_IMAGE="${AGENTOPS_BYOC_TARGET_IMAGE_TAG}" \
           AGENTOPS_BUILD_IDENTITY="${target_identity}" \
           AGENTOPS_SOURCE_REVISION="${GITHUB_SHA}" \
@@ -165,29 +170,43 @@ jobs:
             --env-file "${AGENTOPS_BYOC_ENV_FILE}" \
             -f "${AGENTOPS_BYOC_COMPOSE_FILE}" \
             build migrate
+          failure_stage="push_target"
           docker push "${AGENTOPS_BYOC_TARGET_IMAGE_TAG}" > /dev/null
 
           image_repository="localhost:5000/agentops-mis-byoc"
-          source_digest="$(
-            docker image inspect \
-              --format '{{range .RepoDigests}}{{println .}}{{end}}' \
-              "${AGENTOPS_BYOC_SOURCE_IMAGE_TAG}" |
-              grep -E "^${image_repository}@sha256:[0-9a-f]{64}$" |
-              head -n 1
+          registry_manifest_digest() {
+            local tag="$1"
+            curl \
+              --fail \
+              --silent \
+              --show-error \
+              --head \
+              --header 'Accept: application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json' \
+              "http://127.0.0.1:5000/v2/agentops-mis-byoc/manifests/${tag}" |
+              awk 'tolower($1) == "docker-content-digest:" { gsub("\r", "", $2); print $2 }'
+          }
+          failure_stage="resolve_source_digest"
+          source_manifest_digest="$(
+            registry_manifest_digest \
+              "source-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           )"
-          target_digest="$(
-            docker image inspect \
-              --format '{{range .RepoDigests}}{{println .}}{{end}}' \
-              "${AGENTOPS_BYOC_TARGET_IMAGE_TAG}" |
-              grep -E "^${image_repository}@sha256:[0-9a-f]{64}$" |
-              head -n 1
+          failure_stage="resolve_target_digest"
+          target_manifest_digest="$(
+            registry_manifest_digest \
+              "target-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           )"
-          test -n "${source_digest}"
-          test -n "${target_digest}"
+          test "$(printf '%s\n' "${source_manifest_digest}" | wc -l | tr -d ' ')" = "1"
+          test "$(printf '%s\n' "${target_manifest_digest}" | wc -l | tr -d ' ')" = "1"
+          [[ "${source_manifest_digest}" =~ ^sha256:[0-9a-f]{64}$ ]]
+          [[ "${target_manifest_digest}" =~ ^sha256:[0-9a-f]{64}$ ]]
+          source_digest="${image_repository}@${source_manifest_digest}"
+          target_digest="${image_repository}@${target_manifest_digest}"
           test "${source_digest}" != "${target_digest}"
+          failure_stage="pull_immutable_images"
           docker pull "${source_digest}" > /dev/null
           docker pull "${target_digest}" > /dev/null
 
+          failure_stage="verify_image_identity"
           source_image_id="$(docker image inspect --format '{{.Id}}' "${source_digest}")"
           target_image_id="$(docker image inspect --format '{{.Id}}' "${target_digest}")"
           test "${source_image_id}" != "${target_image_id}"
@@ -216,6 +235,7 @@ jobs:
             printf 'AGENTOPS_BYOC_SOURCE_IMAGE_ID=%s\n' "${source_image_id}"
             printf 'AGENTOPS_BYOC_TARGET_IMAGE_ID=%s\n' "${target_image_id}"
           } >> "${GITHUB_ENV}"
+          trap - ERR
 
       - name: Start clean BYOC control plane from source digest
         run: |
