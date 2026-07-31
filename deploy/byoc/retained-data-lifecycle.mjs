@@ -2,7 +2,7 @@
 
 import { randomBytes } from "node:crypto";
 import { lstat, readFile, rm } from "node:fs/promises";
-import { spawnSync } from "node:child_process";
+import { spawn } from "node:child_process";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
@@ -12,6 +12,8 @@ import {
   lifecycleStateDirectory,
   readLifecycleState,
   recoverStaleLifecycleLock,
+  registerLifecycleChildProcess,
+  releaseLifecycleChildProcess,
   sha256,
   sha256File,
   withLifecycleLock,
@@ -67,26 +69,103 @@ function asLifecycleError(error, stage) {
   return new LifecycleError(errorCode(error), stage);
 }
 
-function defaultRunner(command, args, options = {}) {
-  const result = spawnSync(command, args, {
+function terminateChildProcessGroup(child) {
+  if (!child.pid) return;
+  try {
+    if (process.platform === "win32") child.kill("SIGKILL");
+    else process.kill(-child.pid, "SIGKILL");
+  } catch {
+    child.kill("SIGKILL");
+  }
+}
+
+async function defaultRunner(command, args, options = {}) {
+  const detached = process.platform !== "win32";
+  const gated = process.platform !== "win32";
+  const child = spawn(
+    gated ? "/bin/sh" : command,
+    gated
+      ? [
+          "-ceu",
+          "IFS= read -r gate; [ \"$gate\" = agentops_child_lease_ready_v1 ]; exec \"$@\"",
+          "agentops-lifecycle-child",
+          command,
+          ...args,
+        ]
+      : args,
+    {
     cwd: options.cwd,
     env: options.env,
-    encoding: "utf8",
-    input: options.input,
-    maxBuffer: 8 * 1024 * 1024,
-    timeout: options.timeout || 15 * 60 * 1000,
+    detached,
+    stdio: ["pipe", "pipe", "pipe"],
+    },
+  );
+  let stdout = "";
+  let stderr = "";
+  let overflow = false;
+  const maxBuffer = 8 * 1024 * 1024;
+  child.stdout.setEncoding("utf8");
+  child.stderr.setEncoding("utf8");
+  child.stdout.on("data", (chunk) => {
+    if (stdout.length + chunk.length > maxBuffer) {
+      overflow = true;
+      terminateChildProcessGroup(child);
+      return;
+    }
+    stdout += chunk;
   });
-  if (result.error) {
+  child.stderr.on("data", (chunk) => {
+    if (stderr.length + chunk.length > maxBuffer) {
+      overflow = true;
+      terminateChildProcessGroup(child);
+      return;
+    }
+    stderr += chunk;
+  });
+  const completion = new Promise((resolveCompletion) => {
+    let resolved = false;
+    const finish = (status, error = null) => {
+      if (resolved) return;
+      resolved = true;
+      resolveCompletion({ status, error });
+    };
+    child.once("error", (error) => finish(127, error));
+    child.once("close", (code) => finish(code ?? 1));
+  });
+  let lease;
+  try {
+    lease = await registerLifecycleChildProcess(
+      options.stateDirectory,
+      child.pid,
+      detached ? child.pid : child.pid,
+    );
+  } catch {
+    terminateChildProcessGroup(child);
+    await completion;
     return {
-      status: typeof result.status === "number" ? result.status : 127,
-      stdout: String(result.stdout || ""),
+      status: 127,
+      stdout: "",
       stderr: "",
     };
   }
+  const timeout = setTimeout(() => {
+    terminateChildProcessGroup(child);
+  }, options.timeout || 15 * 60 * 1000);
+  child.stdin.on("error", () => undefined);
+  if (gated) child.stdin.write("agentops_child_lease_ready_v1\n");
+  if (options.input !== undefined) child.stdin.end(options.input);
+  else child.stdin.end();
+  const completed = await completion;
+  clearTimeout(timeout);
+  try {
+    await releaseLifecycleChildProcess(options.stateDirectory, lease);
+  } catch {
+    return { status: 127, stdout: "", stderr: "" };
+  }
   return {
-    status: result.status ?? 1,
-    stdout: String(result.stdout || ""),
-    stderr: String(result.stderr || ""),
+    status: overflow ? 1 : completed.status,
+    stdout,
+    stderr,
   };
 }
 
@@ -131,6 +210,16 @@ function appendEvent(operation, stage, outcome, now) {
     ...operation,
     events: [...operation.events, event(stage, outcome, now)],
   };
+}
+
+function rollbackCleanupComplete(operation) {
+  return operation?.phase === "rolled_back"
+    && operation.quarantine_cleanup_pending === false
+    && typeof operation.quarantine_removed_at === "string"
+    && operation.quarantine_removed_at.length > 0
+    && operation.database_swap?.phase === "cleanup_complete"
+    && typeof operation.database_swap.updated_at === "string"
+    && operation.database_swap.updated_at.length > 0;
 }
 
 function parseArguments(arguments_) {
@@ -707,27 +796,6 @@ function quoteDatabaseLiteral(value) {
   return `'${value}'`;
 }
 
-async function postgresSql(context, sql, code, stage) {
-  checked(
-    await context.runner(
-      "docker",
-      composeArguments(context, [
-        "exec",
-        "-T",
-        "postgres",
-        "sh",
-        "-ceu",
-        "psql --username \"$POSTGRES_USER\" --dbname postgres --no-psqlrc --set ON_ERROR_STOP=1 --command \"$1\" >/dev/null",
-        "sh",
-        sql,
-      ]),
-      { cwd: context.repositoryRoot, env: commandEnvironment(context) },
-    ),
-    code,
-    stage,
-  );
-}
-
 async function postgresQuery(context, sql, code, stage) {
   return checked(
     await context.runner(
@@ -844,31 +912,72 @@ async function databasePresence(context, databases) {
   return present;
 }
 
-async function terminateDatabaseConnections(context, databases) {
-  const literals = databases.map(quoteDatabaseLiteral).join(",");
-  await postgresSql(
-    context,
-    `SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname IN (${literals}) AND pid<>pg_backend_pid()`,
-    "lifecycle_database_connection_termination_failed",
-    "database_swap",
-  );
-}
-
-async function renameDatabase(context, from, to, stage = "database_swap") {
-  await postgresSql(
-    context,
-    `ALTER DATABASE ${quoteDatabaseIdentifier(from)} RENAME TO ${quoteDatabaseIdentifier(to)}`,
-    "lifecycle_database_rename_failed",
+async function destructiveDatabaseOperation(
+  context,
+  database,
+  targetDatabase,
+  expectedOid,
+  expectedMarker,
+  expectedClusterIdentifier,
+  operation,
+  code,
+  stage,
+) {
+  if (
+    !POSTGRES_DATABASE_OID.test(String(expectedOid || ""))
+    || !POSTGRES_SYSTEM_IDENTIFIER.test(String(expectedClusterIdentifier || ""))
+    || (
+      expectedMarker !== null
+      && !RESTORE_DATABASE_MARKER.test(String(expectedMarker || ""))
+    )
+  ) {
+    throw new LifecycleError(
+      "lifecycle_database_destructive_identity_invalid",
+      stage,
+    );
+  }
+  checked(
+    await context.runner(
+      "/bin/sh",
+      [
+        join(
+          context.repositoryRoot,
+          "deploy/byoc/postgres-destructive-database.sh",
+        ),
+        context.composeFile,
+        context.envFile,
+        operation,
+        database,
+        targetDatabase,
+        expectedOid,
+        expectedClusterIdentifier,
+        expectedMarker ?? "",
+      ],
+      { cwd: context.repositoryRoot, env: commandEnvironment(context) },
+    ),
+    code,
     stage,
   );
 }
 
-async function dropDatabase(context, database, stage = "database_cleanup") {
-  await terminateDatabaseConnections(context, [database]);
-  await postgresSql(
+async function renameDatabase(
+  context,
+  from,
+  to,
+  expectedOid,
+  expectedMarker,
+  expectedClusterIdentifier,
+  stage = "database_swap",
+) {
+  await destructiveDatabaseOperation(
     context,
-    `DROP DATABASE IF EXISTS ${quoteDatabaseIdentifier(database)}`,
-    "lifecycle_database_drop_failed",
+    from,
+    to,
+    expectedOid,
+    expectedMarker,
+    expectedClusterIdentifier,
+    "rename",
+    "lifecycle_database_rename_failed",
     stage,
   );
 }
@@ -878,16 +987,27 @@ async function dropBoundDatabase(
   database,
   expectedOid,
   expectedMarker,
+  expectedClusterIdentifier,
   stage = "database_cleanup",
 ) {
-  await assertDatabaseObjectIdentity(
+  const identity = await assertDatabaseObjectIdentity(
     context,
     database,
     expectedOid,
     expectedMarker,
     stage,
   );
-  await dropDatabase(context, database, stage);
+  await destructiveDatabaseOperation(
+    context,
+    database,
+    "-",
+    expectedOid ?? identity.oid,
+    expectedMarker,
+    expectedClusterIdentifier,
+    "drop",
+    "lifecycle_database_drop_failed",
+    stage,
+  );
 }
 
 async function dropBoundDatabaseIfPresent(
@@ -895,18 +1015,19 @@ async function dropBoundDatabaseIfPresent(
   database,
   expectedOid,
   expectedMarker,
+  expectedClusterIdentifier,
   stage = "database_cleanup",
 ) {
   const identity = await databaseObjectIdentity(context, database, stage);
   if (!identity) return false;
-  await assertDatabaseObjectIdentity(
+  await dropBoundDatabase(
     context,
     database,
     expectedOid,
     expectedMarker,
+    expectedClusterIdentifier,
     stage,
   );
-  await dropDatabase(context, database, stage);
   return true;
 }
 
@@ -953,6 +1074,10 @@ function validatedDatabaseSwap(operation) {
     || !RESTORE_DATABASE_MARKER.test(String(swap.restore_database_marker || ""))
     || (
       swap.restore_database_oid !== null
+      && !POSTGRES_DATABASE_OID.test(String(swap.restore_database_oid || ""))
+    )
+    || (
+      swap.phase !== "restore_intent"
       && !POSTGRES_DATABASE_OID.test(String(swap.restore_database_oid || ""))
     )
     || !DATABASE_SWAP_PHASES.has(String(swap.phase || ""))
@@ -1033,7 +1158,10 @@ async function plan(context, values) {
   }
   return withLifecycleLock(context.stateDirectory, async () => {
     const existing = await readLifecycleState(context.stateDirectory);
-    if (existing?.operation?.quarantine_cleanup_pending === true) {
+    if (
+      existing?.operation?.phase === "rolled_back"
+      && !rollbackCleanupComplete(existing.operation)
+    ) {
       throw new LifecycleError("lifecycle_cleanup_required", "plan");
     }
     if (existing?.operation && !TERMINAL_PHASES.has(existing.operation.phase)) {
@@ -1542,6 +1670,7 @@ async function rollback(context, values) {
             swap.restore_database,
             swap.restore_database_oid,
             swap.restore_database_marker,
+            swap.cluster_system_identifier,
             "rollback_orphan_restore_cleanup",
           );
         }
@@ -1665,8 +1794,14 @@ async function rollback(context, values) {
         );
         swap = validatedDatabaseSwap(state.operation);
         swapMutationArmed = true;
-        await terminateDatabaseConnections(context, [production]);
-        await renameDatabase(context, production, quarantineDatabase);
+        await renameDatabase(
+          context,
+          production,
+          quarantineDatabase,
+          swap.authority_database_oid,
+          null,
+          swap.cluster_system_identifier,
+        );
         state = await recordDatabaseSwapPhase(
           context,
           state,
@@ -1716,7 +1851,14 @@ async function rollback(context, values) {
           "restore_promotion_started",
         );
         swap = validatedDatabaseSwap(state.operation);
-        await renameDatabase(context, restoreDatabase, production);
+        await renameDatabase(
+          context,
+          restoreDatabase,
+          production,
+          swap.restore_database_oid,
+          swap.restore_database_marker,
+          swap.cluster_system_identifier,
+        );
         state = await recordDatabaseSwapPhase(
           context,
           state,
@@ -1808,6 +1950,7 @@ async function rollback(context, values) {
           quarantineDatabase,
           swap.authority_database_oid,
           null,
+          swap.cluster_system_identifier,
         );
         quarantineRemoved = true;
         const cleanupRecordedAt = context.now().toISOString();
@@ -1873,6 +2016,7 @@ async function rollback(context, values) {
               restoreDatabase,
               checkpoint.restore_database_oid,
               checkpoint.restore_database_marker,
+              checkpoint.cluster_system_identifier,
               "rollback_compensation",
             );
           } catch {
@@ -2011,6 +2155,7 @@ async function cleanup(context, values) {
         swap.quarantine_database,
         swap.authority_database_oid,
         null,
+        swap.cluster_system_identifier,
         "rollback_quarantine_cleanup",
       );
     }
@@ -2068,6 +2213,9 @@ export async function runLifecycle(arguments_, options = {}) {
   const parsed = parseArguments(arguments_);
   const environment = { ...process.env, ...(options.environment || {}) };
   const repositoryRoot = resolve(options.repositoryRoot || defaultRepositoryRoot);
+  const stateDirectory = resolve(
+    options.stateDirectory || lifecycleStateDirectory(environment),
+  );
   const context = {
     repositoryRoot,
     composeFile: resolve(
@@ -2078,11 +2226,13 @@ export async function runLifecycle(arguments_, options = {}) {
       repositoryRoot,
       environment.AGENTOPS_BYOC_ENV_FILE || "deploy/byoc/.env",
     ),
-    stateDirectory: resolve(
-      options.stateDirectory || lifecycleStateDirectory(environment),
-    ),
+    stateDirectory,
     environment,
-    runner: options.runner || defaultRunner,
+    runner: options.runner || ((command, args, runnerOptions = {}) =>
+      defaultRunner(command, args, {
+        ...runnerOptions,
+        stateDirectory,
+      })),
     now: options.now || (() => new Date()),
     randomHex: options.randomHex || (() => randomBytes(16).toString("hex")),
     wait: options.wait || ((milliseconds) => new Promise((resolveWait) => {

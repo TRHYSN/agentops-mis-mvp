@@ -15,6 +15,8 @@ import { join, resolve } from "node:path";
 
 // @ts-expect-error The operator CLI is intentionally plain ESM.
 import { LifecycleError, runLifecycle } from "../../../deploy/byoc/retained-data-lifecycle.mjs";
+// @ts-expect-error The lifecycle state helper is intentionally plain ESM.
+import { writeLifecycleState } from "../../../deploy/byoc/retained-data-lifecycle-state.mjs";
 
 const FROM_REFERENCE = `registry.example/agentops@sha256:${"a".repeat(64)}`;
 const TO_REFERENCE = `registry.example/agentops@sha256:${"b".repeat(64)}`;
@@ -127,6 +129,8 @@ function createFakeDriver() {
     failRestoreDrillAfterCreate: false,
     failRestoreDatabaseDrop: false,
     failQuarantineDrop: false,
+    replaceDatabaseBeforeDestructiveOnce: false,
+    replaceClusterBeforeDestructiveOnce: false,
     controlPlaneRunning: true,
     productionDatabase: "agentops",
     runtimeDatabase: "agentops",
@@ -175,6 +179,104 @@ function createFakeDriver() {
       if (joined.includes("State.Health")) {
         return state.controlPlaneRunning ? ok("healthy\n") : ok("exited\n");
       }
+    }
+    if (
+      command === "/bin/sh"
+      && args[0]?.endsWith("/postgres-destructive-database.sh")
+    ) {
+      const operation = args[3] || "";
+      const database = args[4] || "";
+      const targetDatabase = args[5] || "";
+      const expectedOid = args[6] || "";
+      const expectedCluster = args[7] || "";
+      const expectedMarker = args[8] || "";
+      state.sql.push(
+        `destructive:${operation}:${database}:${targetDatabase}:${expectedOid}:${expectedCluster}:${expectedMarker}`,
+      );
+      if (state.replaceDatabaseBeforeDestructiveOnce) {
+        state.replaceDatabaseBeforeDestructiveOnce = false;
+        state.databaseOids.set(database, String(state.nextDatabaseOid++));
+        state.databaseMarkers.set(database, "replacement_object");
+      }
+      if (state.replaceClusterBeforeDestructiveOnce) {
+        state.replaceClusterBeforeDestructiveOnce = false;
+        state.clusterSystemIdentifier = "7390088888888888888";
+      }
+      if (
+        state.clusterSystemIdentifier !== expectedCluster
+        || state.databaseOids.get(database) !== expectedOid
+        || (state.databaseMarkers.get(database) || "") !== expectedMarker
+      ) {
+        return failed("destructive_identity_changed");
+      }
+      if (state.failDatabaseTerminationOnce) {
+        state.failDatabaseTerminationOnce = false;
+        return failed("database_termination_failed");
+      }
+      if (
+        state.failQuarantineDrop
+        && operation === "drop"
+        && database.startsWith("agentops_quarantine_")
+      ) {
+        return failed("quarantine_drop_failed");
+      }
+      if (
+        state.failRestoreDatabaseDrop
+        && operation === "drop"
+        && database.startsWith("agentops_restore_")
+      ) {
+        return failed("restore_cleanup_failed");
+      }
+      if (
+        state.failRestorePromotionRenameOnce
+        && operation === "rename"
+        && database.startsWith("agentops_restore_")
+        && targetDatabase === "agentops"
+      ) {
+        state.failRestorePromotionRenameOnce = false;
+        return failed("restore_promotion_failed");
+      }
+      if (operation === "rename") {
+        if (
+          !state.databases.has(database)
+          || state.databases.has(targetDatabase)
+        ) {
+          return failed("rename_state_invalid");
+        }
+        state.databases.delete(database);
+        state.databases.add(targetDatabase);
+        const oid = state.databaseOids.get(database);
+        if (!oid) return failed("rename_identity_missing");
+        state.databaseOids.delete(database);
+        state.databaseOids.set(targetDatabase, oid);
+        const marker = state.databaseMarkers.get(database);
+        state.databaseMarkers.delete(database);
+        if (marker) state.databaseMarkers.set(targetDatabase, marker);
+        if (
+          state.failAfterProductionRenameOnce
+          && database === "agentops"
+          && targetDatabase.startsWith("agentops_quarantine_")
+        ) {
+          state.failAfterProductionRenameOnce = false;
+          return failed("production_rename_interrupted");
+        }
+        if (
+          state.failAfterRestorePromotionRenameOnce
+          && database.startsWith("agentops_restore_")
+          && targetDatabase === "agentops"
+        ) {
+          state.failAfterRestorePromotionRenameOnce = false;
+          return failed("restore_promotion_interrupted");
+        }
+        return ok();
+      }
+      if (operation === "drop") {
+        state.databases.delete(database);
+        state.databaseOids.delete(database);
+        state.databaseMarkers.delete(database);
+        return ok();
+      }
+      return failed("destructive_operation_invalid");
     }
     if (command === "docker" && args[0] === "compose") {
       if (joined.includes(" config --quiet")) return ok();
@@ -490,7 +592,7 @@ async function proveClosedLoop(root: string) {
   assert.equal(rolledBack.explicit_confirmation_verified, true);
   assert.equal(rolledBack.quarantine_removed, true);
   assert.equal(rolledBack.quarantine_cleanup_pending, false);
-  assert.ok(driver.state.sql.some((sql) => sql.includes("ALTER DATABASE")));
+  assert.ok(driver.state.sql.some((sql) => sql.startsWith("destructive:rename:")));
 
   status = await runLifecycle(["status"], options);
   assert.equal(status.state.operation.phase, "rolled_back");
@@ -562,7 +664,7 @@ async function proveRollbackPreSwapCheckpointResume(root: string) {
       "--confirm-restore-from-backup",
       planned.operation_id,
     ], options),
-    "lifecycle_database_connection_termination_failed",
+    "lifecycle_database_rename_failed",
   );
   let status = await runLifecycle(["status"], options);
   assert.equal(driver.state.controlPlaneRunning, false);
@@ -798,6 +900,38 @@ async function proveQuarantineCleanupIsRecoverable(root: string) {
     () => runLifecycle(["plan", "--to-image", TO_REFERENCE], options),
     "lifecycle_cleanup_required",
   );
+  await writeLifecycleState(stateDirectory, {
+    ...status.state,
+    generation: status.state.generation + 1,
+    operation: {
+      ...status.state.operation,
+      quarantine_cleanup_pending: false,
+    },
+  });
+  await expectFailure(
+    () => runLifecycle(["plan", "--to-image", TO_REFERENCE], options),
+    "lifecycle_cleanup_required",
+  );
+  await writeLifecycleState(stateDirectory, {
+    ...status.state,
+    generation: status.state.generation + 2,
+    operation: {
+      ...status.state.operation,
+      quarantine_cleanup_pending: false,
+      database_swap: {
+        ...status.state.operation.database_swap,
+        phase: "cleanup_complete",
+      },
+    },
+  });
+  await expectFailure(
+    () => runLifecycle(["plan", "--to-image", TO_REFERENCE], options),
+    "lifecycle_cleanup_required",
+  );
+  await writeLifecycleState(stateDirectory, {
+    ...status.state,
+    generation: status.state.generation + 3,
+  });
   await expectFailure(
     () => runLifecycle([
       "cleanup",
@@ -927,6 +1061,33 @@ async function provePostgresObjectIdentityBinding(root: string) {
     ),
     "lifecycle_database_object_identity_changed",
   );
+
+  const raceState = join(root, "destructive-database-identity-race-state");
+  const raceDriver = createFakeDriver();
+  const raceOptions = await lifecycleOptions(root, raceState, raceDriver);
+  const racePlan = await runLifecycle(
+    ["plan", "--to-image", TO_REFERENCE],
+    raceOptions,
+  );
+  await runLifecycle(
+    ["apply", "--plan-id", racePlan.operation_id],
+    raceOptions,
+  );
+  raceDriver.state.replaceDatabaseBeforeDestructiveOnce = true;
+  await expectFailure(
+    () => runLifecycle([
+      "rollback",
+      "--confirm-restore-from-backup",
+      racePlan.operation_id,
+    ], raceOptions),
+    "lifecycle_database_rename_failed",
+  );
+  assert.equal(raceDriver.state.databases.has("agentops"), true);
+  assert.equal(
+    [...raceDriver.state.databases].some((database) =>
+      database.startsWith("agentops_quarantine_")),
+    false,
+  );
 }
 
 async function proveConfigurationDriftFailsClosed(root: string) {
@@ -982,10 +1143,12 @@ try {
     database_oid_binding_verified: true,
     restore_operation_marker_binding_verified: true,
     destructive_cleanup_identity_guard_verified: true,
+    destructive_ddl_toctou_guard_verified: true,
     stopped_backup_order_verified: true,
     cleanup_failure_does_not_block_restart: true,
     quarantine_cleanup_pending_is_recoverable: true,
     pending_cleanup_blocks_new_plan: true,
+    incomplete_cleanup_state_blocks_new_plan: true,
     explicit_cleanup_retry_verified: true,
     backup_restore_rollback_verified: true,
     explicit_rollback_confirmation_verified: true,

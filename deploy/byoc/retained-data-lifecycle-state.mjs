@@ -20,8 +20,10 @@ export const LIFECYCLE_STATE_CONTRACT =
   "agentops_byoc_retained_data_lifecycle_state_v1";
 
 const LIFECYCLE_LOCK_CONTRACT = "agentops_byoc_lifecycle_lock_v2";
+const LIFECYCLE_CHILD_CONTRACT = "agentops_byoc_lifecycle_child_v1";
 const LOCK_NAME = ".operation.lock";
 const LOCK_OWNER_NAME = "owner.json";
+const LOCK_CHILDREN_NAME = "children";
 const LOCK_PREPARE_PREFIX = `${LOCK_NAME}.prepare.`;
 const LOCK_ISOLATION_PREFIX = `${LOCK_NAME}.isolated.`;
 const OWNER_TOKEN_PATTERN = /^[0-9a-f]{64}$/;
@@ -247,6 +249,77 @@ function ownerIntegrity(owner) {
   return sha256(JSON.stringify(ownerPayload(owner)));
 }
 
+function childPayload(child) {
+  return {
+    contract: child.contract,
+    pid: child.pid,
+    process_group_id: child.process_group_id,
+    hostname: child.hostname,
+    boot_id: child.boot_id,
+    process_start_identity: child.process_start_identity,
+    parent_owner_token: child.parent_owner_token,
+    child_token: child.child_token,
+    started_at: child.started_at,
+  };
+}
+
+function childIntegrity(child) {
+  return sha256(JSON.stringify(childPayload(child)));
+}
+
+function validateChild(child, expectedParentOwnerToken) {
+  const keys = Object.keys(child || {}).sort();
+  const expectedKeys = [
+    "boot_id",
+    "child_token",
+    "contract",
+    "hostname",
+    "integrity_sha256",
+    "parent_owner_token",
+    "pid",
+    "process_group_id",
+    "process_start_identity",
+    "started_at",
+  ].sort();
+  const startedAt = typeof child?.started_at === "string"
+    ? new Date(child.started_at)
+    : null;
+  if (
+    !child
+    || typeof child !== "object"
+    || keys.length !== expectedKeys.length
+    || keys.some((key, index) => key !== expectedKeys[index])
+    || child.contract !== LIFECYCLE_CHILD_CONTRACT
+    || !Number.isSafeInteger(child.pid)
+    || child.pid < 1
+    || child.pid > 2_147_483_647
+    || !Number.isSafeInteger(child.process_group_id)
+    || child.process_group_id < 1
+    || child.process_group_id > 2_147_483_647
+    || child.hostname !== hostname()
+    || (child.boot_id !== null && !BOOT_ID_PATTERN.test(child.boot_id))
+    || (
+      child.process_start_identity !== null
+      && !PROCESS_START_PATTERN.test(child.process_start_identity)
+    )
+    || child.parent_owner_token !== expectedParentOwnerToken
+    || !OWNER_TOKEN_PATTERN.test(child.parent_owner_token || "")
+    || !OWNER_TOKEN_PATTERN.test(child.child_token || "")
+    || !SHA256_PATTERN.test(child.integrity_sha256 || "")
+    || !startedAt
+    || Number.isNaN(startedAt.valueOf())
+    || startedAt.toISOString() !== child.started_at
+  ) {
+    throw new Error("lifecycle_lock_child_invalid");
+  }
+  const actual = Buffer.from(child.integrity_sha256, "hex");
+  const expected = Buffer.from(childIntegrity(child), "hex");
+  if (actual.length !== expected.length || !timingSafeEqual(actual, expected)) {
+    throw new Error("lifecycle_lock_child_invalid");
+  }
+  return child;
+}
+
 function validateOwner(owner) {
   const keys = Object.keys(owner || {}).sort();
   const expectedKeys = [
@@ -377,6 +450,8 @@ async function createPreparedLock(stateDirectory) {
     } finally {
       await ownerHandle.close();
     }
+    await mkdir(join(lock, LOCK_CHILDREN_NAME), { mode: 0o700 });
+    await assertPrivateDirectory(join(lock, LOCK_CHILDREN_NAME));
     await syncDirectory(lock);
     return { owner, prepared: lock };
   } catch (error) {
@@ -450,6 +525,11 @@ async function releaseOwnedLock(stateDirectory, expectedOwner) {
   if (verified.owner.owner_token !== expectedOwner.owner_token) {
     throw new Error("lifecycle_lock_owner_changed");
   }
+  if (
+    (await readLifecycleChildren(lock, expectedOwner.owner_token)).length !== 0
+  ) {
+    throw new Error("lifecycle_lock_child_active");
+  }
   const isolated = await isolateLock(
     stateDirectory,
     lock,
@@ -465,6 +545,74 @@ async function authoritativeLockPaths(stateDirectory) {
     paths.unshift(lockPath(stateDirectory));
   }
   return paths;
+}
+
+async function readLifecycleChildren(lockDirectory, expectedOwnerToken) {
+  const childrenDirectory = join(lockDirectory, LOCK_CHILDREN_NAME);
+  await assertPrivateDirectory(childrenDirectory);
+  const entries = await readdir(childrenDirectory, { withFileTypes: true });
+  const children = [];
+  for (const entry of entries.sort((left, right) =>
+    left.name.localeCompare(right.name))) {
+    if (!entry.isFile() || entry.isSymbolicLink() || !entry.name.endsWith(".json")) {
+      throw new Error("lifecycle_lock_child_invalid");
+    }
+    const path = join(childrenDirectory, entry.name);
+    const metadata = await lstat(path);
+    if (
+      !privatePathMetadata(metadata, "file")
+      || metadata.nlink !== 1
+      || metadata.size < 1
+      || metadata.size > 4096
+    ) {
+      throw new Error("lifecycle_lock_child_invalid");
+    }
+    let parsed;
+    try {
+      parsed = JSON.parse(await readFile(path, "utf8"));
+    } catch {
+      throw new Error("lifecycle_lock_child_invalid");
+    }
+    children.push({
+      child: validateChild(parsed, expectedOwnerToken),
+      file_name: entry.name,
+    });
+  }
+  return children;
+}
+
+function processTargetExists(target) {
+  try {
+    process.kill(target, 0);
+    return true;
+  } catch (error) {
+    if (error?.code === "ESRCH") return false;
+    if (error?.code === "EPERM") return true;
+    throw new Error("lifecycle_lock_recovery_identity_unverifiable");
+  }
+}
+
+async function assertNoLiveLifecycleChildren(lockDirectory, owner) {
+  const children = await readLifecycleChildren(
+    lockDirectory,
+    owner.owner_token,
+  );
+  for (const { child } of children) {
+    const currentBootId = await linuxBootId();
+    if (
+      child.boot_id !== null
+      && currentBootId !== null
+      && child.boot_id !== currentBootId
+    ) {
+      continue;
+    }
+    const groupTarget = process.platform === "win32"
+      ? child.pid
+      : -child.process_group_id;
+    if (processTargetExists(groupTarget) || processTargetExists(child.pid)) {
+      throw new Error("lifecycle_lock_recovery_child_alive");
+    }
+  }
 }
 
 async function assertOwnerIsStale(owner) {
@@ -539,6 +687,7 @@ export async function recoverStaleLifecycleLock(
   const candidate = candidates[0];
   const verified = await readLockOwner(candidate);
   await assertOwnerIsStale(verified.owner);
+  await assertNoLiveLifecycleChildren(candidate, verified.owner);
   const isolated = await isolateLock(
     stateDirectory,
     candidate,
@@ -553,6 +702,89 @@ export async function recoverStaleLifecycleLock(
     operation_id: confirmation,
     credentials_omitted: true,
   };
+}
+
+export async function registerLifecycleChildProcess(
+  stateDirectory,
+  pid,
+  processGroupId,
+) {
+  if (
+    !Number.isSafeInteger(pid)
+    || pid < 1
+    || !Number.isSafeInteger(processGroupId)
+    || processGroupId < 1
+  ) {
+    throw new Error("lifecycle_lock_child_invalid");
+  }
+  const lock = lockPath(stateDirectory);
+  const verifiedOwner = await readLockOwner(lock);
+  if (verifiedOwner.owner.pid !== process.pid) {
+    throw new Error("lifecycle_lock_owner_changed");
+  }
+  const childToken = randomBytes(32).toString("hex");
+  const payload = {
+    contract: LIFECYCLE_CHILD_CONTRACT,
+    pid,
+    process_group_id: processGroupId,
+    hostname: hostname(),
+    boot_id: await linuxBootId(),
+    process_start_identity: await linuxProcessStartIdentity(pid),
+    parent_owner_token: verifiedOwner.owner.owner_token,
+    child_token: childToken,
+    started_at: new Date().toISOString(),
+  };
+  const child = {
+    ...payload,
+    integrity_sha256: childIntegrity(payload),
+  };
+  const fileName = `${pid}.${randomBytes(16).toString("hex")}.json`;
+  const childrenDirectory = join(lock, LOCK_CHILDREN_NAME);
+  await assertPrivateDirectory(childrenDirectory);
+  const handle = await open(join(childrenDirectory, fileName), "wx", 0o600);
+  try {
+    await handle.writeFile(`${JSON.stringify(child)}\n`, "utf8");
+    await handle.sync();
+  } finally {
+    await handle.close();
+  }
+  await syncDirectory(childrenDirectory);
+  return { child_token: childToken, file_name: fileName };
+}
+
+export async function releaseLifecycleChildProcess(stateDirectory, lease) {
+  if (
+    !lease
+    || !OWNER_TOKEN_PATTERN.test(String(lease.child_token || ""))
+    || !/^[1-9][0-9]*\.[0-9a-f]{32}\.json$/.test(
+      String(lease.file_name || ""),
+    )
+  ) {
+    throw new Error("lifecycle_lock_child_invalid");
+  }
+  const lock = lockPath(stateDirectory);
+  const owner = await readLockOwner(lock);
+  if (owner.owner.pid !== process.pid) {
+    throw new Error("lifecycle_lock_owner_changed");
+  }
+  const children = await readLifecycleChildren(lock, owner.owner.owner_token);
+  const registered = children.find(({ file_name: fileName }) =>
+    fileName === lease.file_name);
+  if (
+    !registered
+    || registered.child.child_token !== lease.child_token
+  ) {
+    throw new Error("lifecycle_lock_child_changed");
+  }
+  const groupTarget = process.platform === "win32"
+    ? registered.child.pid
+    : -registered.child.process_group_id;
+  if (processTargetExists(groupTarget)) {
+    throw new Error("lifecycle_lock_child_active");
+  }
+  const childrenDirectory = join(lock, LOCK_CHILDREN_NAME);
+  await rm(join(childrenDirectory, lease.file_name));
+  await syncDirectory(childrenDirectory);
 }
 
 export async function withLifecycleLock(stateDirectory, operation) {

@@ -94,6 +94,33 @@ async function waitForLine(child: ChildProcess, expected: string) {
   });
 }
 
+async function waitForPrefixedLine(child: ChildProcess, prefix: string) {
+  return new Promise<string>((resolvePromise, rejectPromise) => {
+    let output = "";
+    const timeout = setTimeout(() => {
+      rejectPromise(new Error("child_lock_timeout"));
+    }, 10_000);
+    child.stdout?.setEncoding("utf8");
+    child.stdout?.on("data", (chunk: string) => {
+      output += chunk;
+      const line = output.split(/\r?\n/).find((candidate) =>
+        candidate.startsWith(prefix));
+      if (line) {
+        clearTimeout(timeout);
+        resolvePromise(line);
+      }
+    });
+    child.once("error", (error) => {
+      clearTimeout(timeout);
+      rejectPromise(error);
+    });
+    child.once("exit", (code, signal) => {
+      clearTimeout(timeout);
+      rejectPromise(new Error(`child_exited_before_lock:${code}:${signal}`));
+    });
+  });
+}
+
 async function waitForExit(child: ChildProcess) {
   if (child.exitCode !== null || child.signalCode !== null) return;
   await new Promise<void>((resolvePromise, rejectPromise) => {
@@ -128,6 +155,61 @@ async function leaveDeadOwnerLock(stateDirectory: string) {
   return JSON.parse(
     await readFile(join(stateDirectory, ".operation.lock", "owner.json"), "utf8"),
   ) as Record<string, unknown>;
+}
+
+async function leaveDeadOwnerWithLiveChild(stateDirectory: string) {
+  const childSource = `
+    import { spawn } from "node:child_process";
+    import {
+      registerLifecycleChildProcess,
+      withLifecycleLock,
+    } from ${JSON.stringify(pathToFileURL(modulePath).href)};
+    await withLifecycleLock(${JSON.stringify(stateDirectory)}, async () => {
+      const child = spawn(process.execPath, [
+        "--input-type=module",
+        "--eval",
+        "setInterval(() => undefined, 1000)",
+      ], {
+        detached: true,
+        stdio: "ignore",
+      });
+      child.unref();
+      await registerLifecycleChildProcess(
+        ${JSON.stringify(stateDirectory)},
+        child.pid,
+        child.pid,
+      );
+      process.stdout.write("locked-with-child:" + child.pid + "\\n");
+      await new Promise(() => undefined);
+    });
+  `;
+  const owner = spawn(
+    process.execPath,
+    ["--input-type=module", "--eval", childSource],
+    { stdio: ["ignore", "pipe", "pipe"] },
+  );
+  const line = await waitForPrefixedLine(owner, "locked-with-child:");
+  const childPid = Number(line.slice("locked-with-child:".length));
+  assert.ok(Number.isSafeInteger(childPid) && childPid > 1);
+  owner.kill("SIGKILL");
+  await waitForExit(owner);
+  return childPid;
+}
+
+async function waitForProcessGroupExit(processGroupId: number) {
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    try {
+      process.kill(-processGroupId, 0);
+    } catch (error: unknown) {
+      if (
+        error instanceof Error
+        && "code" in error
+        && error.code === "ESRCH"
+      ) return;
+    }
+    await new Promise((resolveWait) => setTimeout(resolveWait, 20));
+  }
+  throw new Error("child_process_group_exit_timeout");
 }
 
 try {
@@ -214,6 +296,20 @@ try {
   });
   assert.equal(await lifecycleLockStatus(cliDirectory), false);
 
+  const liveChildDirectory = await createStateDirectory("live-child-owner");
+  const liveChildPid = await leaveDeadOwnerWithLiveChild(liveChildDirectory);
+  await expectError(
+    () => recoverStaleLifecycleLock(liveChildDirectory, OPERATION_ID),
+    /lifecycle_lock_recovery_child_alive/,
+  );
+  process.kill(-liveChildPid, "SIGKILL");
+  await waitForProcessGroupExit(liveChildPid);
+  const childRecovery = await recoverStaleLifecycleLock(
+    liveChildDirectory,
+    OPERATION_ID,
+  );
+  assert.equal(childRecovery.recovered, true);
+
   const isolatedDirectory = await createStateDirectory("isolated-dead-owner");
   await leaveDeadOwnerLock(isolatedDirectory);
   await rename(
@@ -266,6 +362,7 @@ try {
     live_owner_recovery_refused: true,
     dead_pid_recovery_verified: true,
     operator_cli_recovery_verified: true,
+    live_child_process_group_recovery_refused: true,
     interrupted_isolation_recovery_verified: true,
     exact_operation_confirmation_verified: true,
     concurrent_acquisition_refused: true,

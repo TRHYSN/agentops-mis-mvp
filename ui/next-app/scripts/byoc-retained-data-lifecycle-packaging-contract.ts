@@ -14,6 +14,7 @@ const [
   readme,
   backup,
   restore,
+  destructiveDatabase,
 ] =
   await Promise.all([
     source("../../../deploy/byoc/retained-data-lifecycle.mjs"),
@@ -24,6 +25,7 @@ const [
     source("../../../deploy/byoc/README.md"),
     source("../../../deploy/byoc/backup.sh"),
     source("../../../deploy/byoc/restore-drill.sh"),
+    source("../../../deploy/byoc/postgres-destructive-database.sh"),
   ]);
 
 assert.match(cli, /"recover-lock"/);
@@ -55,6 +57,11 @@ assert.match(cli, /shobj_description/);
 assert.match(cli, /authority_database_oid/);
 assert.match(cli, /restore_database_marker/);
 assert.match(cli, /dropBoundDatabase/);
+assert.match(cli, /postgres-destructive-database\.sh/);
+assert.match(cli, /registerLifecycleChildProcess/);
+assert.match(cli, /releaseLifecycleChildProcess/);
+assert.match(cli, /agentops_child_lease_ready_v1/);
+assert.match(cli, /rollbackCleanupComplete/);
 assert.match(cli, /databasePresence/);
 assert.match(cli, /restore_intent/);
 assert.match(cli, /production_rename_started/);
@@ -84,6 +91,9 @@ assert.match(state, /mode: 0o700/);
 assert.match(state, /agentops_byoc_lifecycle_lock_v2/);
 assert.match(state, /recoverStaleLifecycleLock/);
 assert.match(state, /lifecycle_lock_recovery_cross_host_refused/);
+assert.match(state, /agentops_byoc_lifecycle_child_v1/);
+assert.match(state, /registerLifecycleChildProcess/);
+assert.match(state, /lifecycle_lock_recovery_child_alive/);
 
 assert.match(schemaIdentity, /SCHEMA_CONTRACT/);
 assert.match(schemaIdentity, /EXPECTED_POSTGRES_SCHEMA_FINGERPRINT/);
@@ -148,11 +158,29 @@ assert.match(restore, /restore_database_must_not_be_production/);
 assert.match(restore, /AGENTOPS_RESTORE_OPERATION_MARKER/);
 assert.match(restore, /COMMENT ON DATABASE/);
 assert.match(restore, /restore_provisioning_completed/);
+assert.doesNotMatch(restore, /\bdropdb\b/);
+assert.match(restore, /postgres-destructive-database\.sh/);
+assert.match(destructiveDatabase, /pg_try_advisory_lock/);
+assert.match(destructiveDatabase, /system_identifier/);
+assert.match(destructiveDatabase, /shobj_description/);
+assert.match(destructiveDatabase, /DROP DATABASE/);
+assert.match(destructiveDatabase, /ALTER DATABASE/);
+assert.match(destructiveDatabase, /printf '%s\\n%s;\\n' "\$preflight" "\$ddl"/);
 
 const executable = await stat(
   new URL("../../../deploy/byoc/retained-data-lifecycle.mjs", import.meta.url),
 );
 assert.ok((executable.mode & 0o111) !== 0, "lifecycle CLI must be executable");
+const destructiveExecutable = await stat(
+  new URL(
+    "../../../deploy/byoc/postgres-destructive-database.sh",
+    import.meta.url,
+  ),
+);
+assert.ok(
+  (destructiveExecutable.mode & 0o111) !== 0,
+  "destructive database helper must be executable",
+);
 
 console.log(JSON.stringify({
   contract: "agentops_byoc_retained_data_lifecycle_packaging_contract_v1",
@@ -169,6 +197,9 @@ console.log(JSON.stringify({
   pending_cleanup_blocks_new_plan: true,
   postgres_cluster_and_database_oid_binding_packaged: true,
   restore_operation_marker_packaged: true,
+  destructive_database_advisory_lock_packaged: true,
+  lifecycle_child_process_leases_packaged: true,
+  strict_cleanup_completion_gate_packaged: true,
   in_place_down_migration_forbidden: true,
   runtime_claims_omitted: true,
   credentials_omitted: true,

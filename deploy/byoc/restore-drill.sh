@@ -1,6 +1,8 @@
 #!/bin/sh
 set -eu
 umask 077
+module_directory=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+destructive_database_helper="$module_directory/postgres-destructive-database.sh"
 
 if [ "$#" -ne 1 ]; then
   printf '%s\n' "usage: deploy/byoc/restore-drill.sh BACKUP.bundle" >&2
@@ -167,10 +169,24 @@ fi
 created=false
 workflow_complete=false
 cleanup_failure_reported=false
+restore_identity_bound=false
+restore_database_oid=
+restore_cluster_identifier=
+restore_expected_marker=
 
 drop_restore_database() {
-  docker compose --env-file "$env_file" -f "$compose_file" exec -T postgres \
-    sh -ceu 'dropdb --username "$POSTGRES_USER" --if-exists "$1"' sh "$restore_database" \
+  if [ "$restore_identity_bound" != true ]; then
+    return 1
+  fi
+  /bin/sh "$destructive_database_helper" \
+    "$compose_file" \
+    "$env_file" \
+    drop \
+    "$restore_database" \
+    - \
+    "$restore_database_oid" \
+    "$restore_cluster_identifier" \
+    "$restore_expected_marker" \
     >/dev/null 2>&1
 }
 
@@ -207,10 +223,33 @@ trap 'exit 143' 15
 docker compose --env-file "$env_file" -f "$compose_file" exec -T postgres \
   sh -ceu 'createdb --username "$POSTGRES_USER" "$1"' sh "$restore_database"
 created=true
+restore_identity=$(
+  docker compose --env-file "$env_file" -f "$compose_file" exec -T postgres \
+    sh -ceu 'psql --username "$POSTGRES_USER" --dbname "$1" --no-psqlrc --set ON_ERROR_STOP=1 --tuples-only --no-align --command "SELECT (SELECT system_identifier::text FROM pg_control_system()) || chr(124) || (SELECT oid::text FROM pg_database WHERE datname=current_database())"' \
+    sh "$restore_database"
+)
+case "$restore_identity" in
+  *'|'*)
+    restore_cluster_identifier=${restore_identity%%|*}
+    restore_database_oid=${restore_identity#*|}
+    ;;
+  *)
+    printf '%s\n' "restore_database_identity_invalid" >&2
+    exit 1
+    ;;
+esac
+case "$restore_cluster_identifier" in
+  ""|*[!0-9]*) printf '%s\n' "restore_cluster_identity_invalid" >&2; exit 1 ;;
+esac
+case "$restore_database_oid" in
+  ""|*[!0-9]*) printf '%s\n' "restore_database_identity_invalid" >&2; exit 1 ;;
+esac
+restore_identity_bound=true
 if [ -n "$restore_operation_marker" ]; then
   docker compose --env-file "$env_file" -f "$compose_file" exec -T postgres \
     sh -ceu 'psql --username "$POSTGRES_USER" --dbname postgres --no-psqlrc --set ON_ERROR_STOP=1 --command "COMMENT ON DATABASE \"$1\" IS '\''$2'\''"' \
     sh "$restore_database" "$restore_operation_marker"
+  restore_expected_marker=$restore_operation_marker
 fi
 
 docker compose --env-file "$env_file" -f "$compose_file" exec -T postgres \

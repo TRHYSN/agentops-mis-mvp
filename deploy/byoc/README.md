@@ -317,7 +317,10 @@ The plan also binds PostgreSQL's cluster system identifier and the authority
 database OID. Apply and rollback re-check both values. Database renames preserve
 the bound OID, allowing recovery to distinguish the recorded authority,
 quarantine, and restored objects from unrelated databases that happen to reuse
-the same names.
+the same names. Every destructive rename or drop runs through one helper that
+holds a PostgreSQL session advisory lock, verifies cluster/OID/comment identity,
+terminates target connections, verifies identity again, and then executes DDL
+in that same `psql` session.
 
 Rollback is destructive and requires the operation ID as explicit confirmation:
 
@@ -364,9 +367,12 @@ recovery required; rerunning the same explicit rollback continues the verified
 database swap.
 
 A new `plan` is refused while
-`quarantine_cleanup_pending=true`; the recorded quarantine must be verified and
-removed with the confirmed `cleanup` command before operation history can
-advance.
+rollback cleanup is not strictly complete. Only
+`quarantine_cleanup_pending=false` together with a durable
+`cleanup_complete` database-swap checkpoint and quarantine removal timestamp
+can be archived; missing or older state fields fail closed. The recorded
+quarantine must be verified and removed with the confirmed `cleanup` command
+before operation history can advance.
 
 Do not remove the lifecycle state directory or its backup bundle while an
 operation is active. An operation lock left by process or host failure is never
@@ -375,8 +381,11 @@ preserving the state and backup, a Human operator may run the confirmed
 `recover-lock` command. Recovery validates the exact operation ID, private lock
 metadata, host identity, boot identity, PID, and process-start identity; it
 refuses a live owner, cross-host owner, changed/tampered owner, unsafe path, or
-unverifiable identity. A successful recovery removes only the verified stale
-lock and does not change lifecycle state. Never run
+unverifiable identity. Each external Docker, restore, or SQL command runs in a
+tracked process group with a private child lease under the lock. Recovery also
+refuses while any recorded child process group remains alive. A successful
+recovery removes only the verified stale lock and does not change lifecycle
+state. Never run
 `docker compose down --volumes` as part of this workflow.
 
 The lifecycle contracts use an offline injected Docker driver to exercise the
