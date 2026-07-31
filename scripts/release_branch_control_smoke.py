@@ -11,8 +11,10 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-UNSAFE_PATH_PATTERNS = [
+UNSAFE_DIRECTORY_PATTERNS = [
     re.compile(r"(^|/)(node_modules|dist|\.agentops_runtime|__pycache__|\.pytest_cache|\.next)(/|$)"),
+]
+UNSAFE_FILE_PATTERNS = [
     re.compile(r"(^|/)(agentops_mis\.db|.*\.sqlite3?|.*\.db(?:-wal|-shm)?|\.env$|\.env\..*|.*\.log$|.*\.pid$|.*\.sock$|.*\.key$|.*\.pem$|.*\.jsonl$)"),
 ]
 ALLOWED_BASENAMES = {
@@ -22,6 +24,9 @@ PATH_POLICY_CASES = {
     ".env.example": False,
     "deploy/byoc/.env.example": False,
     "nested/customer/config/.env.example": False,
+    "node_modules/.env.example": True,
+    "dist/.env.example": True,
+    ".next/.env.example": True,
     ".env": True,
     "deploy/byoc/.env": True,
     ".env.local": True,
@@ -122,9 +127,11 @@ def is_allowed_tracked_path(path: str) -> bool:
 
 
 def is_unsafe_tracked_path(path: str) -> bool:
+    if any(pattern.search(path) for pattern in UNSAFE_DIRECTORY_PATTERNS):
+        return True
     if is_allowed_tracked_path(path):
         return False
-    return any(pattern.search(path) for pattern in UNSAFE_PATH_PATTERNS)
+    return any(pattern.search(path) for pattern in UNSAFE_FILE_PATTERNS)
 
 
 def path_policy_failures() -> list[str]:
