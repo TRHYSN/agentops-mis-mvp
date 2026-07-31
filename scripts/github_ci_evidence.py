@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import html
+import http.client
 import json
 import os
 import re
@@ -136,7 +137,12 @@ def fetch_url(url: str, *, timeout: int = 20) -> tuple[str | None, str | None]:
     try:
         with urllib.request.urlopen(req, timeout=timeout) as res:
             return res.read().decode("utf-8", errors="replace"), None
-    except (urllib.error.URLError, TimeoutError, OSError) as exc:
+    except (
+        urllib.error.URLError,
+        TimeoutError,
+        OSError,
+        http.client.HTTPException,
+    ) as exc:
         return None, redact(str(exc))
 
 

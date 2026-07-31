@@ -15,8 +15,19 @@ UNSAFE_PATH_PATTERNS = [
     re.compile(r"(^|/)(node_modules|dist|\.agentops_runtime|__pycache__|\.pytest_cache|\.next)(/|$)"),
     re.compile(r"(^|/)(agentops_mis\.db|.*\.sqlite3?|.*\.db(?:-wal|-shm)?|\.env$|\.env\..*|.*\.log$|.*\.pid$|.*\.sock$|.*\.key$|.*\.pem$|.*\.jsonl$)"),
 ]
-ALLOWED_PATHS = {
+ALLOWED_BASENAMES = {
     ".env.example",
+}
+PATH_POLICY_CASES = {
+    ".env.example": False,
+    "deploy/byoc/.env.example": False,
+    "nested/customer/config/.env.example": False,
+    ".env": True,
+    "deploy/byoc/.env": True,
+    ".env.local": True,
+    "deploy/byoc/.env.local": True,
+    "deploy/byoc/.env.production": True,
+    "deploy/byoc/.env.example.local": True,
 }
 SECRET_MARKERS = ("Authorization:", "Bearer ", "agtok_", "agtsess_", "sk-", "ntn_", "github_pat_")
 
@@ -106,12 +117,31 @@ def is_merged_main_context(current_branch: str, upstream: str | None, main: dict
     )
 
 
+def is_allowed_tracked_path(path: str) -> bool:
+    return Path(path).name in ALLOWED_BASENAMES
+
+
+def is_unsafe_tracked_path(path: str) -> bool:
+    if is_allowed_tracked_path(path):
+        return False
+    return any(pattern.search(path) for pattern in UNSAFE_PATH_PATTERNS)
+
+
+def path_policy_failures() -> list[str]:
+    failures: list[str] = []
+    for path, expected_unsafe in PATH_POLICY_CASES.items():
+        actual_unsafe = is_unsafe_tracked_path(path)
+        if actual_unsafe != expected_unsafe:
+            failures.append(
+                f"path policy classified {path!r} as unsafe={actual_unsafe}, expected unsafe={expected_unsafe}"
+            )
+    return failures
+
+
 def unsafe_tracked_files(files: list[str]) -> list[str]:
     unsafe: list[str] = []
     for path in files:
-        if path in ALLOWED_PATHS:
-            continue
-        if any(pattern.search(path) for pattern in UNSAFE_PATH_PATTERNS):
+        if is_unsafe_tracked_path(path):
             unsafe.append(path)
     return sorted(unsafe)
 
@@ -142,6 +172,7 @@ def main() -> int:
     merged_main_context = is_merged_main_context(current_branch, upstream, main)
     status = status_entries()
     unsafe_files = unsafe_tracked_files(files)
+    failures.extend(path_policy_failures())
 
     if args.expected_branch and current_branch != args.expected_branch:
         failures.append(f"expected branch {args.expected_branch}, got {current_branch}")
@@ -178,7 +209,9 @@ def main() -> int:
         "working_tree_entries": len(status),
         "require_clean": bool(args.require_clean),
         "require_upstream_synced": bool(args.require_upstream_synced),
-        "allowed_paths": sorted(ALLOWED_PATHS),
+        "allowed_paths": sorted(ALLOWED_BASENAMES),
+        "allowed_path_basenames": sorted(ALLOWED_BASENAMES),
+        "path_policy_cases": len(PATH_POLICY_CASES),
         "contract": "Release branch has an identifiable head, reviewable history, no unsafe tracked runtime/generated state, and no upstream-behind drift.",
         "failures": failures,
         "token_omitted": True,

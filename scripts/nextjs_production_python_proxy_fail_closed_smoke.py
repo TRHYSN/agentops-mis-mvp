@@ -90,6 +90,18 @@ def free_port() -> int:
     return port
 
 
+def postgres_environment() -> dict[str, str]:
+    direct_dsn = os.environ.get("AGENTOPS_POSTGRES_DSN", "").strip()
+    dsn_file = os.environ.get("AGENTOPS_POSTGRES_DSN_FILE", "").strip()
+    require(bool(direct_dsn) != bool(dsn_file), "exactly one PostgreSQL DSN source is required")
+    if os.environ.get("AGENTOPS_REQUIRE_FILE_BACKED_POSTGRES_DSN") == "true":
+        require(bool(dsn_file), "production smoke requires a file-backed PostgreSQL DSN")
+    if dsn_file:
+        require(Path(dsn_file).is_file(), "AGENTOPS_POSTGRES_DSN_FILE is not a file")
+        return {"AGENTOPS_POSTGRES_DSN_FILE": dsn_file}
+    return {"AGENTOPS_POSTGRES_DSN": direct_dsn}
+
+
 def isolated_environment(upstream_port: int, temp_root: Path) -> dict[str, str]:
     environment = {
         key: value
@@ -101,13 +113,20 @@ def isolated_environment(upstream_port: int, temp_root: Path) -> dict[str, str]:
         "AGENTOPS_CONTROL_PLANE_MODE": "proxy",
         "AGENTOPS_DEPLOYMENT_MODE": "production",
         "AGENTOPS_NEXT_HOST": "127.0.0.1",
-        "AGENTOPS_POSTGRES_DSN": os.environ["AGENTOPS_POSTGRES_DSN"],
         "NEXT_TELEMETRY_DISABLED": "1",
         "NODE_ENV": "production",
         "TEMP": str(temp_root),
         "TMP": str(temp_root),
         "TMPDIR": str(temp_root),
     })
+    environment.update(postgres_environment())
+    for key in (
+        "AGENTOPS_POSTGRES_SCHEMA",
+        "AGENTOPS_POSTGRES_RUNTIME_API_SCHEMA",
+        "AGENTOPS_POSTGRES_RUNTIME_ROLE",
+    ):
+        if value := os.environ.get(key, "").strip():
+            environment[key] = value
     return environment
 
 
@@ -173,7 +192,7 @@ def main() -> int:
     npm = shutil.which("npm")
     require(bool(node), "node is required")
     require(bool(npm), "npm is required")
-    require(bool(os.environ.get("AGENTOPS_POSTGRES_DSN")), "AGENTOPS_POSTGRES_DSN is required")
+    postgres_environment()
     require((NEXT_APP / "node_modules").is_dir(), "run npm ci in ui/next-app first")
     require(POSTGRES_MIGRATIONS.is_dir(), "Postgres migrations are required")
     source_diff_before = tracked_diff_digest()
@@ -309,6 +328,9 @@ def main() -> int:
                 "production_artifact_started_through_npm_start": True,
                 "postgres_migrations_packaged": True,
                 "production_schema_readiness": True,
+                "runtime_credentials_file_backed": bool(
+                    os.environ.get("AGENTOPS_POSTGRES_DSN_FILE", "").strip()
+                ),
                 "python_api_started": False,
                 "python_proxy_performed": False,
                 "production_upstream_request_count": production_upstream_hits,

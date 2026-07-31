@@ -365,6 +365,9 @@ jobs:
           npm run test:commercial-worker-contract
           npm run build
 
+      - name: Verify PreparedAction lease and terminal receipts
+        run: timeout 420s python3 scripts/postgres_prepared_action_lease_v6_contract_smoke.py
+
       - name: Verify production-only install and start readiness
         working-directory: ui/next-app
         env:
@@ -409,6 +412,14 @@ jobs:
           unset AGENTOPS_POSTGRES_ENTITLEMENT_ADMIN_PASSWORD_FILE
           npm run check:postgres-schema
           npm run start:check
+          runtime_dsn_file="$RUNNER_TEMP/postgres-runtime-dsn"
+          umask 077
+          printf '%s\n' "$runtime_dsn" > "$runtime_dsn_file"
+          echo "AGENTOPS_POSTGRES_DSN=" >> "$GITHUB_ENV"
+          echo "AGENTOPS_POSTGRES_DSN_FILE=$runtime_dsn_file" >> "$GITHUB_ENV"
+          echo "AGENTOPS_POSTGRES_SCHEMA=public" >> "$GITHUB_ENV"
+          echo "AGENTOPS_POSTGRES_RUNTIME_API_SCHEMA=agentops_ci_runtime_api" >> "$GITHUB_ENV"
+          echo "AGENTOPS_POSTGRES_RUNTIME_ROLE=agentops_ci_runtime" >> "$GITHUB_ENV"
 
       - name: Upload commercial production SBOM
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -418,10 +429,9 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
-      - name: Verify PreparedAction lease and terminal receipts
-        run: timeout 420s python3 scripts/postgres_prepared_action_lease_v6_contract_smoke.py
-
       - name: Prove production cannot proxy to Python
+        env:
+          AGENTOPS_REQUIRE_FILE_BACKED_POSTGRES_DSN: "true"
         run: timeout 420s python3 scripts/nextjs_production_python_proxy_fail_closed_smoke.py
 
       - name: Verify tracked source stayed unchanged

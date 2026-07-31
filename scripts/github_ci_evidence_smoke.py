@@ -3,11 +3,29 @@
 from __future__ import annotations
 
 import json
+import http.client
+from unittest.mock import patch
 
-from github_ci_evidence import extract_action_run_ids, parse_run_page_for_head_success, redact
+from github_ci_evidence import (
+    extract_action_run_ids,
+    fetch_url,
+    parse_run_page_for_head_success,
+    redact,
+)
 
 
 HEAD = "1bdcf5bdab3cd5656febca40cbf30efc70027275"
+
+
+class IncompleteResponse:
+    def __enter__(self) -> "IncompleteResponse":
+        return self
+
+    def __exit__(self, *_args: object) -> None:
+        return None
+
+    def read(self) -> bytes:
+        raise http.client.IncompleteRead(b"partial", 12)
 
 
 def main() -> int:
@@ -52,6 +70,16 @@ def main() -> int:
     if "Authorization:" in redacted:
         failures.append("redaction did not remove token-like material")
 
+    with patch(
+        "github_ci_evidence.urllib.request.urlopen",
+        return_value=IncompleteResponse(),
+    ):
+        incomplete_body, incomplete_error = fetch_url("https://example.invalid")
+    if incomplete_body is not None or "IncompleteRead" not in str(incomplete_error):
+        failures.append(
+            f"incomplete HTTP response did not fail closed: {incomplete_error!r}"
+        )
+
     output = {
         "ok": not failures,
         "operation": "github_ci_evidence_smoke",
@@ -61,6 +89,10 @@ def main() -> int:
             "short_sha_rejected": short_only.get("head_matches") is False,
             "failed_status_rejected": failed.get("conclusion") is None,
             "completed_without_success_rejected": completed_without_success.get("conclusion") is None,
+            "incomplete_http_response_failed_closed": (
+                incomplete_body is None
+                and "IncompleteRead" in str(incomplete_error)
+            ),
         },
         "safety": {
             "network_performed": False,
