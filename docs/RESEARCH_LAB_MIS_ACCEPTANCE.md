@@ -38,8 +38,12 @@ credentials, raw prompts or raw responses.
 - MIS Evaluation: `eval_research_d8e188ed4800c9d682f9`
 - MIS Audit records for the evidence hash: 1
 
-The acceptance used an isolated temporary MIS database and a Research Lab state
-directory outside the repository. Neither is committed.
+The final installed acceptance used AgentOps MIS Private Host
+`1.6.0-research-lab-local.1`, packaged from commit `39f8ca0`, and a Research Lab
+state directory under `~/.agentops/research-lab`. The installer created a
+verified pre-update ledger backup, preserved Owner state, kept
+`1.6.0-private-host-preview.44` as the rollback target and restarted the
+host-only launchd service. No database or Research Lab state is committed.
 
 ## Idempotency and failure behavior
 
@@ -76,12 +80,30 @@ Human Workspace routes:
 
 The UI has complete English/Chinese labels and no mock fallback.
 
+## Installed product acceptance
+
+- `agentops host version` reports packaged commit `39f8ca0` and previous version
+  `1.6.0-private-host-preview.44`.
+- `agentops host status` and `agentops host doctor` report a ready loopback Host,
+  ready Owner login and private Tailscale URL with Funnel disabled.
+- The installed, repository-independent `agentops experiment` command validates,
+  plans, executes, shows and syncs the generated-data MLP.
+- Installed first sync created 59 authority objects; exact replay returned 59
+  unchanged objects and no duplicate writes.
+- Machine-facing readback returned the completed Task, both completed Runs, four
+  content-addressed Artifacts and the passing Claim Gate Evaluation.
+- `/workspace/experiments` is present in the installed production UI and remains
+  protected by Human login.
+
 ## Verification
 
 ```text
 (cd incubator/research-lab && python3 -m unittest discover -s tests -v)
 python3 scripts/research_experiment_api_smoke.py
 python3 scripts/agentops_experiment_cli_smoke.py
+python3 scripts/private_host_bundle_smoke.py
+python3 scripts/relay_activation_namespace_install_smoke.py
+python3 scripts/relay_offline_install_smoke.py
 python3 -m py_compile server.py agentops_mis_core/research_experiments.py
 (cd ui/start-building-app && npm run build)
 git diff --check
@@ -90,6 +112,10 @@ git diff --check
 - 19 Research Lab tests pass.
 - Isolated API ingest/list/detail and idempotency smoke passes.
 - Root AgentOps CLI delegation and secret boundary smoke passes.
+- Private Host packaging includes the Research Lab module, example and quickstart;
+  an isolated installed CLI validates the protocol without repository access.
+- Relay exact-wheel allowlisting includes the two new Research Lab modules; both
+  offline install and activation namespace regressions pass.
 - A clean Python 3.11 environment installs `agentops-research-lab-0.4.0` and
   validates the real MLP protocol.
 - The production UI build passes. Browser acceptance shows two completed Trials,
