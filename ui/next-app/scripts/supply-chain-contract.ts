@@ -33,6 +33,10 @@ async function run() {
       source: await readFile(url, "utf8"),
     })),
   );
+  const byocDockerfile = await readFile(
+    new URL("../../../deploy/byoc/Dockerfile", import.meta.url),
+    "utf8",
+  );
   let actionReferenceCount = 0;
   let localWorkflowReferenceCount = 0;
   for (const workflow of workflows) {
@@ -138,6 +142,23 @@ async function run() {
     byoc,
     /does not validate image upgrade or rollback across (?:schema|Schema) versions/,
   );
+  const buildIdentityOffset = byocDockerfile.indexOf(
+    "ARG AGENTOPS_BUILD_IDENTITY=",
+  );
+  const sourceRevisionOffset = byocDockerfile.indexOf(
+    "ARG AGENTOPS_SOURCE_REVISION=",
+  );
+  const identityLabelOffset = byocDockerfile.indexOf(
+    "io.agentops.byoc.build-identity=",
+  );
+  const lastRootfsMutationOffset = Math.max(
+    byocDockerfile.lastIndexOf("\nCOPY "),
+    byocDockerfile.lastIndexOf("\nRUN "),
+  );
+  assert(lastRootfsMutationOffset >= 0);
+  assert(buildIdentityOffset > lastRootfsMutationOffset);
+  assert(sourceRevisionOffset > lastRootfsMutationOffset);
+  assert(identityLabelOffset > lastRootfsMutationOffset);
 
   console.log(JSON.stringify({
     ok: true,
@@ -152,6 +173,7 @@ async function run() {
     postgres_image_digest_pinned: true,
     registry_image_digest_pinned: true,
     registry_manifest_digest_resolved: true,
+    build_identity_outside_rootfs_layers: true,
     workflow_permissions_read_only: true,
     locked_install: true,
     production_prune_ignores_scripts: true,
