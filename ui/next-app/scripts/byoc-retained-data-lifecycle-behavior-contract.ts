@@ -122,6 +122,8 @@ function createFakeDriver() {
     failControlPlaneStart: false,
     failDatabaseTerminationOnce: false,
     failRestorePromotionRenameOnce: false,
+    failAfterProductionRenameOnce: false,
+    failAfterRestorePromotionRenameOnce: false,
     failRestoreDatabaseDrop: false,
     failQuarantineDrop: false,
     controlPlaneRunning: true,
@@ -241,6 +243,22 @@ function createFakeDriver() {
           }
           state.databases.delete(from);
           state.databases.add(to);
+          if (
+            state.failAfterProductionRenameOnce
+            && from === "agentops"
+            && to.startsWith("agentops_quarantine_")
+          ) {
+            state.failAfterProductionRenameOnce = false;
+            return failed("production_rename_interrupted");
+          }
+          if (
+            state.failAfterRestorePromotionRenameOnce
+            && from.startsWith("agentops_restore_")
+            && to === "agentops"
+          ) {
+            state.failAfterRestorePromotionRenameOnce = false;
+            return failed("restore_promotion_interrupted");
+          }
           return ok();
         }
         const drop = sql.match(/^DROP DATABASE IF EXISTS "([^"]+)"$/);
@@ -561,6 +579,101 @@ async function proveRollbackRenameCheckpointResume(root: string) {
   assert.equal(status.state.operation.phase, "rolled_back");
 }
 
+async function proveRollbackPostRenameCrashResume(root: string) {
+  const productionStateDirectory = join(
+    root,
+    "rollback-production-post-rename-state",
+  );
+  const productionDriver = createFakeDriver();
+  const productionOptions = await lifecycleOptions(
+    root,
+    productionStateDirectory,
+    productionDriver,
+  );
+  const productionPlan = await runLifecycle(
+    ["plan", "--to-image", TO_REFERENCE],
+    productionOptions,
+  );
+  await runLifecycle(
+    ["apply", "--plan-id", productionPlan.operation_id],
+    productionOptions,
+  );
+  productionDriver.state.failAfterProductionRenameOnce = true;
+  await expectFailure(
+    () => runLifecycle([
+      "rollback",
+      "--confirm-restore-from-backup",
+      productionPlan.operation_id,
+    ], productionOptions),
+    "lifecycle_database_rename_failed",
+  );
+  let status = await runLifecycle(["status"], productionOptions);
+  assert.equal(
+    status.state.operation.database_swap.phase,
+    "production_rename_started",
+  );
+  assert.equal(productionDriver.state.databases.has("agentops"), false);
+  assert.ok(
+    [...productionDriver.state.databases].some((database) =>
+      database.startsWith("agentops_quarantine_")),
+  );
+  const productionResumed = await runLifecycle([
+    "rollback",
+    "--confirm-restore-from-backup",
+    productionPlan.operation_id,
+  ], productionOptions);
+  assert.equal(productionResumed.phase, "rolled_back");
+
+  const promotionStateDirectory = join(
+    root,
+    "rollback-promotion-post-rename-state",
+  );
+  const promotionDriver = createFakeDriver();
+  const promotionOptions = await lifecycleOptions(
+    root,
+    promotionStateDirectory,
+    promotionDriver,
+  );
+  const promotionPlan = await runLifecycle(
+    ["plan", "--to-image", TO_REFERENCE],
+    promotionOptions,
+  );
+  await runLifecycle(
+    ["apply", "--plan-id", promotionPlan.operation_id],
+    promotionOptions,
+  );
+  promotionDriver.state.failAfterRestorePromotionRenameOnce = true;
+  await expectFailure(
+    () => runLifecycle([
+      "rollback",
+      "--confirm-restore-from-backup",
+      promotionPlan.operation_id,
+    ], promotionOptions),
+    "lifecycle_database_rename_failed",
+  );
+  status = await runLifecycle(["status"], promotionOptions);
+  assert.equal(
+    status.state.operation.database_swap.phase,
+    "restore_promotion_started",
+  );
+  assert.equal(promotionDriver.state.databases.has("agentops"), true);
+  assert.ok(
+    [...promotionDriver.state.databases].some((database) =>
+      database.startsWith("agentops_quarantine_")),
+  );
+  assert.equal(
+    [...promotionDriver.state.databases].some((database) =>
+      database.startsWith("agentops_restore_")),
+    false,
+  );
+  const promotionResumed = await runLifecycle([
+    "rollback",
+    "--confirm-restore-from-backup",
+    promotionPlan.operation_id,
+  ], promotionOptions);
+  assert.equal(promotionResumed.phase, "rolled_back");
+}
+
 async function proveQuarantineCleanupIsRecoverable(root: string) {
   const stateDirectory = join(root, "quarantine-cleanup-state");
   const driver = createFakeDriver();
@@ -664,9 +777,10 @@ try {
   await proveClosedLoop(root);
   await proveApplyCompensation(root);
   await provePostMigrationFailureStopsTarget(root);
-  await proveRollbackPreSwapCheckpointResume(root);
-  await proveRollbackRenameCheckpointResume(root);
-  await proveQuarantineCleanupIsRecoverable(root);
+    await proveRollbackPreSwapCheckpointResume(root);
+    await proveRollbackRenameCheckpointResume(root);
+    await proveRollbackPostRenameCrashResume(root);
+    await proveQuarantineCleanupIsRecoverable(root);
   await proveFailureDoesNotPromote(root);
   await proveAuthorityDatabaseBinding(root);
   await proveConfigurationDriftFailsClosed(root);
@@ -684,8 +798,9 @@ try {
     pre_migration_compensation_verified: true,
     compensation_failure_marks_recovery_required: true,
     post_migration_failure_stops_target: true,
-    rollback_pre_swap_checkpoint_resume_verified: true,
-    rollback_rename_checkpoint_resume_verified: true,
+      rollback_pre_swap_checkpoint_resume_verified: true,
+      rollback_rename_checkpoint_resume_verified: true,
+      rollback_post_rename_crash_resume_verified: true,
     authority_database_binding_verified: true,
     stopped_backup_order_verified: true,
     cleanup_failure_does_not_block_restart: true,
