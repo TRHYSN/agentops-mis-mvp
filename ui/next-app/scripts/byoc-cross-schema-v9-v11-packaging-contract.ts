@@ -6,7 +6,6 @@ import { spawnSync } from "node:child_process";
 
 const repositoryRoot = resolve(process.cwd(), "../..");
 const historicalRevision = "f55def1233403a503a39d9af92371a71770c23f7";
-const currentRevision = "bcab6f986cf74e7672c4919c2730f06d80766d43";
 const oldManifestHash =
   "8cf59998821a27c37b949bcdb94897ad3b61ce4341b79f37cc0e93365d750838";
 const packageLockHash =
@@ -103,7 +102,7 @@ assert.deepEqual(identity, {
 });
 
 git("cat-file", "-e", `${historicalRevision}^{commit}`);
-git("merge-base", "--is-ancestor", historicalRevision, currentRevision);
+git("merge-base", "--is-ancestor", historicalRevision, "HEAD");
 const oldManifest = git(
   "show",
   `${historicalRevision}:ui/next-app/src/server/controlPlane/schemaManifest.ts`,
