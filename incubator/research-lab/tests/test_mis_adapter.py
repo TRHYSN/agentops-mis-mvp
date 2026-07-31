@@ -21,7 +21,16 @@ class MISEvidenceAdapterTests(unittest.TestCase):
                 stage="smoke",
                 protocol_hash="a" * 64,
                 provenance_hash="b" * 64,
-                protocol_document={"protocol": {"primary_metric": "accuracy"}},
+                protocol_document={
+                    "command_template": [
+                        "/private/venv/bin/python",
+                        "/private/project/train.py",
+                        "--config",
+                        "safe.yaml",
+                    ],
+                    "workdir": "/private/project",
+                    "protocol": {"primary_metric": "accuracy"},
+                },
             )
             ledger.ensure_trial(trial_id="trl_test", experiment_id="exp_test", params={"seed": 7})
             ledger.start_attempt(
@@ -55,6 +64,20 @@ class MISEvidenceAdapterTests(unittest.TestCase):
             self.assertNotIn(str(root), serialized)
             self.assertNotIn("run_dir", serialized)
             self.assertNotIn("stdout.log", serialized)
+            self.assertNotIn("/private/", serialized)
+            self.assertEqual(
+                bundle["experiment"]["protocol"]["command_template"],
+                [
+                    "[LOCAL_PATH_OMITTED]/python",
+                    "[LOCAL_PATH_OMITTED]/train.py",
+                    "--config",
+                    "safe.yaml",
+                ],
+            )
+            self.assertEqual(
+                bundle["experiment"]["protocol"]["workdir"],
+                "[LOCAL_WORKDIR_OMITTED]",
+            )
             self.assertTrue(bundle["omissions"]["artifact_bodies"])
 
     def test_remote_sync_fails_closed_before_network(self) -> None:

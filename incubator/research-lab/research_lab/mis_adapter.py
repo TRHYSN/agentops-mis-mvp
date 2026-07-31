@@ -2,8 +2,11 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import urllib.error
 import urllib.request
+from copy import deepcopy
+from pathlib import Path, PureWindowsPath
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -20,6 +23,42 @@ def _decode_json(value: Any, fallback: Any) -> Any:
         return json.loads(value)
     except json.JSONDecodeError:
         return fallback
+
+
+def _looks_like_local_path(value: str) -> bool:
+    return (
+        value.startswith(("/", "~/", ".\\", "..\\"))
+        or bool(re.match(r"^[A-Za-z]:[\\/]", value))
+    )
+
+
+def _public_protocol_document(value: Any) -> dict[str, Any]:
+    """Omit machine-local command/workdir paths at the MIS sync boundary."""
+    if not isinstance(value, dict):
+        return {}
+    document = deepcopy(value)
+    command = document.get("command_template")
+    if isinstance(command, list):
+        public_command = []
+        for item in command:
+            if isinstance(item, str) and _looks_like_local_path(item):
+                name = (
+                    PureWindowsPath(item).name
+                    if re.match(r"^[A-Za-z]:[\\/]", item)
+                    else Path(item).name
+                )
+                public_command.append(
+                    f"[LOCAL_PATH_OMITTED]/{name}"
+                    if name
+                    else "[LOCAL_PATH_OMITTED]"
+                )
+            else:
+                public_command.append(item)
+        document["command_template"] = public_command
+    workdir = document.get("workdir")
+    if isinstance(workdir, str) and _looks_like_local_path(workdir):
+        document["workdir"] = "[LOCAL_WORKDIR_OMITTED]"
+    return document
 
 
 def build_mis_evidence_bundle(
@@ -123,7 +162,9 @@ def build_mis_evidence_bundle(
             "status": experiment["status"],
             "protocol_hash": experiment["protocol_hash"],
             "provenance_hash": experiment.get("provenance_hash"),
-            "protocol": _decode_json(experiment.get("protocol_json"), {}),
+            "protocol": _public_protocol_document(
+                _decode_json(experiment.get("protocol_json"), {})
+            ),
             "claim_eligible": bool(experiment["claim_eligible"]),
             "claim_reasons": _decode_json(experiment.get("claim_reasons_json"), []),
             "created_at": experiment["created_at"],

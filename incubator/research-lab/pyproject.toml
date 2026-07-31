@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "agentops-research-lab"
-version = "0.4.0"
+version = "0.4.1"
 description = "Standalone asynchronous experiment-integrity control plane"
 readme = "README.md"
 requires-python = ">=3.11"

@@ -41,6 +41,7 @@ RUNTIME_FILES = {
     "scripts/customer_worker_real_runtime_acceptance.py",
     "scripts/hermes_openclaw_loop.py",
     "scripts/local_runtime_acceptance.py",
+    "scripts/prepare_bwformer_research_lab_smoke.py",
     "scripts/run_kb_bot_demo.py",
     "scripts/run_local_stack.py",
     "scripts/v1_5_live_product_readiness_smoke.py",
