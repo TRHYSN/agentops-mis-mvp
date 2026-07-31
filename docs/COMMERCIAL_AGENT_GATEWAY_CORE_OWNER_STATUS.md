@@ -84,7 +84,7 @@ schema, applies the current migration runner, and covers:
 route ownership, bounded bodies, explicit Free Local proxy switch, and absence
 of Python process/proxy calls in production owners.
 
-The schema contract is now `agentops_commercial_postgres_v10` with twelve
+The schema contract is now `agentops_commercial_postgres_v11` with thirteen
 checksum-pinned migrations. Workspace entitlement evaluation is serialized by
 a transaction-scoped workspace advisory lock. New enrollment, child-session,
 and run-start writes fail closed on missing, inactive, suspended, expired,
@@ -103,6 +103,15 @@ single-winner transitions, task/run/Agent/config drift, entitlement denial
 evidence, one-time credential delivery, replay omission, and a database-wide
 raw-token scan.
 
+Entitlement administration uses a workspace-scoped TypeScript route to exchange
+an authenticated, CSRF-bound Human Session for a database-backed challenge.
+The challenge is bound to the canonical request, stores only the token SHA-256,
+expires within 90 seconds, consumes the Human Session, and can be claimed once.
+The runtime can only issue; the separate entitlement-admin role can only plan
+or apply. PostgreSQL rechecks both database-role attributes and the operator's
+current membership and credential at claim time, so role elevation or Human
+authority revocation after issue fails closed.
+
 Run start now requires a positive `estimated_cost_usd` and assigns
 `started_at` from the PostgreSQL control-plane transaction. The same
 transaction reserves concurrent-run, monthly-run, and monthly-cost capacity.
@@ -113,7 +122,17 @@ counted as a new monthly run. Gateway heartbeat, approval rejection,
 PreparedAction success/failure/timeout, and enrollment management decisions all
 close cost state in their owning transaction. Reservation estimate, observed,
 and settled amounts plus the `runs.cost_usd` compatibility projection are
-`NUMERIC(18,6)`.
+`NUMERIC(18,6)`. Terminal settlement advances both observed and settled cost to
+the same authoritative receipt amount.
+
+The v10 cost-authority migration refuses to begin while a non-enrollment
+execution run is still `running` or `waiting_approval`. Operators must drain or
+reconcile those runs before retrying the migration; the failed preflight leaves
+the previous schema intact. Historical billing months are derived by parsing
+stored timestamps and converting them to UTC before truncating to month.
+Timestamps with an explicit offset retain that instant; legacy timestamps
+without an offset are interpreted as UTC, independent of the PostgreSQL session
+time zone.
 
 The complete Human review acceptance also covers the first-party Human Session
 owners for login, logout, current session, approval list/detail/decision,
@@ -126,13 +145,16 @@ TypeScript Worker and PostgreSQL 16, performed a real provider call with
 
 ## Still Open
 
-The broader commercial product still needs direct production ownership and
-acceptance for:
+This candidate now includes direct TypeScript/PostgreSQL ownership and contract
+coverage for approval-gated enrollment, workspace entitlement administration,
+restricted database identities, exact cost projection, and BYOC packaging plus
+backup/restore behavior. Release authority still requires:
 
-- approval-gated enrollment browser workflow and operator queue presentation
-- remaining commercial policy and entitlement administration surfaces
 - remaining browser dashboard, agent, connector, and deployment workflows
-- BYOC packaging, upgrade, backup/restore, rollback, and promotion receipts
+- a real external BYOC deployment, upgrade, rollback, and restore drill
+- a dedicated restricted `NOLOGIN` owner for `SECURITY DEFINER` functions
+- a clean exact-head Hermes plus OpenClaw acceptance receipt
+- exact-head GitHub Actions and supply-chain evidence
 
 Commits after `72a1b9f` require a new same-SHA Hermes/OpenClaw run before any
 release claim. This status therefore records route ownership and prior frozen

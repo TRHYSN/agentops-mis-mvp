@@ -103,6 +103,11 @@ token's provider-spend authority. Provider credentials remain inside the
 Worker/runtime boundary, and the Gateway rejects any observed or settled cost
 above the reservation.
 
+Before applying the v10 cost-authority migration to an existing installation,
+drain non-enrollment runs in `running` or `waiting_approval`. The migration
+fails before changing the schema when such a run exists, so an operator can
+reconcile it on the previous version and retry without a partial cutover.
+
 ## Evidence Semantics
 
 A successful receipt requires all of the following:
@@ -144,3 +149,31 @@ not start, a real provider call ran with `dry_run=false`, and `source_commit`
 matches the clean candidate `HEAD`. The harness rejects tracked or untracked
 worktree changes before execution and requires the tracked source fingerprint
 and Git identity to remain unchanged for the full run.
+
+The same acceptance provisions distinct migrator, runtime, and entitlement
+administrator database identities. Normal fixture and product writes use the
+restricted runtime. The BYOC entitlement administrator receives only its admin
+DSN, the operator password, the control-plane HTTPS URL, and non-secret operator
+identity/Origin configuration. The request URL is provided through
+`AGENTOPS_ENTITLEMENT_CONTROL_PLANE_URL`; optional Origin/CSRF binding uses
+`AGENTOPS_ENTITLEMENT_CONTROL_PLANE_ORIGIN`. It waits for control-plane health
+and requires the workspace-scoped v11 challenge route before the one-shot
+command starts; the legacy direct-table path therefore fails closed when that
+API is absent. Non-loopback requests require HTTPS, and the Compose-internal
+plain HTTP service address is not a commercial authentication channel. It never
+receives the runtime/migrator DSN or Human Session HMAC key. Preflight response
+bodies are not read, and URLs, cookies, CSRF values, passwords, and challenge
+tokens are not logged. Next receives only the runtime DSN, while the TypeScript
+Worker receives no database or Human Session credential. Caller
+`DATABASE_URL`, libpq `PG*`, Postgres component, and secret-file variables are
+removed before child-process launch.
+
+Provider-visible assistant text and provider error detail are never persisted as
+summaries. Adapters return fixed omission text, and the Commercial Worker
+independently replaces adapter summary/error fields before writing runtime,
+tool, run, artifact, audit, or receipt evidence. The retained provider evidence
+is limited to bounded execution metadata and a SHA-256 payload hash.
+
+A success receipt is emitted only after the `.next` artifact hash remains
+unchanged before startup, after acceptance, and after teardown, and after the
+ephemeral schemas and restricted roles are absent from the PostgreSQL catalog.

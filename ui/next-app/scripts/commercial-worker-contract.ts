@@ -22,7 +22,10 @@ import { HermesAdapter } from "../src/worker/adapters";
 
 const TOKEN = "contract-bearer-fixture-0123456789abcdef";
 const TASK_CANARY = "credential_canary_abcdefghijklmnop";
-const OUTPUT_CANARY = "token_canary_qrstuvwxyz123456";
+const OUTPUT_CANARY = "provider_visible_output_qrstuvwxyz123456";
+const ERROR_CANARY = "provider_visible_error_abcdefghijkl987654";
+const OMITTED_SUMMARY =
+  "Provider response omitted; execution completed and bounded metadata was recorded.";
 const WORKSPACE_ID = "ws_commercial_ts_contract";
 const AGENT_ID = "agt_commercial_ts_contract";
 const PLAN_HASH = "a".repeat(64);
@@ -445,7 +448,7 @@ class ContractAdapter implements RuntimeAdapter {
       ok: true,
       runtime: "hermes",
       modelName: this.modelName,
-      outputSummary: `Completed governed summary ${OUTPUT_CANARY}.`,
+      outputSummary: `Untrusted provider-visible output: ${OUTPUT_CANARY}.`,
       rawPayloadHash: stableHash({ contract: "runtime", call: this.calls }),
       targetResource: "hermes://contract/runtime",
       durationMs: 12,
@@ -454,7 +457,7 @@ class ContractAdapter implements RuntimeAdapter {
       dryRun: false,
       retryable: false,
       errorType: null,
-      errorMessage: null,
+      errorMessage: `Untrusted provider-visible error: ${ERROR_CANARY}.`,
     };
   }
 }
@@ -497,6 +500,11 @@ async function sourceBoundaryContract() {
   assert.doesNotMatch(orchestrator, /from\s+["']pg["']|SELECT\s|INSERT\s|UPDATE\s/i);
   assert.match(orchestrator, /\/api\/mis\/agent-gateway/);
   assert.match(orchestrator, /provider_call_performed/);
+  assert.match(orchestrator, /PROVIDER_RESPONSE_OMITTED|PROVIDER_SUCCESS_SUMMARY/);
+  assert.doesNotMatch(
+    orchestrator,
+    /output_summary:\s*redactText\(result\.outputSummary/,
+  );
   assert.match(orchestrator, /plan-evidence-manifests/);
   assert.match(cliSource, /gateway_credentials_must_come_from_environment/);
   assert.match(cliSource, /process\.env\.AGENTOPS_AGENT_TOKEN/);
@@ -509,7 +517,30 @@ async function sourceBoundaryContract() {
     /nextjs_postgres_real_worker_human_review_v4/,
   );
   assert.match(realAcceptanceSource, /"--estimated-cost-usd"/);
-  assert.match(realAcceptanceSource, /max_concurrent_runs/);
+  assert.match(realAcceptanceSource, /configure:workspace-entitlement/);
+  assert.match(realAcceptanceSource, /"--max-concurrent-runs"/);
+  assert.match(
+    realAcceptanceSource,
+    /entitlement_admin_forbidden_dml_verified/,
+  );
+  assert.match(
+    realAcceptanceSource,
+    /subprocess_environment_scrub_verified/,
+  );
+  assert.match(realAcceptanceSource, /assert_harness_safety_helper_contracts\(\)/);
+  assert.match(realAcceptanceSource, /name\.startswith\("POSTGRES_"\)/);
+  assert.match(realAcceptanceSource, /sqlstate.*42501|42501.*sqlstate/s);
+  assert.doesNotMatch(realAcceptanceSource, /prompt_secret/);
+  assert.match(
+    realAcceptanceSource,
+    /"insert"[\s\S]*"update"[\s\S]*"delete"[\s\S]*"truncate"[\s\S]*"ddl"/,
+  );
+  assert.match(realAcceptanceSource, /process_stop_receipt = stop_process/);
+  assert.match(
+    realAcceptanceSource,
+    /fixture_cleanup_verified_before_success/,
+  );
+  assert.match(realAcceptanceSource, /next_artifact_identity_verified/);
   assert.match(realAcceptanceSource, /candidate_source_worktree_not_clean/);
   assert.match(realAcceptanceSource, /"source_commit"/);
   assert.match(realAcceptanceSource, /"python_worker_started"/);
@@ -569,6 +600,8 @@ async function main() {
     assert.equal(hermesResult.ok, true);
     assert.equal(hermesResult.providerCallPerformed, true);
     assert.equal(hermesResult.dryRun, false);
+    assert.equal(hermesResult.outputSummary.includes("Bounded contract response"), false);
+    assert.match(hermesResult.outputSummary, /Provider response omitted/);
     assert.equal(state.hermesTargetRequests, 1);
     assert.match(hermesResult.targetResource, /\/v1\/chat\/completions$/);
 
@@ -647,8 +680,11 @@ async function main() {
     assert.equal(JSON.stringify(happy).includes(TOKEN), false);
     assert.equal(JSON.stringify(happy).includes(TASK_CANARY), false);
     assert.equal(JSON.stringify(happy).includes(OUTPUT_CANARY), false);
-    assert.match(happy.output_summary || "", /\[REDACTED_CANARY\]/);
+    assert.equal(JSON.stringify(happy).includes(ERROR_CANARY), false);
+    assert.equal(happy.output_summary, OMITTED_SUMMARY);
     assert.equal(JSON.stringify(happyRequests).includes(TOKEN), false);
+    assert.equal(JSON.stringify(happyRequests).includes(OUTPUT_CANARY), false);
+    assert.equal(JSON.stringify(happyRequests).includes(ERROR_CANARY), false);
     const runStartBody = bodyFor(
       "/api/mis/agent-gateway/runs/start",
       happyRequests,
@@ -680,6 +716,8 @@ async function main() {
       runtimeMetadata.prompt_profile_version,
       "worker_prompt_profiles_v1",
     );
+    assert.equal(runtimeBody.output_summary, OMITTED_SUMMARY);
+    assert.equal(runtimeBody.error_message, null);
     const toolBody = bodyFor("/api/mis/agent-gateway/tool-calls", happyRequests);
     const toolArgs = toolBody.args as Record<string, unknown>;
     assert.equal(toolArgs.provider_call_performed, true);
@@ -756,6 +794,10 @@ async function main() {
     assert.equal(invalid.ok, false);
     assert.equal(invalid.reason, "runtime_failed");
     assert.equal(invalid.error_type, "ProviderAttestationInvalid");
+    assert.equal(JSON.stringify(invalid).includes(OUTPUT_CANARY), false);
+    assert.equal(JSON.stringify(invalid).includes(ERROR_CANARY), false);
+    assert.equal(JSON.stringify(invalidRequests).includes(OUTPUT_CANARY), false);
+    assert.equal(JSON.stringify(invalidRequests).includes(ERROR_CANARY), false);
     assert.equal(
       invalidRequests.some(
         (item) =>
@@ -852,6 +894,7 @@ async function main() {
       credentials_omitted: true,
       raw_prompt_omitted: true,
       raw_response_omitted: true,
+      untrusted_adapter_output_omitted: true,
     }, null, 2)}\n`);
   } finally {
     await new Promise<void>((resolve) => server.close(() => resolve()));

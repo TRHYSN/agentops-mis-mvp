@@ -18,7 +18,7 @@ import {
   readHumanDashboard,
 } from "../src/server/controlPlane/humanReadModels";
 import { ControlPlaneHttpError } from "../src/server/controlPlane/http";
-import { runPostgresSchemaCommand } from "../src/server/controlPlane/schemaReadiness";
+import { createPostgresRoleBoundaryFixture } from "./postgres-role-boundary-test-helper";
 
 const BASE_DSN = String(process.env.AGENTOPS_POSTGRES_DSN || "").trim();
 const WORKSPACE = "ws_human_reads";
@@ -32,18 +32,6 @@ const FOREIGN_RUN = "run_human_reads_foreign";
 const FOREIGN_CANARY = "foreign-read-canary-must-not-cross";
 const SESSION_TOKEN = randomBytes(32).toString("base64url");
 const SESSION_HMAC_KEY = randomBytes(48).toString("base64url");
-const SCHEMA = `human_reads_${randomBytes(6).toString("hex")}`;
-
-function quotedIdentifier(value: string) {
-  assert.match(value, /^[a-z][a-z0-9_]+$/);
-  return `"${value}"`;
-}
-
-function scopedDsn() {
-  const parsed = new URL(BASE_DSN);
-  parsed.searchParams.set("options", `-csearch_path=${SCHEMA}`);
-  return parsed.toString();
-}
 
 function sessionHash() {
   return createHmac("sha256", SESSION_HMAC_KEY)
@@ -373,25 +361,24 @@ async function seed(client: Client) {
 
 async function runContract() {
   assert.ok(BASE_DSN, "AGENTOPS_POSTGRES_DSN is required");
-  const admin = new Client({ connectionString: BASE_DSN });
-  await admin.connect();
+  const originalTsControlPlaneMode =
+    process.env.AGENTOPS_TS_CONTROL_PLANE_MODE;
+  const originalPostgresSsl = process.env.AGENTOPS_POSTGRES_SSL;
+  const originalSessionHmacKey =
+    process.env.AGENTOPS_HUMAN_SESSION_HMAC_KEY;
+  const roleFixture = await createPostgresRoleBoundaryFixture(
+    BASE_DSN,
+    "human_reads",
+  );
+  let restoreRuntimeEnvironment: () => void = () => undefined;
   try {
-    await admin.query(`CREATE SCHEMA ${quotedIdentifier(SCHEMA)}`);
-    const dsn = scopedDsn();
-    const migration = await runPostgresSchemaCommand("migrate", {
-      connectionString: dsn,
-    });
-    process.env.AGENTOPS_DEPLOYMENT_MODE = "production";
-    process.env.AGENTOPS_CONTROL_PLANE_MODE = "postgres";
+    const migration = roleFixture.migration;
+    await seed(roleFixture.owner);
+
+    restoreRuntimeEnvironment = roleFixture.activateRuntimeEnvironment();
     process.env.AGENTOPS_TS_CONTROL_PLANE_MODE = "postgres";
-    process.env.AGENTOPS_POSTGRES_DSN = dsn;
     process.env.AGENTOPS_POSTGRES_SSL = "0";
     process.env.AGENTOPS_HUMAN_SESSION_HMAC_KEY = SESSION_HMAC_KEY;
-
-    const client = new Client({ connectionString: dsn });
-    await client.connect();
-    try {
-      await seed(client);
 
       const agents = await listHumanAgents(browserRequest("/agents"));
       assert.equal(agents.status, 200);
@@ -526,7 +513,8 @@ async function runContract() {
         ok: true,
         contract: "human_workspace_read_models_postgres_v1",
         schema_contract: migration.schema_contract,
-        direct_typescript_postgres_owner: true,
+        direct_typescript_postgres_restricted_runtime: true,
+        runtime_role_boundary_verified: true,
         workspace_agent_authority: true,
         cross_workspace_owner_identity_omitted: true,
         workspace_evaluation_tool_audit_isolation: true,
@@ -540,15 +528,26 @@ async function runContract() {
         sqlite_opened: false,
         token_omitted: true,
       }));
-      await closeControlPlanePoolForTests();
-    } finally {
-      await client.end();
-    }
   } finally {
-    await admin.query(
-      `DROP SCHEMA IF EXISTS ${quotedIdentifier(SCHEMA)} CASCADE`,
+    await closeControlPlanePoolForTests();
+    restoreRuntimeEnvironment();
+    const restore = (
+      key: string,
+      value: string | undefined,
+    ) => {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    };
+    restore(
+      "AGENTOPS_TS_CONTROL_PLANE_MODE",
+      originalTsControlPlaneMode,
     );
-    await admin.end();
+    restore("AGENTOPS_POSTGRES_SSL", originalPostgresSsl);
+    restore(
+      "AGENTOPS_HUMAN_SESSION_HMAC_KEY",
+      originalSessionHmacKey,
+    );
+    await roleFixture.cleanup();
   }
 }
 

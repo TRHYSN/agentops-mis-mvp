@@ -6,23 +6,13 @@ import { NextRequest } from "next/server";
 import { Client } from "pg";
 
 import { ControlPlaneHttpError } from "../src/server/controlPlane/http";
-import { runPostgresSchemaCommand } from "../src/server/controlPlane/schemaReadiness";
+import {
+  createPostgresRoleBoundaryFixture,
+} from "./postgres-role-boundary-test-helper";
 
 const baseDsn = String(process.env.AGENTOPS_POSTGRES_DSN || "").trim();
-const schema = `loop_supervision_${randomBytes(6).toString("hex")}`;
 const token = `contract_loop_token_${randomBytes(24).toString("hex")}`;
 const tokenHash = createHash("sha256").update(token, "utf8").digest("hex");
-
-function quotedIdentifier(value: string) {
-  assert.match(value, /^[a-z][a-z0-9_]+$/);
-  return `"${value}"`;
-}
-
-function scopedDsn() {
-  const parsed = new URL(baseDsn);
-  parsed.searchParams.set("options", `-csearch_path=${schema}`);
-  return parsed.toString();
-}
 
 function request(agentId = "agt_loop_contract") {
   return new NextRequest(
@@ -125,21 +115,20 @@ async function seed(client: Client) {
 
 async function runContract() {
   assert.ok(baseDsn, "AGENTOPS_POSTGRES_DSN is required");
-  const admin = new Client({ connectionString: baseDsn });
-  await admin.connect();
+  const roleFixture = await createPostgresRoleBoundaryFixture(
+    baseDsn,
+    "loop_supervision",
+  );
+  const restoreRuntimeEnvironment =
+    roleFixture.activateRuntimeEnvironment();
   try {
-    await admin.query(`CREATE SCHEMA ${quotedIdentifier(schema)}`);
-    const dsn = scopedDsn();
-    const migration = await runPostgresSchemaCommand("migrate", {
-      connectionString: dsn,
-    });
-    process.env.AGENTOPS_DEPLOYMENT_MODE = "production";
-    process.env.AGENTOPS_CONTROL_PLANE_MODE = "postgres";
+    const migration = roleFixture.migration;
     process.env.AGENTOPS_TS_CONTROL_PLANE_MODE = "postgres";
-    process.env.AGENTOPS_POSTGRES_DSN = dsn;
     process.env.AGENTOPS_POSTGRES_SSL = "0";
 
-    const client = new Client({ connectionString: dsn });
+    const client = new Client({
+      connectionString: roleFixture.ownerDsn,
+    });
     await client.connect();
     try {
       await seed(client);
@@ -220,7 +209,8 @@ async function runContract() {
         contract: "nextjs_postgres_worker_loop_supervision_v1",
         ok: true,
         schema_contract: migration.schema_contract,
-        direct_typescript_postgres_owner: true,
+        direct_typescript_postgres_restricted_runtime: true,
+        database_role_boundary_verified: true,
         bearer_tasks_read_scope: true,
         workspace_agent_task_assignment: true,
         verified_plan_method_gate: true,
@@ -237,8 +227,8 @@ async function runContract() {
       await client.end();
     }
   } finally {
-    await admin.query(`DROP SCHEMA IF EXISTS ${quotedIdentifier(schema)} CASCADE`);
-    await admin.end();
+    restoreRuntimeEnvironment();
+    await roleFixture.cleanup();
   }
 }
 

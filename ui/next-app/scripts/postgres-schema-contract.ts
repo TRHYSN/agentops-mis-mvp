@@ -11,6 +11,10 @@ import {
   runPostgresSchemaCommand,
   SchemaReadinessError,
 } from "../src/server/controlPlane/schemaReadiness";
+import {
+  createPostgresRoleBoundaryFixture,
+  type PostgresRoleBoundaryFixture,
+} from "./postgres-role-boundary-test-helper";
 
 const baseDsn = String(process.env.AGENTOPS_POSTGRES_DSN || "").trim();
 const schemas: string[] = [];
@@ -189,7 +193,14 @@ async function verifyGovernedKnowledgeIndex(connectionString: string) {
   }
 }
 
-function startCheck(connectionString?: string) {
+function startCheck(
+  connectionString?: string,
+  boundary?: Readonly<{
+    applicationSchema: string;
+    runtimeApiSchema: string;
+    runtimeRole: string;
+  }>,
+) {
   const environment: NodeJS.ProcessEnv = {
     ...process.env,
     AGENTOPS_DEPLOYMENT_MODE: "production",
@@ -199,6 +210,16 @@ function startCheck(connectionString?: string) {
   };
   if (connectionString) environment.AGENTOPS_POSTGRES_DSN = connectionString;
   else delete environment.AGENTOPS_POSTGRES_DSN;
+  if (boundary) {
+    environment.AGENTOPS_POSTGRES_SCHEMA = boundary.applicationSchema;
+    environment.AGENTOPS_POSTGRES_RUNTIME_API_SCHEMA =
+      boundary.runtimeApiSchema;
+    environment.AGENTOPS_POSTGRES_RUNTIME_ROLE = boundary.runtimeRole;
+  } else {
+    delete environment.AGENTOPS_POSTGRES_SCHEMA;
+    delete environment.AGENTOPS_POSTGRES_RUNTIME_API_SCHEMA;
+    delete environment.AGENTOPS_POSTGRES_RUNTIME_ROLE;
+  }
   return spawnSync(process.execPath, [startScript, "--check"], {
     encoding: "utf8",
     env: environment,
@@ -234,6 +255,7 @@ async function runContract() {
     throw new SchemaReadinessError("postgres_dsn_required");
   }
   const admin = new Client({ connectionString: baseDsn });
+  let readyFixture: PostgresRoleBoundaryFixture | undefined;
   await admin.connect();
   try {
     const versionResult = await admin.query<{ server_version_num: string }>(
@@ -271,21 +293,26 @@ async function runContract() {
     assert.equal(cliCheck.status, 0);
     assertBoundedProcessOutput(cliCheck);
 
-    const fresh = await createSchema(admin, "fresh");
-    const freshReceipt = await runPostgresSchemaCommand(
-      "migrate",
-      { connectionString: fresh.connectionString },
+    readyFixture = await createPostgresRoleBoundaryFixture(
+      baseDsn,
+      "schema_ready",
     );
+    const fresh = { connectionString: readyFixture.ownerDsn };
+    const freshReceipt = readyFixture.migration;
     assert.equal(freshReceipt.applied_count, POSTGRES_MIGRATION_MANIFEST.length);
     assert.equal(freshReceipt.current_count, 0);
     await verifyGovernedKnowledgeIndex(fresh.connectionString);
 
-    const readyStart = startCheck(fresh.connectionString);
+    const readyStart = startCheck(
+      readyFixture.runtimeDsn,
+      readyFixture,
+    );
     assert.equal(readyStart.status, 0);
     assertBoundedProcessOutput(readyStart);
     const startReceipt = JSON.parse(String(readyStart.stdout).trim()) as {
       contract?: string;
       schema_ready?: boolean;
+      database_role_boundary_verified?: boolean;
       production_python_fallback?: boolean;
     };
     assert.equal(startReceipt.contract, "nextjs_start_boundary_v2");
@@ -295,9 +322,10 @@ async function runContract() {
         startReceipt as typeof startReceipt & {
           schema_fingerprint_verified?: boolean;
         }
-      ).schema_fingerprint_verified,
+    ).schema_fingerprint_verified,
       true,
     );
+    assert.equal(startReceipt.database_role_boundary_verified, true);
     assert.equal(startReceipt.production_python_fallback, false);
 
     const beforeCheck = await ledgerSnapshot(fresh.connectionString);
@@ -454,12 +482,14 @@ async function runContract() {
       production_start_fail_closed: true,
       production_start_drift_fail_closed: true,
       production_start_schema_ready: true,
+      production_start_restricted_runtime: true,
       production_python_fallback: false,
       credentials_omitted: true,
       sql_omitted: true,
       row_data_omitted: true,
     }));
   } finally {
+    await readyFixture?.cleanup();
     for (const schema of schemas.reverse()) {
       await admin.query(`DROP SCHEMA IF EXISTS ${quotedIdentifier(schema)} CASCADE`);
     }

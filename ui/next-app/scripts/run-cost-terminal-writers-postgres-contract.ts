@@ -321,9 +321,11 @@ async function assertReservedWriter(
   const row = (await client.query<{
     run_status: string;
     state: string;
+    observed_cost_usd: string;
     settled_cost_usd: string;
   }>(
     `SELECT run.status AS run_status,reservation.state,
+      reservation.observed_cost_usd::text,
       reservation.settled_cost_usd::text
     FROM runs run
     JOIN run_cost_reservations reservation
@@ -334,6 +336,7 @@ async function assertReservedWriter(
   )).rows[0];
   assert.equal(row?.run_status, input.terminalStatus);
   assert.equal(row?.state, "settled");
+  assert.equal(row?.observed_cost_usd, "5.000000");
   assert.equal(row?.settled_cost_usd, "5.000000");
 
   await client.query("BEGIN");
@@ -454,6 +457,7 @@ async function run() {
         approval_rejection_settled: true,
         prepared_action_success_settled: true,
         prepared_action_failure_settled: true,
+        terminal_observed_cost_advanced: true,
         untrusted_zero_refund_forbidden: true,
         settlement_replay_idempotent: true,
         billing_class_compatibility_covered_by_schema_contract: true,

@@ -28,6 +28,144 @@ function fail(code) {
   throw error;
 }
 
+function requiredCommandOption(command, option) {
+  const indexes = command.flatMap((value, index) =>
+    value === option ? [index] : []
+  );
+  if (indexes.length !== 1 || indexes[0] === command.length - 1) {
+    fail(`${option.slice(2).replaceAll("-", "_")}_required`);
+  }
+  const value = command[indexes[0] + 1].trim();
+  if (!value || value.length > 256 || /[\u0000-\u001f\u007f]/.test(value)) {
+    fail(`${option.slice(2).replaceAll("-", "_")}_invalid`);
+  }
+  return value;
+}
+
+function isLoopbackHostname(hostname) {
+  const normalized = hostname.toLowerCase().replace(/^\[|\]$/g, "");
+  if (normalized === "localhost" || normalized === "::1") {
+    return true;
+  }
+  const octets = normalized.split(".");
+  return (
+    octets.length === 4
+    && octets.every((octet) => /^\d{1,3}$/.test(octet))
+    && Number(octets[0]) === 127
+    && octets.every((octet) => Number(octet) <= 255)
+  );
+}
+
+export function entitlementChallengeEndpoint({
+  controlPlaneUrl,
+  controlPlaneOrigin,
+  command,
+  operatorUsername,
+}) {
+  let baseUrl;
+  try {
+    baseUrl = new URL(controlPlaneUrl);
+  } catch {
+    fail("entitlement_control_plane_url_invalid");
+  }
+  if (
+    !["http:", "https:"].includes(baseUrl.protocol)
+    || baseUrl.username
+    || baseUrl.password
+    || baseUrl.search
+    || baseUrl.hash
+    || (baseUrl.pathname !== "/" && baseUrl.pathname !== "")
+  ) {
+    fail("entitlement_control_plane_url_invalid");
+  }
+  if (baseUrl.protocol !== "https:" && !isLoopbackHostname(baseUrl.hostname)) {
+    fail("entitlement_control_plane_https_required");
+  }
+  let requestOrigin = "";
+  if (controlPlaneOrigin?.trim()) {
+    let originUrl;
+    try {
+      originUrl = new URL(controlPlaneOrigin);
+    } catch {
+      fail("entitlement_control_plane_origin_invalid");
+    }
+    if (
+      !["http:", "https:"].includes(originUrl.protocol)
+      || originUrl.username
+      || originUrl.password
+      || originUrl.search
+      || originUrl.hash
+      || (originUrl.pathname !== "/" && originUrl.pathname !== "")
+    ) {
+      fail("entitlement_control_plane_origin_invalid");
+    }
+    if (
+      originUrl.protocol !== "https:"
+      && !isLoopbackHostname(originUrl.hostname)
+    ) {
+      fail("entitlement_control_plane_origin_https_required");
+    }
+    requestOrigin = originUrl.origin;
+  }
+
+  const username = operatorUsername.trim();
+  if (
+    !/^[a-z0-9][a-z0-9._-]{2,63}$/i.test(username)
+  ) {
+    fail("entitlement_operator_username_invalid");
+  }
+  const workspaceId = requiredCommandOption(command, "--workspace-id");
+  requiredCommandOption(command, "--operator-user-id");
+  return {
+    endpoint: new URL(
+      `api/mis/workspaces/${encodeURIComponent(workspaceId)}/entitlement-admin/challenges`,
+      baseUrl,
+    ),
+    requestOrigin,
+  };
+}
+
+export async function assertEntitlementChallengeApi({
+  controlPlaneUrl,
+  controlPlaneOrigin,
+  command,
+  operatorUsername,
+  fetchImplementation = fetch,
+  timeoutMs = 5_000,
+}) {
+  const { endpoint, requestOrigin } = entitlementChallengeEndpoint({
+    controlPlaneUrl,
+    controlPlaneOrigin,
+    command,
+    operatorUsername,
+  });
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  timeout.unref?.();
+  try {
+    const response = await fetchImplementation(endpoint, {
+      headers: requestOrigin ? { origin: requestOrigin } : undefined,
+      method: "OPTIONS",
+      redirect: "manual",
+      signal: controller.signal,
+    });
+    const allowedMethods = (response.headers.get("allow") || "")
+      .split(",")
+      .map((method) => method.trim().toUpperCase());
+    if (!response.ok || !allowedMethods.includes("POST")) {
+      fail("entitlement_challenge_api_unavailable");
+    }
+  } catch (error) {
+    if (error?.code === "entitlement_challenge_api_unavailable") {
+      throw error;
+    }
+    fail("entitlement_challenge_api_unavailable");
+  } finally {
+    clearTimeout(timeout);
+  }
+  return endpoint;
+}
+
 function stableSecretBytes(sourcePath) {
   const before = lstatSync(sourcePath);
   if (!before.isFile() || before.isSymbolicLink()) {
@@ -134,17 +272,68 @@ function parseInvocation(arguments_) {
   const flags = new Set(arguments_.slice(0, separator));
   if (
     [...flags].some(
-      (flag) => flag !== "--postgres" && flag !== "--human-session",
+      (flag) => ![
+        "--postgres",
+        "--postgres-runtime",
+        "--postgres-migrator",
+        "--postgres-entitlement-admin",
+        "--runtime-role-password",
+        "--entitlement-admin-password",
+        "--entitlement-operator",
+        "--human-session",
+      ].includes(flag),
     )
   ) {
     fail("flag_invalid");
   }
-  if (!flags.has("--postgres")) {
+  const explicitProfiles = [
+    flags.has("--postgres-runtime"),
+    flags.has("--postgres-migrator"),
+    flags.has("--postgres-entitlement-admin"),
+  ].filter(Boolean).length;
+  if (explicitProfiles > 1) {
+    fail("postgres_profile_ambiguous");
+  }
+  if (!flags.has("--postgres") && explicitProfiles === 0) {
     fail("postgres_secret_required");
+  }
+  const postgresProfile = flags.has("--postgres-migrator")
+    ? "migrator"
+    : flags.has("--postgres-entitlement-admin")
+      ? "entitlement-admin"
+      : "runtime";
+  if (
+    flags.has("--runtime-role-password")
+    && postgresProfile !== "migrator"
+  ) {
+    fail("runtime_role_password_profile_invalid");
+  }
+  if (
+    flags.has("--entitlement-admin-password")
+    && postgresProfile !== "migrator"
+  ) {
+    fail("entitlement_admin_password_profile_invalid");
+  }
+  if (
+    flags.has("--entitlement-operator")
+    && postgresProfile !== "entitlement-admin"
+  ) {
+    fail("entitlement_operator_profile_invalid");
+  }
+  if (
+    postgresProfile === "entitlement-admin"
+    && !flags.has("--entitlement-operator")
+  ) {
+    fail("entitlement_operator_secret_required");
   }
   return {
     command: arguments_.slice(separator + 1),
     includeHumanSession: flags.has("--human-session"),
+    includeRuntimeRolePassword: flags.has("--runtime-role-password"),
+    includeEntitlementAdminPassword:
+      flags.has("--entitlement-admin-password"),
+    includeEntitlementOperator: flags.has("--entitlement-operator"),
+    postgresProfile,
   };
 }
 
@@ -186,6 +375,12 @@ async function main() {
   if (
     process.env.AGENTOPS_POSTGRES_PASSWORD ||
     process.env.AGENTOPS_POSTGRES_DSN ||
+    process.env.AGENTOPS_POSTGRES_MIGRATOR_PASSWORD ||
+    process.env.AGENTOPS_POSTGRES_MIGRATOR_DSN ||
+    process.env.AGENTOPS_POSTGRES_RUNTIME_PASSWORD ||
+    process.env.AGENTOPS_POSTGRES_ENTITLEMENT_ADMIN_PASSWORD ||
+    process.env.AGENTOPS_POSTGRES_ENTITLEMENT_ADMIN_DSN ||
+    process.env.AGENTOPS_ENTITLEMENT_OPERATOR_PASSWORD ||
     process.env.AGENTOPS_HUMAN_SESSION_HMAC_KEY
   ) {
     fail("direct_secret_forbidden");
@@ -193,28 +388,78 @@ async function main() {
 
   const invocation = parseInvocation(process.argv.slice(2));
   const definitions = [];
+  const postgresPrefix = invocation.postgresProfile === "migrator"
+    ? "AGENTOPS_POSTGRES_MIGRATOR"
+    : invocation.postgresProfile === "entitlement-admin"
+      ? "AGENTOPS_POSTGRES_ENTITLEMENT_ADMIN"
+      : "AGENTOPS_POSTGRES";
   const dsnFile =
-    process.env.AGENTOPS_POSTGRES_DSN_SOURCE_FILE?.trim() ||
-    process.env.AGENTOPS_POSTGRES_DSN_FILE?.trim() ||
+    process.env[`${postgresPrefix}_DSN_SOURCE_FILE`]?.trim() ||
+    process.env[`${postgresPrefix}_DSN_FILE`]?.trim() ||
     "";
   const passwordFile =
-    process.env.AGENTOPS_POSTGRES_PASSWORD_SOURCE_FILE?.trim() ||
-    process.env.AGENTOPS_POSTGRES_PASSWORD_FILE?.trim() ||
+    process.env[`${postgresPrefix}_PASSWORD_SOURCE_FILE`]?.trim() ||
+    process.env[`${postgresPrefix}_PASSWORD_FILE`]?.trim() ||
     "";
   if (dsnFile && passwordFile) {
     fail("postgres_secret_family_ambiguous");
   }
   if (dsnFile) {
     definitions.push({
-      environmentName: "AGENTOPS_POSTGRES_DSN_FILE",
+      environmentName: `${postgresPrefix}_DSN_FILE`,
       sourcePath: dsnFile,
-      targetName: "postgres_dsn",
+      targetName: invocation.postgresProfile === "migrator"
+        ? "postgres_migrator_dsn"
+        : invocation.postgresProfile === "entitlement-admin"
+          ? "postgres_entitlement_admin_dsn"
+          : "postgres_runtime_dsn",
     });
   } else {
     definitions.push({
-      environmentName: "AGENTOPS_POSTGRES_PASSWORD_FILE",
-      sourcePath: passwordFile || "/run/secrets/postgres_password",
-      targetName: "postgres_password",
+      environmentName: `${postgresPrefix}_PASSWORD_FILE`,
+      sourcePath: passwordFile || (
+        invocation.postgresProfile === "migrator"
+          ? "/run/secrets/postgres_migrator_password"
+          : invocation.postgresProfile === "entitlement-admin"
+            ? "/run/secrets/postgres_entitlement_admin_password"
+            : "/run/secrets/postgres_runtime_password"
+      ),
+      targetName: invocation.postgresProfile === "migrator"
+        ? "postgres_migrator_password"
+        : invocation.postgresProfile === "entitlement-admin"
+          ? "postgres_entitlement_admin_password"
+          : "postgres_runtime_password",
+    });
+  }
+  if (invocation.includeRuntimeRolePassword) {
+    definitions.push({
+      environmentName: "AGENTOPS_POSTGRES_RUNTIME_PASSWORD_FILE",
+      sourcePath:
+        process.env.AGENTOPS_POSTGRES_RUNTIME_PASSWORD_SOURCE_FILE?.trim()
+        || process.env.AGENTOPS_POSTGRES_RUNTIME_PASSWORD_FILE?.trim()
+        || "/run/secrets/postgres_runtime_password",
+      targetName: "postgres_runtime_role_password",
+    });
+  }
+  if (invocation.includeEntitlementAdminPassword) {
+    definitions.push({
+      environmentName: "AGENTOPS_POSTGRES_ENTITLEMENT_ADMIN_PASSWORD_FILE",
+      sourcePath:
+        process.env
+          .AGENTOPS_POSTGRES_ENTITLEMENT_ADMIN_PASSWORD_SOURCE_FILE?.trim()
+        || process.env.AGENTOPS_POSTGRES_ENTITLEMENT_ADMIN_PASSWORD_FILE?.trim()
+        || "/run/secrets/postgres_entitlement_admin_password",
+      targetName: "postgres_entitlement_admin_role_password",
+    });
+  }
+  if (invocation.includeEntitlementOperator) {
+    definitions.push({
+      environmentName: "AGENTOPS_ENTITLEMENT_OPERATOR_PASSWORD_FILE",
+      sourcePath:
+        process.env.AGENTOPS_ENTITLEMENT_OPERATOR_PASSWORD_SOURCE_FILE?.trim()
+        || process.env.AGENTOPS_ENTITLEMENT_OPERATOR_PASSWORD_FILE?.trim()
+        || "/run/secrets/entitlement_operator_password",
+      targetName: "entitlement_operator_password",
     });
   }
   if (invocation.includeHumanSession) {
@@ -237,10 +482,27 @@ async function main() {
   Object.assign(process.env, prepared);
   delete process.env.AGENTOPS_POSTGRES_PASSWORD_SOURCE_FILE;
   delete process.env.AGENTOPS_POSTGRES_DSN_SOURCE_FILE;
+  delete process.env.AGENTOPS_POSTGRES_MIGRATOR_PASSWORD_SOURCE_FILE;
+  delete process.env.AGENTOPS_POSTGRES_MIGRATOR_DSN_SOURCE_FILE;
+  delete process.env.AGENTOPS_POSTGRES_RUNTIME_PASSWORD_SOURCE_FILE;
+  delete process.env
+    .AGENTOPS_POSTGRES_ENTITLEMENT_ADMIN_PASSWORD_SOURCE_FILE;
+  delete process.env.AGENTOPS_ENTITLEMENT_OPERATOR_PASSWORD_SOURCE_FILE;
   delete process.env.AGENTOPS_HUMAN_SESSION_HMAC_KEY_SOURCE_FILE;
 
   try {
     dropPrivilegesAndAssert();
+    if (invocation.postgresProfile === "entitlement-admin") {
+      await assertEntitlementChallengeApi({
+        controlPlaneUrl:
+          process.env.AGENTOPS_ENTITLEMENT_CONTROL_PLANE_URL?.trim() || "",
+        controlPlaneOrigin:
+          process.env.AGENTOPS_ENTITLEMENT_CONTROL_PLANE_ORIGIN?.trim() || "",
+        command: invocation.command,
+        operatorUsername:
+          process.env.AGENTOPS_ENTITLEMENT_OPERATOR_USERNAME?.trim() || "",
+      });
+    }
 
     const child = spawn(invocation.command[0], invocation.command.slice(1), {
       env: process.env,

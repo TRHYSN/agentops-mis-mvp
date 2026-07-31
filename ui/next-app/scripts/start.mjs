@@ -88,6 +88,7 @@ function schemaReadiness() {
       receipt?.contract !== "agentops_postgres_schema_readiness_v1"
       || receipt?.ok !== true
       || receipt?.operation !== "check"
+      || receipt?.database_role_boundary_verified !== true
     ) {
       throw new Error("invalid schema receipt");
     }
@@ -132,6 +133,9 @@ if (process.argv.includes("--check")) {
     schema_contract: configuration.production ? schema?.schema_contract : null,
     schema_fingerprint_verified: configuration.production
       ? schema?.schema_fingerprint_verified === true
+      : null,
+    database_role_boundary_verified: configuration.production
+      ? schema?.database_role_boundary_verified === true
       : null,
     production_python_fallback: false,
     credentials_omitted: true,

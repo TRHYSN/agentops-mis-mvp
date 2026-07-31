@@ -1,5 +1,6 @@
 import type { PoolClient } from "pg";
 
+import { costUsdExact } from "./costProjection";
 import { withPostgresTransaction } from "./db";
 import {
   authenticateHumanMember,
@@ -69,7 +70,7 @@ type RunRow = {
   input_tokens: number | null;
   output_tokens: number | null;
   reasoning_tokens: number | null;
-  cost_usd: number | string | null;
+  cost_usd: string | null;
   error_type: string | null;
   error_message: string | null;
   trace_id: string | null;
@@ -316,6 +317,7 @@ function publicRun(row: RunRow) {
     output_tokens: Number(row.output_tokens || 0),
     reasoning_tokens: Number(row.reasoning_tokens || 0),
     cost_usd: Number(row.cost_usd || 0),
+    cost_usd_exact: costUsdExact(row.cost_usd),
     error_type: safeText(row.error_type, 200),
     error_message: safeText(row.error_message, 1_000),
     trace_id: safeText(row.trace_id, 500),

@@ -162,15 +162,17 @@ Exit gate:
 
 ## Current Integration State
 
-As of 2026-07-24:
+As of 2026-07-31:
 
 - Lane 0 is implemented. Production and shared Vite builds resolve only to the
   Next.js `/api/mis` control plane and fail at build time if Python proxy mode,
   `/mis-api`, credential-bearing URLs, or insecure remote HTTP are selected.
   Free Local retains the explicit loopback Python compatibility path.
-- Lane 1 has a checksum-pinned ten-migration manifest, schema contract v9,
-  transactional TypeScript runner/readiness ownership, and real PostgreSQL 16
-  bootstrap and contract coverage.
+- Lane 1 has a checksum-pinned thirteen-migration manifest, schema contract v11,
+  transactional TypeScript runner/readiness ownership, exact catalog
+  fingerprinting, and real PostgreSQL 16 bootstrap and contract coverage.
+  Production uses distinct migrator, restricted runtime, and entitlement-admin
+  identities. Runtime startup rejects schema owners and over-privileged DSNs.
 - Lane 2 has direct TypeScript/PostgreSQL owners for Agent identity, sessions,
   task claim, Agent Plans, runs, and governed evidence. The commercial
   TypeScript Worker uses those HTTP owners and has no Python, SQLite, or direct
@@ -188,31 +190,40 @@ As of 2026-07-24:
   read owners. Commercial Vite builds use the Next `/api/mis` transport and
   Human Session CSRF authority for review and enrollment mutations; Free Local
   retains its explicit compatibility transport.
-- Lane 6 remains partial. Direct Human enrollment create/list/revoke/rotate,
-  session list/revoke, one-time hash-only credentials, and PostgreSQL workspace
-  entitlement/quota evaluation are owned. New enrollment, child-session, and
-  run-start writes fail closed with committed denial audit evidence. A trusted
-  local TypeScript/PostgreSQL operator CLI now plans and applies entitlement
-  configuration with Human credential verification, revision guards, and
-  append-only audit. Approval-gated enrollment request/decision/issue and final
-  cost-reservation policy are still open.
-- Lane 7 has an initial BYOC package: a non-root Node.js image definition,
-  PostgreSQL 16 Compose topology, one-shot migration dependency, direct
-  TypeScript/PostgreSQL readiness, and custom-format backup/isolated restore
-  drill scripts. Atomic backup publication, behavior-tested restore cleanup,
-  complete schema-invariant verification, actual clean-customer image
-  installation, retained-data upgrade/rollback, supply-chain receipts, and
-  final promotion remain open.
+- Lane 6 has direct Human enrollment create/list/revoke/rotate, approval-gated
+  request/decision/issue, session lifecycle, one-time hash-only credentials,
+  and PostgreSQL workspace entitlement/quota ownership. Enrollment,
+  child-session, and run-start writes fail closed with committed denial audit
+  evidence. A distinct entitlement-admin CLI applies policy with Human
+  authentication plus CSRF, a short-lived single-use database challenge,
+  revision guards, a workspace advisory lock, and append-only audit; the
+  long-running runtime cannot plan/apply or directly mutate entitlements, and
+  the admin role cannot issue challenges or access application relations.
+  PostgreSQL rechecks live database-role and Human authority at claim time.
+  Cost reservation, heartbeat, terminal settlement, historical
+  UTC billing, active-run upgrade preflight, and exact `NUMERIC(18,6)`
+  projections are contract-covered.
+- Lane 7 has a hardened BYOC package contract: separate migrator/runtime/admin
+  secrets, a non-root Node.js runtime, PostgreSQL 16 Compose topology, one-shot
+  migration and entitlement administration, direct TypeScript/PostgreSQL
+  readiness, atomic custom-format backup publication, stable isolated restore,
+  cleanup-on-failure behavior, catalog fingerprint verification, and
+  supply-chain gates. Actual clean-customer image installation, retained-data
+  upgrade/rollback, an external restore drill, exact-head CI, and final
+  promotion remain open.
+
+The remaining database hardening item is transferring all
+`SECURITY DEFINER` functions from the migrator to a dedicated restricted
+`NOLOGIN` owner without weakening idempotent provisioning or upgrade behavior.
 
 Commits after `d3b9e73` are not covered by that frozen-source runtime receipt.
 Release, handoff, and merge authority remain false until the remaining read,
 enrollment, entitlement, deployment, and promotion gates pass and the final
 source commit is rerun through both real runtimes.
 
-The next slices are the remaining Lane 6 approval-gated enrollment and hard
-cost-reservation policy owners, followed by Lane 7 clean-customer image
-installation, retained-data upgrade/rollback, and final same-SHA dual-runtime
-promotion.
+The next slices are the final same-SHA dual-runtime acceptance and exact-head
+CI, followed by Lane 7 clean-customer image installation, retained-data
+upgrade/rollback, and an external restore drill before promotion.
 
 ## Definition Of Done
 

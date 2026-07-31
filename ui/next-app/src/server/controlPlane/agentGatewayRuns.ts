@@ -8,6 +8,7 @@ import {
 } from "./agentPlanContract";
 import { authenticateAgentGateway, enforceWorkspaceBinding } from "./auth";
 import { boundedJsonObject } from "./boundedJson";
+import { costUsdExact } from "./costProjection";
 import { withPostgresTransaction } from "./db";
 import { ControlPlaneHttpError } from "./http";
 import { appendAudit, appendRuntimeEvent, newLedgerId, pythonFloat, stableHash } from "./ledger";
@@ -81,7 +82,7 @@ type RunRow = {
   input_tokens: number;
   output_tokens: number;
   reasoning_tokens: number;
-  cost_usd: number | string;
+  cost_usd: string;
   error_type: string | null;
   error_message: string | null;
   trace_id: string | null;
@@ -151,11 +152,15 @@ function collaborators(task: TaskRow) {
 }
 
 function publicRun(row: RunRow) {
-  return { ...row, cost_usd: pythonFloat(Number(row.cost_usd)) };
+  return {
+    ...row,
+    cost_usd: pythonFloat(Number(row.cost_usd)),
+    cost_usd_exact: costUsdExact(row.cost_usd),
+  };
 }
 
 function runAuditSnapshot(row: RunRow) {
-  return publicRun(row);
+  return { ...row, cost_usd: nonNegativeActualCost(row.cost_usd) };
 }
 
 function taskAuditSnapshot(row: TaskRow) {
@@ -269,7 +274,8 @@ function sameHeartbeatState(left: RunRow, right: RunRow) {
     && left.error_type === right.error_type
     && left.error_message === right.error_message
     && Number(left.output_tokens || 0) === right.output_tokens
-    && Number(left.cost_usd || 0) === right.cost_usd;
+    && nonNegativeActualCost(left.cost_usd)
+      === nonNegativeActualCost(right.cost_usd);
 }
 
 export async function startAgentGatewayRun(request: Request) {
@@ -571,7 +577,7 @@ export async function startAgentGatewayRun(request: Request) {
       input_tokens: nonNegativeInteger(body.input_tokens, "input_tokens"),
       output_tokens: nonNegativeInteger(body.output_tokens, "output_tokens"),
       reasoning_tokens: nonNegativeInteger(body.reasoning_tokens, "reasoning_tokens"),
-      cost_usd: 0,
+      cost_usd: "0.000000",
       error_type: text(body.error_type, 80) || null,
       error_message: text(body.error_message, 200) || null,
       trace_id: body.trace_id ? identifier(body.trace_id, "trace_id") : newLedgerId("trace"),
@@ -814,10 +820,9 @@ export async function heartbeatAgentGatewayRun(request: Request, requestedRunId:
       body.cost_usd === undefined
         || body.cost_usd === null
         || body.cost_usd === ""
-        ? before.cost_usd || 0
+        ? before.cost_usd || "0.000000"
         : body.cost_usd,
     );
-    const costUsd = Number(actualCostUsd);
     const candidateAfter: RunRow = {
       ...before,
       status,
@@ -827,7 +832,7 @@ export async function heartbeatAgentGatewayRun(request: Request, requestedRunId:
       error_type: errorType,
       error_message: errorMessage,
       output_tokens: outputTokens,
-      cost_usd: costUsd,
+      cost_usd: actualCostUsd,
     };
     if (
       ["completed", "failed", "blocked"].includes(before.status)
@@ -870,7 +875,7 @@ export async function heartbeatAgentGatewayRun(request: Request, requestedRunId:
         errorType,
         errorMessage,
         outputTokens,
-        costUsd,
+        actualCostUsd,
         runId,
         identity.workspaceId,
       ],

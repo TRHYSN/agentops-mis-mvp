@@ -43,9 +43,11 @@ import {
 } from "../src/server/controlPlane/preparedActions";
 import {
   POSTGRES_MIGRATION_MANIFEST,
-  runPostgresSchemaCommand,
   SCHEMA_CONTRACT,
 } from "../src/server/controlPlane/schemaReadiness";
+import {
+  createPostgresRoleBoundaryFixture,
+} from "./postgres-role-boundary-test-helper";
 
 const WORKSPACE_ID = "ws_prepared_action_contract";
 const AGENT_ID = "agt_prepared_action_contract";
@@ -213,12 +215,6 @@ async function expectDatabaseGuard(
     return;
   }
   throw new Error(`${expectedMessage}: database mutation unexpectedly passed`);
-}
-
-function scopedDsn(baseDsn: string, schema: string) {
-  const url = new URL(baseDsn);
-  url.searchParams.set("options", `-csearch_path=${schema}`);
-  return url.toString();
 }
 
 async function sourceContract() {
@@ -859,27 +855,27 @@ async function main() {
   await sourceContract();
   const baseDsn = String(process.env.AGENTOPS_POSTGRES_DSN || "").trim();
   require(baseDsn, "AGENTOPS_POSTGRES_DSN is required");
-  const schema = `prepared_action_owner_${randomUUID().replaceAll("-", "")}`;
-  const baseAdmin = new Client({ connectionString: baseDsn });
+  const roleFixture = await createPostgresRoleBoundaryFixture(
+    baseDsn,
+    "prepared_action",
+  );
+  const restoreRuntimeEnvironment =
+    roleFixture.activateRuntimeEnvironment();
   const token = `prepared_action_token_${randomUUID()}`;
   const otherToken = `prepared_action_other_${randomUUID()}`;
   let scopedAdmin: Client | null = null;
-  await baseAdmin.connect();
   try {
-    await baseAdmin.query(`CREATE SCHEMA "${schema}"`);
-    const contractDsn = scopedDsn(baseDsn, schema);
-    const migration = await runPostgresSchemaCommand("migrate", {
-      connectionString: contractDsn,
-    });
+    const migration = roleFixture.migration;
     require(
       migration.schema_contract === SCHEMA_CONTRACT
         && migration.applied_count === POSTGRES_MIGRATION_MANIFEST.length
         && migration.manifest_count === POSTGRES_MIGRATION_MANIFEST.length,
       "fresh schema did not apply the current complete manifest",
     );
-    process.env.AGENTOPS_POSTGRES_DSN = contractDsn;
     process.env.AGENTOPS_POSTGRES_POOL_MAX = "16";
-    scopedAdmin = new Client({ connectionString: contractDsn });
+    scopedAdmin = new Client({
+      connectionString: roleFixture.ownerDsn,
+    });
     await scopedAdmin.connect();
     await seedIdentity(scopedAdmin, token, otherToken);
     const owner = await login("prepared-owner", USER_ID);
@@ -1802,9 +1798,8 @@ async function main() {
   } finally {
     await closeControlPlanePoolForTests();
     if (scopedAdmin) await scopedAdmin.end().catch(() => undefined);
-    await baseAdmin.query(`DROP SCHEMA IF EXISTS "${schema}" CASCADE`)
-      .catch(() => undefined);
-    await baseAdmin.end();
+    restoreRuntimeEnvironment();
+    await roleFixture.cleanup();
   }
 }
 

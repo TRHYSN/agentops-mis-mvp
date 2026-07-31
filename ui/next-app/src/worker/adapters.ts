@@ -17,6 +17,14 @@ import {
 
 const execFileAsync = promisify(execFile);
 const MAX_RUNTIME_RESPONSE_BYTES = 1024 * 1024;
+const PROVIDER_RESPONSE_OMITTED =
+  "Provider response omitted; execution metadata and payload hash recorded.";
+const PROVIDER_EMPTY_RESPONSE =
+  "Provider response omitted; no visible assistant content was returned.";
+
+function hasVisibleProviderContent(value: unknown) {
+  return typeof value === "string" && value.trim().length > 0;
+}
 
 function loopbackHost(hostname: string) {
   return ["127.0.0.1", "::1", "[::1]", "localhost"].includes(
@@ -134,15 +142,17 @@ export class HermesAdapter implements RuntimeAdapter {
       const message = choice.message && typeof choice.message === "object"
         ? choice.message as Record<string, unknown>
         : {};
-      const visible = redactText(message.content, 720);
+      const hasVisibleContent = hasVisibleProviderContent(message.content);
       const usage = payload.usage && typeof payload.usage === "object"
         ? payload.usage as Record<string, unknown>
         : {};
       return {
-        ok: Boolean(visible),
+        ok: hasVisibleContent,
         runtime: this.runtime,
         modelName: this.modelName,
-        outputSummary: visible || "Hermes returned an empty response.",
+        outputSummary: hasVisibleContent
+          ? PROVIDER_RESPONSE_OMITTED
+          : PROVIDER_EMPTY_RESPONSE,
         rawPayloadHash,
         targetResource,
         durationMs: Date.now() - started,
@@ -154,9 +164,11 @@ export class HermesAdapter implements RuntimeAdapter {
         ),
         providerCallPerformed,
         dryRun: false,
-        retryable: !visible,
-        errorType: visible ? null : "HermesEmptyResponse",
-        errorMessage: visible ? null : "Hermes returned no visible content.",
+        retryable: !hasVisibleContent,
+        errorType: hasVisibleContent ? null : "HermesEmptyResponse",
+        errorMessage: hasVisibleContent
+          ? null
+          : "Provider error detail omitted; Hermes returned no visible content.",
       };
     } catch (error) {
       const timeoutError = error instanceof Error && error.name === "AbortError";
@@ -286,15 +298,16 @@ export class OpenClawAdapter implements RuntimeAdapter {
       const firstPayload = payloads[0] && typeof payloads[0] === "object"
         ? payloads[0] as Record<string, unknown>
         : {};
-      const visible = redactText(
+      const hasVisibleContent = hasVisibleProviderContent(
         meta.finalAssistantVisibleText ?? firstPayload.text,
-        720,
       );
       return {
-        ok: Boolean(visible),
+        ok: hasVisibleContent,
         runtime: this.runtime,
         modelName: this.modelName,
-        outputSummary: visible || "OpenClaw returned an empty response.",
+        outputSummary: hasVisibleContent
+          ? PROVIDER_RESPONSE_OMITTED
+          : PROVIDER_EMPTY_RESPONSE,
         rawPayloadHash,
         targetResource,
         durationMs: boundedInteger(
@@ -306,9 +319,11 @@ export class OpenClawAdapter implements RuntimeAdapter {
         outputTokens: 0,
         providerCallPerformed,
         dryRun: false,
-        retryable: !visible,
-        errorType: visible ? null : "OpenClawEmptyResponse",
-        errorMessage: visible ? null : "OpenClaw returned no visible content.",
+        retryable: !hasVisibleContent,
+        errorType: hasVisibleContent ? null : "OpenClawEmptyResponse",
+        errorMessage: hasVisibleContent
+          ? null
+          : "Provider error detail omitted; OpenClaw returned no visible content.",
       };
     } catch {
       return {

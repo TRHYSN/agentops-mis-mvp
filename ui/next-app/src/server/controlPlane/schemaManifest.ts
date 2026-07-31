@@ -6,12 +6,12 @@ export type MigrationDefinition = Readonly<{
   checksum: string;
 }>;
 
-export const SCHEMA_CONTRACT = "agentops_commercial_postgres_v10";
+export const SCHEMA_CONTRACT = "agentops_commercial_postgres_v11";
 
 export const EXPECTED_POSTGRES_SCHEMA_FINGERPRINT = Object.freeze({
   contract: "agentops_postgres_schema_fingerprint_v1",
-  sha256: "913f37ffc650fce78b2d80a9ffa58c423b7f9183a5fe29ccf9766e9d09137143",
-  objectCount: 813,
+  sha256: "cf866b5de9f29eda409e3a98fa1942f9ce15b42e1d75f16a1238b41c47b2d1b3",
+  objectCount: 861,
 });
 
 export const POSTGRES_MIGRATION_MANIFEST = Object.freeze([
@@ -97,6 +97,13 @@ export const POSTGRES_MIGRATION_MANIFEST = Object.freeze([
     version: "20260731.10.1",
     schemaContract: "run_cost_reservations_v10",
     filename: "20260731_cost_reservations_v10.sql",
-    checksum: "e0c090db9f361664e3cce44bf699753465014ddbbed2654885a30d120db2166e",
+    checksum: "ea79487822c561841ed13239db41cc256efe63b3fa54f4973333d48cd60d4c85",
+  },
+  {
+    component: "entitlement_admin_challenges",
+    version: "20260731.11",
+    schemaContract: "entitlement_admin_challenges_v11",
+    filename: "20260731_entitlement_admin_challenges_v11.sql",
+    checksum: "bd385ad3f5a9bc6ee88b6b0a9429e7368737115b519a11414ce8ed82c39d1ba8",
   },
 ] satisfies readonly MigrationDefinition[]);

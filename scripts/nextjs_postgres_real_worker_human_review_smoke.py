@@ -99,10 +99,20 @@ function translateQmarks(sql) {
     await client.end().catch(() => undefined);
   }
 })().catch((error) => {
-  process.stderr.write(String(error && error.message ? error.message : error));
+  process.stderr.write(JSON.stringify({
+    message: String(error && error.message ? error.message : error),
+    code: error && typeof error.code === 'string' ? error.code : null,
+    name: error && typeof error.name === 'string' ? error.name : 'Error',
+  }));
   process.exitCode = 1;
 });
 """
+
+
+class NodePgError(RuntimeError):
+    def __init__(self, message: str, sqlstate: str | None):
+        super().__init__(message)
+        self.sqlstate = sqlstate
 
 
 class NodePgAdapter:
@@ -113,7 +123,7 @@ class NodePgAdapter:
         self.node_binary = node_binary
 
     def _request(self, sql: str, params: tuple[Any, ...] = (), *, script: bool = False) -> dict[str, Any]:
-        env = os.environ.copy()
+        env = environment_without_privileged_control_plane_credentials()
         env["AGENTOPS_NODE_PG_DSN"] = self.dsn
         completed = subprocess.run(
             [self.node_binary, "-e", NODE_PG_HELPER],
@@ -126,7 +136,20 @@ class NodePgAdapter:
             check=False,
         )
         if completed.returncode != 0:
-            raise RuntimeError(f"Node Postgres query failed: {completed.stderr[-1000:]}")
+            message = completed.stderr[-1000:]
+            sqlstate = None
+            try:
+                failure = json.loads(completed.stderr or "{}")
+                if isinstance(failure, dict):
+                    message = str(failure.get("message") or message)
+                    code = failure.get("code")
+                    sqlstate = str(code) if code else None
+            except json.JSONDecodeError:
+                pass
+            raise NodePgError(
+                f"Node Postgres query failed: {message}",
+                sqlstate,
+            )
         return json.loads(completed.stdout or "{}")
 
     def execute(self, sql: str, params: tuple[Any, ...] = ()) -> dict[str, Any]:
@@ -176,6 +199,37 @@ def dsn_with_search_path(dsn: str, schema: str) -> str:
         urllib.parse.urlencode(query, quote_via=urllib.parse.quote),
         parsed.fragment,
     ))
+
+
+def dsn_with_credentials(dsn: str, username: str, password: str) -> str:
+    parsed = urllib.parse.urlsplit(dsn)
+    if parsed.scheme not in {"postgres", "postgresql"} or not parsed.hostname:
+        raise ValueError("--postgres-dsn must be a postgres URL with a host")
+    host = parsed.hostname
+    if ":" in host:
+        host = f"[{host}]"
+    netloc = (
+        f"{urllib.parse.quote(username, safe='')}:"
+        f"{urllib.parse.quote(password, safe='')}@{host}"
+    )
+    if parsed.port is not None:
+        netloc += f":{parsed.port}"
+    return urllib.parse.urlunsplit((
+        parsed.scheme,
+        netloc,
+        parsed.path,
+        parsed.query,
+        parsed.fragment,
+    ))
+
+
+def dsn_with_search_path_sequence(dsn: str, schemas: tuple[str, ...]) -> str:
+    if not schemas or any(
+        not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", schema)
+        for schema in schemas
+    ):
+        raise ValueError("postgres_search_path_identifier_invalid")
+    return dsn_with_search_path(dsn, ",".join(schemas))
 
 
 def file_sha256(path: Path) -> str:
@@ -330,21 +384,86 @@ def free_port() -> int:
         return int(sock.getsockname()[1])
 
 
-def stop_process(proc: subprocess.Popen[str], *, timeout: int = 5) -> None:
+def stop_process(
+    proc: subprocess.Popen[str],
+    *,
+    timeout: int = 5,
+) -> dict[str, Any]:
+    errors: list[str] = []
+
+    def exited() -> bool:
+        try:
+            return proc.poll() is not None
+        except Exception as exc:
+            errors.append(f"poll:{exc.__class__.__name__}")
+            return False
+
+    if exited():
+        return {"stopped": True, "errors": errors}
     try:
         os.killpg(proc.pid, signal.SIGTERM)
     except ProcessLookupError:
-        return
+        pass
+    except Exception as exc:
+        errors.append(f"sigterm:{exc.__class__.__name__}")
     try:
         proc.wait(timeout=timeout)
     except subprocess.TimeoutExpired:
         pass
+    except Exception as exc:
+        errors.append(f"wait_after_sigterm:{exc.__class__.__name__}")
+    if not exited():
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        except Exception as exc:
+            errors.append(f"sigkill:{exc.__class__.__name__}")
+    if not exited():
+        try:
+            proc.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            errors.append("wait:TimeoutExpired")
+        except Exception as exc:
+            errors.append(f"wait:{exc.__class__.__name__}")
+    return {
+        "stopped": exited(),
+        "errors": errors,
+    }
+
+
+def assert_harness_safety_helper_contracts() -> None:
+    assert_subprocess_environment_scrub()
+
+    class FailingProcess:
+        pid = 987654321
+
+        def poll(self) -> None:
+            return None
+
+        def wait(self, timeout: int) -> None:
+            del timeout
+            raise OSError("bounded stop helper contract")
+
+    original_killpg = os.killpg
     try:
-        os.killpg(proc.pid, signal.SIGKILL)
-    except ProcessLookupError:
-        pass
-    if proc.poll() is None:
-        proc.wait(timeout=timeout)
+        def fail_killpg(pid: int, sig: signal.Signals) -> None:
+            del pid, sig
+            raise PermissionError("bounded stop helper contract")
+
+        os.killpg = fail_killpg
+        receipt = stop_process(FailingProcess(), timeout=0)  # type: ignore[arg-type]
+    finally:
+        os.killpg = original_killpg
+    if (
+        receipt.get("stopped") is not False
+        or not receipt.get("errors")
+        or not any(
+            str(item).startswith("sigterm:PermissionError")
+            for item in receipt["errors"]
+        )
+    ):
+        raise RuntimeError("stop_process_failure_bounding_contract_failed")
 
 
 def http_json(
@@ -429,9 +548,74 @@ def run_next_build(npm: str) -> subprocess.CompletedProcess[str]:
     )
 
 
-def run_npm(npm: str, runtime_dsn: str, args: list[str], *, stdin: str | None = None) -> subprocess.CompletedProcess[str]:
-    env = os.environ.copy()
-    env.update({"AGENTOPS_POSTGRES_DSN": runtime_dsn, "AGENTOPS_POSTGRES_SSL": "0"})
+PRIVILEGED_CONTROL_PLANE_ENVIRONMENT = (
+    "POSTGRES_PRISMA_URL",
+    "POSTGRES_URL",
+    "POSTGRES_URL_NON_POOLING",
+)
+
+
+def environment_without_privileged_control_plane_credentials(
+    source: dict[str, str] | None = None,
+) -> dict[str, str]:
+    env = dict(os.environ if source is None else source)
+    for name in tuple(env):
+        if (
+            name.startswith("AGENTOPS_")
+            or name.startswith("PG")
+            or name.startswith("POSTGRES_")
+            or name.startswith("DATABASE_")
+            or name in PRIVILEGED_CONTROL_PLANE_ENVIRONMENT
+        ):
+            env.pop(name, None)
+    return env
+
+
+def assert_subprocess_environment_scrub() -> None:
+    canaries = {
+        "PATH": "/usr/bin",
+        "AGENTOPS_POSTGRES_DSN": "postgresql://runtime-canary.invalid/db",
+        "AGENTOPS_POSTGRES_DSN_FILE": "/tmp/runtime-dsn-canary",
+        "AGENTOPS_POSTGRES_HOST": "component-canary.invalid",
+        "AGENTOPS_POSTGRES_MIGRATOR_PASSWORD": "migrator-canary",
+        "AGENTOPS_POSTGRES_ENTITLEMENT_ADMIN_DSN":
+            "postgresql://admin-canary.invalid/db",
+        "AGENTOPS_NODE_PG_DSN": "postgresql://node-helper-canary.invalid/db",
+        "AGENTOPS_API_KEY": "gateway-canary",
+        "AGENTOPS_ENTITLEMENT_OPERATOR_PASSWORD": "operator-canary",
+        "AGENTOPS_HUMAN_SESSION_HMAC_KEY": "session-canary",
+        "DATABASE_URL": "postgresql://database-url-canary.invalid/db",
+        "DATABASE_AUTH_TOKEN": "database-auth-canary",
+        "POSTGRES_URL": "postgresql://postgres-url-canary.invalid/db",
+        "POSTGRES_PASSWORD": "postgres-password-canary",
+        "POSTGRES_USER": "postgres-user-canary",
+        "POSTGRES_HOST": "postgres-host-canary.invalid",
+        "POSTGRES_DB": "postgres-db-canary",
+        "PGPASSWORD": "libpq-canary",
+        "PGSERVICEFILE": "/tmp/libpq-service-canary",
+    }
+    scrubbed = environment_without_privileged_control_plane_credentials(
+        canaries,
+    )
+    if scrubbed != {"PATH": "/usr/bin"}:
+        raise RuntimeError("privileged_subprocess_environment_scrub_failed")
+
+
+def run_npm(
+    npm: str,
+    postgres_dsn: str | None,
+    args: list[str],
+    *,
+    stdin: str | None = None,
+    environment: dict[str, str] | None = None,
+) -> subprocess.CompletedProcess[str]:
+    env = environment_without_privileged_control_plane_credentials()
+    env.update({
+        "AGENTOPS_POSTGRES_SSL": "0",
+        **(environment or {}),
+    })
+    if postgres_dsn:
+        env["AGENTOPS_POSTGRES_DSN"] = postgres_dsn
     return subprocess.run(
         [npm, "run", "--silent", *args],
         cwd=NEXT_APP,
@@ -444,9 +628,216 @@ def run_npm(npm: str, runtime_dsn: str, args: list[str], *, stdin: str | None = 
     )
 
 
+def assert_postgres_statement_forbidden(
+    adapter: NodePgAdapter,
+    sql: str,
+    *,
+    script: bool = False,
+) -> str:
+    try:
+        if script:
+            adapter.executescript(sql)
+        else:
+            adapter.execute(sql)
+    except NodePgError as error:
+        if error.sqlstate == "42501":
+            return error.sqlstate
+        raise RuntimeError(
+            "restricted_database_statement_check_inconclusive:"
+            f"sqlstate={error.sqlstate or 'missing'}"
+        ) from error
+    raise RuntimeError("restricted_database_statement_unexpectedly_allowed")
+
+
+def assert_entitlement_admin_environment_isolated(
+    environment: dict[str, str],
+) -> None:
+    required = {
+        "AGENTOPS_POSTGRES_ENTITLEMENT_ADMIN_DSN",
+        "AGENTOPS_ENTITLEMENT_OPERATOR_PASSWORD",
+        "AGENTOPS_ENTITLEMENT_OPERATOR_USERNAME",
+        "AGENTOPS_ENTITLEMENT_CONTROL_PLANE_URL",
+        "AGENTOPS_ENTITLEMENT_CONTROL_PLANE_ORIGIN",
+        "AGENTOPS_POSTGRES_RUNTIME_API_SCHEMA",
+    }
+    forbidden = {
+        "AGENTOPS_POSTGRES_DSN",
+        "AGENTOPS_POSTGRES_MIGRATOR_DSN",
+        "AGENTOPS_POSTGRES_SCHEMA",
+        "AGENTOPS_POSTGRES_RUNTIME_DSN",
+        "AGENTOPS_POSTGRES_RUNTIME_ROLE",
+        "AGENTOPS_POSTGRES_RUNTIME_PASSWORD",
+        "AGENTOPS_POSTGRES_MIGRATOR_PASSWORD",
+        "AGENTOPS_HUMAN_SESSION_HMAC_KEY",
+    }
+    if (
+        not required.issubset(environment)
+        or forbidden.intersection(environment)
+    ):
+        raise RuntimeError("entitlement_admin_environment_isolation_failed")
+
+
+def assert_entitlement_admin_receipt_safe(
+    receipt: dict[str, Any],
+    stdout: str,
+    stderr: str,
+) -> None:
+    required_true = {
+        "ok",
+        "audit_appended",
+        "challenge_consumed",
+        "human_session_consumed",
+        "long_lived_credentials_omitted",
+        "challenge_token_omitted",
+        "credentials_omitted",
+        "dsn_omitted",
+        "raw_config_omitted",
+        "control_plane_network_used",
+    }
+    if (
+        receipt.get("contract")
+            != "agentops_workspace_entitlement_administration_v2"
+        or receipt.get("mode") != "confirmed"
+        or receipt.get("outcome") != "created"
+        or any(receipt.get(field) is not True for field in required_true)
+    ):
+        raise RuntimeError("entitlement_administration_v2_receipt_unverified")
+
+    forbidden_keys = {
+        "agentops_human_session",
+        "challenge_token",
+        "cookie",
+        "csrf",
+        "csrf_token",
+        "human_session_id",
+        "set_cookie",
+    }
+
+    def walk(value: Any) -> None:
+        if isinstance(value, dict):
+            for key, nested in value.items():
+                if str(key).lower() in forbidden_keys:
+                    raise RuntimeError(
+                        "entitlement_administration_auth_material_exposed"
+                    )
+                walk(nested)
+        elif isinstance(value, list):
+            for nested in value:
+                walk(nested)
+
+    walk(receipt)
+    rendered = f"{stdout}\n{stderr}".lower()
+    forbidden_output_markers = (
+        "agentops_human_session=",
+        '"challenge_token":',
+        '"csrf_token":',
+        '"set_cookie":',
+    )
+    if any(marker in rendered for marker in forbidden_output_markers):
+        raise RuntimeError("entitlement_administration_auth_material_exposed")
+
+
+def cleanup_postgres_fixture(
+    base_dsn: str,
+    node: str,
+    application_schema: str,
+    runtime_api_schema: str,
+    runtime_role: str,
+    entitlement_admin_role: str,
+) -> dict[str, bool]:
+    cleanup = NodePgAdapter(base_dsn, node)
+    errors: list[str] = []
+    role_names = (
+        ("runtime", runtime_role),
+        ("entitlement_admin", entitlement_admin_role),
+    )
+    existing_roles: dict[str, bool] = {}
+
+    for label, role in role_names:
+        try:
+            row = cleanup.fetchone(
+                "SELECT EXISTS(SELECT 1 FROM pg_roles WHERE rolname=?) AS present",
+                (role,),
+            )
+            existing_roles[role] = bool(row and row.get("present"))
+        except Exception:
+            existing_roles[role] = True
+            errors.append(f"inspect_role:{label}")
+
+    for label, role in role_names:
+        if not existing_roles.get(role):
+            continue
+        try:
+            cleanup.execute(
+                """SELECT pg_terminate_backend(pid)
+                FROM pg_stat_activity
+                WHERE usename=? AND pid<>pg_backend_pid()""",
+                (role,),
+            )
+        except Exception:
+            errors.append(f"terminate_role:{label}")
+
+    for label, schema in (
+        ("runtime_api_schema", runtime_api_schema),
+        ("application_schema", application_schema),
+    ):
+        try:
+            cleanup.execute(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE')
+        except Exception:
+            errors.append(f"drop_schema:{label}")
+
+    for label, role in role_names:
+        if not existing_roles.get(role):
+            continue
+        try:
+            cleanup.execute(f'DROP OWNED BY "{role}"')
+        except Exception:
+            errors.append(f"drop_owned:{label}")
+        try:
+            cleanup.execute(f'DROP ROLE IF EXISTS "{role}"')
+        except Exception:
+            errors.append(f"drop_role:{label}")
+
+    try:
+        residue = cleanup.fetchone(
+            """SELECT
+              EXISTS(
+                SELECT 1 FROM pg_namespace
+                WHERE nspname IN (?,?)
+              ) AS schema_present,
+              EXISTS(
+                SELECT 1 FROM pg_roles
+                WHERE rolname IN (?,?)
+              ) AS role_present""",
+            (
+                application_schema,
+                runtime_api_schema,
+                runtime_role,
+                entitlement_admin_role,
+            ),
+        )
+        if (
+            not residue
+            or residue.get("schema_present") is not False
+            or residue.get("role_present") is not False
+        ):
+            errors.append("catalog_residue")
+    except Exception:
+        errors.append("catalog_verification")
+
+    if errors:
+        raise RuntimeError(
+            "postgres_fixture_cleanup_failed:" + ",".join(sorted(errors))
+        )
+    return {
+        "schemas_removed": True,
+        "roles_removed": True,
+        "catalog_zero_residue_verified": True,
+    }
+
+
 def seed_foundation(adapter: NodePgAdapter) -> None:
-    now_value = dt.datetime.now(dt.timezone.utc)
-    now = now_value.isoformat()
+    now = dt.datetime.now(dt.timezone.utc).isoformat()
     adapter.execute(
         "INSERT INTO users(user_id,name,email,role,created_at) VALUES(?,?,?,?,?)",
         (REQUESTER_ID, "Real Worker Requester", "real-worker-requester@local.invalid", "customer", now),
@@ -475,40 +866,14 @@ def seed_foundation(adapter: NodePgAdapter) -> None:
             now,
         ),
     )
-    adapter.execute(
-        """INSERT INTO workspace_entitlements(
-            workspace_id,edition,status,capabilities_json,max_agents,
-            max_active_enrollments,max_active_sessions_per_agent,max_monthly_runs,
-            max_monthly_cost_usd,max_concurrent_runs,effective_at,expires_at,
-            created_at,updated_at,
-            updated_by_user_id
-        ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-        (
-            WORKSPACE_ID,
-            "enterprise_byoc",
-            "active",
-            json.dumps({
-                "enrollment_issue": True,
-                "session_issue": True,
-                "run_start": True,
-            }),
-            max(10, len(SCOPES)),
-            max(10, len(SCOPES)),
-            10,
-            1000,
-            1000,
-            10,
-            (now_value - dt.timedelta(minutes=1)).isoformat(),
-            (now_value + dt.timedelta(hours=8)).isoformat(),
-            now,
-            now,
-            REQUESTER_ID,
-        ),
-    )
     adapter.commit()
 
 
-def seed_workers(adapter: NodePgAdapter, adapters: list[str], tokens: dict[str, str], prompt_secret: str) -> None:
+def seed_workers(
+    adapter: NodePgAdapter,
+    adapters: list[str],
+    tokens: dict[str, str],
+) -> None:
     now = dt.datetime.now(dt.timezone.utc)
     now_text = now.isoformat()
     expires = (now + dt.timedelta(hours=2)).isoformat()
@@ -546,7 +911,7 @@ def seed_workers(adapter: NodePgAdapter, adapters: list[str], tokens: dict[str, 
                 task_id,
                 WORKSPACE_ID,
                 f"Real {runtime} candidate review",
-                f"Return a bounded delivery summary. Test prompt marker: {prompt_secret}",
+                "Return a bounded delivery summary from the governed task evidence.",
                 REQUESTER_ID,
                 agent_id,
                 "[]",
@@ -634,7 +999,7 @@ def run_worker(
             "--working-directory",
             str(ROOT),
         ])
-    env = os.environ.copy()
+    env = environment_without_privileged_control_plane_credentials()
     env["AGENTOPS_API_KEY"] = token
     env["AGENTOPS_AGENT_TOKEN"] = token
     env["NODE_ENV"] = "production"
@@ -1233,6 +1598,7 @@ def prepare_manifest_authority_guard_fixture(
             "model_name": "no-provider-call",
             "agent_plan_id": plan_id,
             "plan_hash": plan_hash,
+            "estimated_cost_usd": RUN_ESTIMATED_COST_USD,
             "input_summary": "Isolated manifest authority fixture.",
             "delegation_id": f"manifest_guard_{runtime}",
         },
@@ -1250,6 +1616,7 @@ def prepare_manifest_authority_guard_fixture(
             "output_summary": (
                 "Fixture run completed before evidence verification."
             ),
+            "cost_usd": RUN_ESTIMATED_COST_USD,
         },
         headers=headers,
     )
@@ -1848,9 +2215,13 @@ def main() -> int:
     tracked_before = ""
     tracked_after_build = ""
     next_artifact_sha256 = ""
+    next_artifact_before_start_sha256 = ""
+    next_artifact_after_acceptance_sha256 = ""
+    next_artifact_after_cleanup_sha256 = ""
     source_commit = ""
     tracked_worktree_clean = False
     try:
+        assert_harness_safety_helper_contracts()
         source_commit, tracked_worktree_clean = git_source_state(ROOT)
         if not tracked_worktree_clean:
             raise RuntimeError("candidate_source_worktree_not_clean")
@@ -1941,11 +2312,29 @@ def main() -> int:
     if "openclaw" in adapters:
         runtime_dependency_identity["openclaw_binary_sha256"] = file_sha256(Path(args.openclaw_bin))
 
-    schema = f"agentops_real_worker_review_{secrets.token_hex(8)}"
-    runtime_dsn = dsn_with_search_path(args.postgres_dsn, schema)
+    fixture_suffix = secrets.token_hex(8)
+    schema = f"agentops_real_worker_review_{fixture_suffix}"
+    runtime_api_schema = f"agentops_real_runtime_api_{fixture_suffix}"
+    runtime_role = f"agentops_real_runtime_{fixture_suffix}"
+    entitlement_admin_role = f"agentops_real_admin_{fixture_suffix}"
+    migrator_dsn = dsn_with_search_path(args.postgres_dsn, schema)
+    runtime_password = "Runtime-" + secrets.token_urlsafe(24)
+    entitlement_admin_password = "Admin-" + secrets.token_urlsafe(24)
+    runtime_dsn = dsn_with_credentials(
+        migrator_dsn,
+        runtime_role,
+        runtime_password,
+    )
+    entitlement_admin_dsn = dsn_with_search_path_sequence(
+        dsn_with_credentials(
+            args.postgres_dsn,
+            entitlement_admin_role,
+            entitlement_admin_password,
+        ),
+        ("pg_catalog", runtime_api_schema, "pg_temp"),
+    )
     owner_password = "Owner-" + secrets.token_urlsafe(24)
     hmac_key = secrets.token_urlsafe(48)
-    prompt_secret = "credential_canary_" + secrets.token_urlsafe(24)
     tokens = {
         runtime: f"contract_real_token_{runtime}_{secrets.token_urlsafe(24)}"
         for runtime in adapters
@@ -1956,19 +2345,25 @@ def main() -> int:
         args.hermes_gateway_url,
         args.openclaw_bin,
         str(ROOT),
+        migrator_dsn,
+        entitlement_admin_dsn,
         owner_password,
+        runtime_password,
+        entitlement_admin_password,
         hmac_key,
-        prompt_secret,
         *tokens.values(),
     ]
     # Runtime locations are redacted from diagnostics, while only credentials and
     # protected task input are forbidden from the bounded persisted evidence.
     persisted_sensitive = [
         args.postgres_dsn,
+        migrator_dsn,
         runtime_dsn,
+        entitlement_admin_dsn,
         owner_password,
+        runtime_password,
+        entitlement_admin_password,
         hmac_key,
-        prompt_secret,
         *tokens.values(),
     ]
     setup: NodePgAdapter | None = None
@@ -1977,8 +2372,13 @@ def main() -> int:
     worker_receipts: dict[str, Any] = {}
     human_receipts: dict[str, Any] = {}
     manifest_authority_receipts: dict[str, Any] = {}
+    entitlement_admin_receipt: dict[str, Any] = {}
+    cleanup_receipt: dict[str, bool] = {}
+    process_stop_receipt: dict[str, Any] = {}
+    entitlement_admin_forbidden_operations: dict[str, str] = {}
     tracked_after_acceptance = ""
     worker_process_started = False
+    fixture_cleanup_complete = False
     try:
         setup = NodePgAdapter(args.postgres_dsn, node)
         setup.execute(f'CREATE SCHEMA "{schema}"')
@@ -1986,9 +2386,59 @@ def main() -> int:
         setup.close()
         setup = None
 
-        migrated = run_npm(npm, runtime_dsn, ["migrate:postgres"])
+        role_environment = {
+            "AGENTOPS_DEPLOYMENT_MODE": "production",
+            "AGENTOPS_CONTROL_PLANE_MODE": "postgres",
+            "AGENTOPS_POSTGRES_MIGRATOR_DSN": migrator_dsn,
+            "AGENTOPS_POSTGRES_SCHEMA": schema,
+            "AGENTOPS_POSTGRES_RUNTIME_API_SCHEMA": runtime_api_schema,
+            "AGENTOPS_POSTGRES_RUNTIME_ROLE": runtime_role,
+            "AGENTOPS_POSTGRES_RUNTIME_PASSWORD": runtime_password,
+            "AGENTOPS_POSTGRES_ENTITLEMENT_ADMIN_ROLE":
+                entitlement_admin_role,
+            "AGENTOPS_POSTGRES_ENTITLEMENT_ADMIN_PASSWORD":
+                entitlement_admin_password,
+        }
+        migrated = run_npm(
+            npm,
+            migrator_dsn,
+            ["migrate:postgres"],
+            environment=role_environment,
+        )
         if migrated.returncode != 0:
             raise RuntimeError(redact(f"Commercial schema migration failed: {migrated.stdout} {migrated.stderr}", sensitive))
+        runtime_environment = {
+            "AGENTOPS_DEPLOYMENT_MODE": "production",
+            "AGENTOPS_CONTROL_PLANE_MODE": "postgres",
+            "AGENTOPS_POSTGRES_SCHEMA": schema,
+            "AGENTOPS_POSTGRES_RUNTIME_API_SCHEMA": runtime_api_schema,
+            "AGENTOPS_POSTGRES_RUNTIME_ROLE": runtime_role,
+        }
+        checked = run_npm(
+            npm,
+            runtime_dsn,
+            ["check:postgres-schema"],
+            environment=runtime_environment,
+        )
+        if checked.returncode != 0:
+            raise RuntimeError(redact(
+                f"Restricted runtime schema check failed: "
+                f"{checked.stdout} {checked.stderr}",
+                sensitive,
+            ))
+        try:
+            checked_receipt = json.loads(checked.stdout or "{}")
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(
+                "restricted_runtime_schema_receipt_invalid"
+            ) from exc
+        if (
+            checked_receipt.get("ok") is not True
+            or checked_receipt.get("operation") != "check"
+            or checked_receipt.get("database_role_boundary_verified")
+                is not True
+        ):
+            raise RuntimeError("restricted_runtime_role_boundary_unverified")
         adapter = NodePgAdapter(runtime_dsn, node)
         seed_foundation(adapter)
         adapter.close()
@@ -2008,22 +2458,40 @@ def main() -> int:
                 "--password-stdin",
             ],
             stdin=f"{owner_password}\n",
+            environment=runtime_environment,
         )
         if bootstrapped.returncode != 0:
             raise RuntimeError(redact(f"Owner bootstrap failed: {bootstrapped.stdout} {bootstrapped.stderr}", sensitive))
+        try:
+            bootstrap_receipt = json.loads(bootstrapped.stdout or "{}")
+            owner_user_id = str(
+                (bootstrap_receipt.get("user") or {}).get("user_id") or ""
+            )
+        except (AttributeError, json.JSONDecodeError) as exc:
+            raise RuntimeError("owner_bootstrap_receipt_invalid") from exc
+        if (
+            bootstrap_receipt.get("ok") is not True
+            or not owner_user_id
+        ):
+            raise RuntimeError("owner_bootstrap_identity_unverified")
 
-        adapter = NodePgAdapter(runtime_dsn, node)
-        seed_workers(adapter, adapters, tokens, prompt_secret)
-
+        next_artifact_before_start_sha256 = stable_tree_sha256(
+            NEXT_APP / ".next"
+        )
+        if next_artifact_before_start_sha256 != next_artifact_sha256:
+            raise RuntimeError("next_artifact_changed_before_start")
         port = free_port()
         base_url = f"http://127.0.0.1:{port}"
         public_origin = f"https://127.0.0.1:{port}"
-        env = os.environ.copy()
+        env = environment_without_privileged_control_plane_credentials()
         env.update({
             "AGENTOPS_DEPLOYMENT_MODE": "production",
             "AGENTOPS_CONTROL_PLANE_MODE": "postgres",
             "AGENTOPS_TS_CONTROL_PLANE_MODE": "postgres",
             "AGENTOPS_POSTGRES_DSN": runtime_dsn,
+            "AGENTOPS_POSTGRES_SCHEMA": schema,
+            "AGENTOPS_POSTGRES_RUNTIME_API_SCHEMA": runtime_api_schema,
+            "AGENTOPS_POSTGRES_RUNTIME_ROLE": runtime_role,
             "AGENTOPS_POSTGRES_SSL": "0",
             "AGENTOPS_API_BASE": f"http://127.0.0.1:{free_port()}/api",
             "AGENTOPS_ALLOWED_ORIGINS": public_origin,
@@ -2032,7 +2500,20 @@ def main() -> int:
             "NODE_ENV": "production",
         })
         next_proc = subprocess.Popen(
-            [node, str(NEXT_APP / "node_modules" / "next" / "dist" / "bin" / "next"), "start", "-p", str(port)],
+            [
+                node,
+                str(
+                    NEXT_APP
+                    / "node_modules"
+                    / "next"
+                    / "dist"
+                    / "bin"
+                    / "next"
+                ),
+                "start",
+                "-p",
+                str(port),
+            ],
             cwd=NEXT_APP,
             env=env,
             text=True,
@@ -2041,6 +2522,270 @@ def main() -> int:
             start_new_session=True,
         )
         wait_for_next(base_url, next_proc, sensitive)
+
+        entitlement_now = dt.datetime.now(dt.timezone.utc)
+        effective_at = (
+            entitlement_now - dt.timedelta(minutes=1)
+        ).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+        expires_at = (
+            entitlement_now + dt.timedelta(hours=8)
+        ).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+        entitlement_admin_environment = {
+            "AGENTOPS_DEPLOYMENT_MODE": "production",
+            "AGENTOPS_CONTROL_PLANE_MODE": "postgres",
+            "AGENTOPS_POSTGRES_RUNTIME_API_SCHEMA": runtime_api_schema,
+            "AGENTOPS_POSTGRES_ENTITLEMENT_ADMIN_DSN":
+                entitlement_admin_dsn,
+            "AGENTOPS_ENTITLEMENT_CONTROL_PLANE_URL": base_url,
+            "AGENTOPS_ENTITLEMENT_CONTROL_PLANE_ORIGIN": public_origin,
+            "AGENTOPS_ENTITLEMENT_OPERATOR_USERNAME": OWNER_USERNAME,
+            "AGENTOPS_ENTITLEMENT_OPERATOR_PASSWORD": owner_password,
+        }
+        assert_entitlement_admin_environment_isolated(
+            entitlement_admin_environment
+        )
+        configured = run_npm(
+            npm,
+            None,
+            [
+                "configure:workspace-entitlement",
+                "--",
+                "--workspace-id",
+                WORKSPACE_ID,
+                "--operator-user-id",
+                owner_user_id,
+                "--edition",
+                "enterprise_byoc",
+                "--status",
+                "active",
+                "--capabilities",
+                "enrollment_issue,session_issue,run_start",
+                "--max-agents",
+                str(max(10, len(SCOPES))),
+                "--max-active-enrollments",
+                str(max(10, len(SCOPES))),
+                "--max-active-sessions-per-agent",
+                "10",
+                "--max-concurrent-runs",
+                "10",
+                "--max-monthly-runs",
+                "1000",
+                "--max-monthly-cost-usd",
+                "1000.000000",
+                "--effective-at",
+                effective_at,
+                "--expires-at",
+                expires_at,
+                "--confirm",
+                "--expect-absent",
+            ],
+            environment=entitlement_admin_environment,
+        )
+        if configured.returncode != 0:
+            raise RuntimeError(redact(
+                "Entitlement administration failed: "
+                f"{configured.stdout} {configured.stderr}",
+                sensitive,
+            ))
+        try:
+            entitlement_admin_receipt = json.loads(
+                configured.stdout or "{}"
+            )
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(
+                "entitlement_administration_receipt_invalid"
+            ) from exc
+        if not isinstance(entitlement_admin_receipt, dict):
+            raise RuntimeError("entitlement_administration_receipt_invalid")
+        assert_entitlement_admin_receipt_safe(
+            entitlement_admin_receipt,
+            configured.stdout,
+            configured.stderr,
+        )
+
+        challenge_persistence = NodePgAdapter(
+            migrator_dsn,
+            node,
+        ).fetchone(
+            """SELECT
+              count(*)::integer AS challenge_count,
+              bool_and(token_sha256 ~ '^[a-f0-9]{64}$')
+                AS token_hash_only,
+              bool_and(
+                position(
+                  'agentops_human_session='
+                  IN to_jsonb(entitlement_admin_challenges)::text
+                )=0
+                AND position(
+                  '"challenge_token"'
+                  IN to_jsonb(entitlement_admin_challenges)::text
+                )=0
+                AND position(
+                  '"csrf_token"'
+                  IN to_jsonb(entitlement_admin_challenges)::text
+                )=0
+              ) AS raw_auth_payload_omitted,
+              NOT EXISTS(
+                SELECT 1
+                FROM information_schema.columns
+                WHERE table_schema=?
+                  AND table_name='entitlement_admin_challenges'
+                  AND column_name IN (
+                    'challenge_token','cookie','csrf','csrf_token'
+                  )
+              ) AS raw_auth_columns_omitted
+            FROM entitlement_admin_challenges
+            WHERE workspace_id=? AND operator_user_id=?""",
+            (schema, WORKSPACE_ID, owner_user_id),
+        )
+        if challenge_persistence != {
+            "challenge_count": 1,
+            "token_hash_only": True,
+            "raw_auth_payload_omitted": True,
+            "raw_auth_columns_omitted": True,
+        }:
+            raise RuntimeError(
+                "entitlement_challenge_persistence_boundary_unverified"
+            )
+
+        admin_adapter = NodePgAdapter(entitlement_admin_dsn, node)
+        admin_search_path = admin_adapter.fetchone(
+            "SELECT current_setting('search_path') AS search_path"
+        )
+        normalized_admin_search_path = [
+            part.strip().strip('"')
+            for part in str(
+                (admin_search_path or {}).get("search_path") or ""
+            ).split(",")
+            if part.strip()
+        ]
+        if normalized_admin_search_path != [
+            "pg_catalog",
+            runtime_api_schema,
+            "pg_temp",
+        ]:
+            raise RuntimeError("entitlement_admin_search_path_unverified")
+
+        executable_application_functions = admin_adapter.fetchall(
+            """SELECT
+              namespace_row.nspname AS schema_name,
+              procedure_row.proname AS function_name,
+              pg_get_function_identity_arguments(procedure_row.oid)
+                AS identity_arguments
+            FROM pg_proc AS procedure_row
+            JOIN pg_namespace AS namespace_row
+              ON namespace_row.oid=procedure_row.pronamespace
+            WHERE namespace_row.nspname IN (?,?)
+              AND has_function_privilege(
+                current_user,procedure_row.oid,'EXECUTE'
+              )
+            ORDER BY
+              namespace_row.nspname,
+              procedure_row.proname,
+              pg_get_function_identity_arguments(procedure_row.oid)""",
+            (schema, runtime_api_schema),
+        )
+        if executable_application_functions != [
+            {
+                "schema_name": runtime_api_schema,
+                "function_name":
+                    "agentops_apply_workspace_entitlement_v11",
+                "identity_arguments": "text, text, jsonb",
+            },
+            {
+                "schema_name": runtime_api_schema,
+                "function_name":
+                    "agentops_plan_workspace_entitlement_v11",
+                "identity_arguments": "text, text, jsonb",
+            },
+        ]:
+            raise RuntimeError(
+                "entitlement_admin_execute_allowlist_unverified"
+            )
+        entitlement_admin_forbidden_operations["issue"] = (
+            assert_postgres_statement_forbidden(
+                admin_adapter,
+                f'SELECT "{runtime_api_schema}".'
+                "agentops_issue_workspace_entitlement_admin_challenge_v11("
+                "NULL::text,NULL::text,NULL::text,NULL::text,"
+                "NULL::jsonb,NULL::text,NULL::interval)",
+            )
+        )
+
+        application_tables = admin_adapter.fetchall(
+            """SELECT class_row.relname AS table_name
+            FROM pg_class AS class_row
+            JOIN pg_namespace AS namespace_row
+              ON namespace_row.oid=class_row.relnamespace
+            WHERE namespace_row.nspname=?
+              AND class_row.relkind IN ('r','p')
+            ORDER BY class_row.relname""",
+            (schema,),
+        )
+        if not application_tables:
+            raise RuntimeError("entitlement_admin_app_table_matrix_empty")
+        for table in application_tables:
+            table_name = str(table.get("table_name") or "")
+            quoted_table = table_name.replace('"', '""')
+            assert_postgres_statement_forbidden(
+                admin_adapter,
+                f'SELECT 1 FROM "{schema}"."{quoted_table}" LIMIT 0',
+            )
+        entitlement_admin_forbidden_operations["select"] = "42501"
+
+        for operation, forbidden_sql, script in (
+            (
+                "insert",
+                f'INSERT INTO "{schema}".runs(run_id) SELECT '
+                "'agentops_forbidden_insert_probe' WHERE FALSE",
+                False,
+            ),
+            (
+                "update",
+                f'UPDATE "{schema}".run_cost_reservations '
+                "SET state=state WHERE FALSE",
+                False,
+            ),
+            (
+                "delete",
+                f'DELETE FROM "{schema}".workspace_memberships WHERE FALSE',
+                False,
+            ),
+            (
+                "truncate",
+                f'BEGIN; TRUNCATE TABLE "{schema}".'
+                "agentops_schema_migrations; ROLLBACK;",
+                True,
+            ),
+            (
+                "ddl",
+                f'BEGIN; CREATE TABLE "{schema}".'
+                "agentops_forbidden_admin_ddl_probe(id integer); ROLLBACK;",
+                True,
+            ),
+        ):
+            entitlement_admin_forbidden_operations[operation] = (
+                assert_postgres_statement_forbidden(
+                    admin_adapter,
+                    forbidden_sql,
+                    script=script,
+                )
+            )
+        if set(entitlement_admin_forbidden_operations) != {
+            "select",
+            "insert",
+            "update",
+            "delete",
+            "truncate",
+            "ddl",
+            "issue",
+        } or set(entitlement_admin_forbidden_operations.values()) != {"42501"}:
+            raise RuntimeError(
+                "entitlement_admin_forbidden_operation_matrix_unverified"
+            )
+
+        adapter = NodePgAdapter(runtime_dsn, node)
+        seed_workers(adapter, adapters, tokens)
 
         for runtime in adapters:
             worker_process_started = True
@@ -2082,8 +2827,38 @@ def main() -> int:
                 worker_receipts[runtime],
             )
 
-        stop_process(next_proc)
+        process_stop_receipt = stop_process(next_proc)
         next_proc = None
+        if (
+            process_stop_receipt.get("stopped") is not True
+            or process_stop_receipt.get("errors")
+        ):
+            raise RuntimeError("next_process_stop_failed")
+        next_artifact_after_acceptance_sha256 = stable_tree_sha256(
+            NEXT_APP / ".next"
+        )
+        if next_artifact_after_acceptance_sha256 != next_artifact_sha256:
+            raise RuntimeError("next_artifact_changed_during_acceptance")
+        if adapter is not None:
+            try:
+                adapter.close()
+            except Exception:
+                pass
+            adapter = None
+        cleanup_receipt = cleanup_postgres_fixture(
+            args.postgres_dsn,
+            node,
+            schema,
+            runtime_api_schema,
+            runtime_role,
+            entitlement_admin_role,
+        )
+        fixture_cleanup_complete = True
+        next_artifact_after_cleanup_sha256 = stable_tree_sha256(
+            NEXT_APP / ".next"
+        )
+        if next_artifact_after_cleanup_sha256 != next_artifact_sha256:
+            raise RuntimeError("next_artifact_changed_during_cleanup")
         tracked_after_acceptance = tracked_worktree_fingerprint(ROOT)
         if tracked_after_acceptance != tracked_before:
             raise RuntimeError(
@@ -2109,6 +2884,13 @@ def main() -> int:
             "next_internal_transport_scheme": "http_loopback",
             "human_session_public_origin_scheme": "https",
             "next_artifact_sha256": next_artifact_sha256,
+            "next_artifact_before_start_sha256":
+                next_artifact_before_start_sha256,
+            "next_artifact_after_acceptance_sha256":
+                next_artifact_after_acceptance_sha256,
+            "next_artifact_after_cleanup_sha256":
+                next_artifact_after_cleanup_sha256,
+            "next_artifact_identity_verified": True,
             "next_build_completed": True,
             "source_commit": source_commit,
             "tracked_worktree_clean": True,
@@ -2118,6 +2900,40 @@ def main() -> int:
             "tracked_worktree_unchanged": True,
             "python_api_started": False,
             "python_or_sqlite_commercial_default": False,
+            "database_role_boundary_verified": True,
+            "migrator_runtime_roles_distinct": True,
+            "runtime_migrator_credentials_separated": True,
+            "runtime_entitlement_admin_credentials_separated": True,
+            "subprocess_environment_scrub_verified": True,
+            "worker_database_credentials_omitted": True,
+            "worker_human_session_credentials_omitted": True,
+            "entitlement_admin_executed": True,
+            "entitlement_admin_online_human_challenge_verified": True,
+            "entitlement_admin_environment_isolated": True,
+            "entitlement_admin_search_path_verified": True,
+            "entitlement_admin_search_path": [
+                "pg_catalog",
+                runtime_api_schema,
+                "pg_temp",
+            ],
+            "entitlement_admin_execute_allowlist_verified": True,
+            "entitlement_admin_execute_allowlist": [
+                "agentops_apply_workspace_entitlement_v11",
+                "agentops_plan_workspace_entitlement_v11",
+            ],
+            "entitlement_admin_issue_forbidden": True,
+            "entitlement_admin_all_app_table_select_forbidden": True,
+            "entitlement_admin_app_table_count": len(application_tables),
+            "entitlement_admin_forbidden_dml_verified": True,
+            "entitlement_admin_forbidden_ddl_verified": True,
+            "entitlement_admin_forbidden_operations":
+                entitlement_admin_forbidden_operations,
+            "entitlement_admin_forbidden_sqlstate_verified": True,
+            "entitlement_challenge_consumed": True,
+            "entitlement_challenge_token_hash_only_persisted": True,
+            "entitlement_raw_auth_material_omitted": True,
+            "next_process_stop": process_stop_receipt,
+            "entitlement_administration": entitlement_admin_receipt,
             "worker_implementation": args.worker_implementation,
             "typescript_worker_started": (
                 worker_process_started
@@ -2153,13 +2969,40 @@ def main() -> int:
             "raw_prompt_response_omitted": True,
             "credentials_omitted": True,
             "schema_isolated_and_ephemeral": True,
+            "fixture_cleanup": cleanup_receipt,
+            "fixture_cleanup_verified_before_success": True,
         }, sensitive)
         return 0
     except Exception as exc:
         original_traceback = traceback.format_exc()
+        process_stop_error = ""
         if next_proc is not None:
-            stop_process(next_proc)
+            process_stop_receipt = stop_process(next_proc)
             next_proc = None
+            if (
+                process_stop_receipt.get("stopped") is not True
+                or process_stop_receipt.get("errors")
+            ):
+                process_stop_error = "next_process_stop_failed"
+        if adapter is not None:
+            adapter.close()
+            adapter = None
+        cleanup_error = ""
+        try:
+            cleanup_receipt = cleanup_postgres_fixture(
+                args.postgres_dsn,
+                node,
+                schema,
+                runtime_api_schema,
+                runtime_role,
+                entitlement_admin_role,
+            )
+            fixture_cleanup_complete = True
+            next_artifact_after_cleanup_sha256 = stable_tree_sha256(
+                NEXT_APP / ".next"
+            )
+        except Exception as cleanup_exc:
+            cleanup_error = str(cleanup_exc)
         fingerprint_error = ""
         source_state_error = ""
         source_commit_after_failure = ""
@@ -2197,6 +3040,12 @@ def main() -> int:
             "traceback": redact(original_traceback, sensitive)[-4000:],
             "next_runtime_mode": "production_start",
             "next_artifact_sha256": next_artifact_sha256,
+            "next_artifact_before_start_sha256":
+                next_artifact_before_start_sha256 or None,
+            "next_artifact_after_acceptance_sha256":
+                next_artifact_after_acceptance_sha256 or None,
+            "next_artifact_after_cleanup_sha256":
+                next_artifact_after_cleanup_sha256 or None,
             "next_build_completed": True,
             "source_commit": source_commit or None,
             "tracked_worktree_clean": clean_after_failure,
@@ -2215,26 +3064,42 @@ def main() -> int:
                 receipt.get("provider_call_performed") is True and receipt.get("dry_run") is False
                 for receipt in worker_receipts.values()
             ),
+            "fixture_cleanup": cleanup_receipt or None,
+            "fixture_cleanup_error":
+                redact(cleanup_error, sensitive) if cleanup_error else None,
+            "fixture_cleanup_verified_before_failure_receipt":
+                fixture_cleanup_complete,
+            "next_process_stop": process_stop_receipt or None,
+            "next_process_stop_error": process_stop_error or None,
             "credentials_omitted": True,
         }, sensitive)
         return 1
     finally:
         if next_proc is not None:
             stop_process(next_proc)
+            next_proc = None
         if adapter is not None:
-            adapter.close()
+            try:
+                adapter.close()
+            except Exception:
+                pass
         if setup is not None:
-            setup.close()
-        cleanup: NodePgAdapter | None = None
-        try:
-            cleanup = NodePgAdapter(args.postgres_dsn, node)
-            cleanup.execute(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE')
-            cleanup.commit()
-        except Exception:
-            pass
-        finally:
-            if cleanup is not None:
-                cleanup.close()
+            try:
+                setup.close()
+            except Exception:
+                pass
+        if not fixture_cleanup_complete:
+            try:
+                cleanup_postgres_fixture(
+                    args.postgres_dsn,
+                    node,
+                    schema,
+                    runtime_api_schema,
+                    runtime_role,
+                    entitlement_admin_role,
+                )
+            except Exception:
+                pass
 
 
 if __name__ == "__main__":

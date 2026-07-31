@@ -29,6 +29,8 @@ const FOREIGN_TOKEN = `contract-foreign-${randomBytes(24).toString("base64url")}
 const NO_SCOPE_TOKEN = `contract-noscope-${randomBytes(24).toString("base64url")}`;
 const SECRET_CANARY = "contract-sensitive-agent-read-value";
 const DSN_CANARY = `post${"gresql"}://reader:contract-db-password@internal/read`;
+const UPPER_EXACT_COST_USD = "999999999999.999999";
+const LARGE_EXACT_COST_USD = "9999999999.999999";
 
 function sha256(value: string) {
   return createHash("sha256").update(value, "utf8").digest("hex");
@@ -86,6 +88,18 @@ async function settleHistoricalRunCost(
 function scopedDsn(baseDsn: string, schema: string) {
   const parsed = new URL(baseDsn);
   parsed.searchParams.set("options", `-csearch_path=${schema}`);
+  return parsed.toString();
+}
+
+function roleDsn(
+  baseDsn: string,
+  schema: string,
+  role: string,
+  password: string,
+) {
+  const parsed = new URL(scopedDsn(baseDsn, schema));
+  parsed.username = role;
+  parsed.password = password;
   return parsed.toString();
 }
 
@@ -211,11 +225,16 @@ async function seed(client: Client) {
     parentRunId,
     delegationId,
   ] of runs) {
+    const costUsd = runId === "run_agent_parent"
+      ? UPPER_EXACT_COST_USD
+      : runId === "run_agent_child"
+        ? LARGE_EXACT_COST_USD
+        : "0.250000";
     await reserveHistoricalRunCost(
       client,
       workspaceId,
       runId,
-      "0.250000",
+      costUsd,
       now,
     );
     await client.query(
@@ -226,7 +245,7 @@ async function seed(client: Client) {
         error_type,error_message,trace_id,parent_run_id,delegation_id,
         approval_required,agent_plan_id,plan_hash,billing_class,created_at
       ) VALUES($1,$2,$3,$4,'hermes','completed',$7,$8,5000,$9,$10,
-        'hermes','contract-model',10,20,3,0.25,NULL,NULL,'trace-contract',
+        'hermes','contract-model',10,20,3,$11::numeric,NULL,NULL,'trace-contract',
         $5,$6,0,NULL,NULL,'historical_execution',$7)`,
       [
         runId,
@@ -239,13 +258,14 @@ async function seed(client: Client) {
         later,
         `Bearer ${SECRET_CANARY}`,
         `Completed with ${DSN_CANARY}`,
+        costUsd,
       ],
     );
     await settleHistoricalRunCost(
       client,
       workspaceId,
       runId,
-      "0.250000",
+      costUsd,
     );
   }
 
@@ -372,10 +392,19 @@ async function run() {
   const baseDsn = String(process.env.AGENTOPS_POSTGRES_DSN || "").trim();
   assert.ok(baseDsn, "AGENTOPS_POSTGRES_DSN is required");
   const schema = `agent_scoped_read_${randomUUID().replaceAll("-", "")}`;
+  const runtimeApiSchema = `api_read_${randomBytes(8).toString("hex")}`;
+  const runtimeRole = `rt_read_${randomBytes(8).toString("hex")}`;
+  const runtimePassword = randomBytes(24).toString("base64url");
+  const entitlementAdminRole = `ea_read_${randomBytes(8).toString("hex")}`;
+  const entitlementAdminPassword = randomBytes(24).toString("base64url");
   const admin = new Client({ connectionString: baseDsn });
   const originalDsn = process.env.AGENTOPS_POSTGRES_DSN;
   const originalDeployment = process.env.AGENTOPS_DEPLOYMENT_MODE;
   const originalMode = process.env.AGENTOPS_CONTROL_PLANE_MODE;
+  const originalSchema = process.env.AGENTOPS_POSTGRES_SCHEMA;
+  const originalRuntimeApiSchema =
+    process.env.AGENTOPS_POSTGRES_RUNTIME_API_SCHEMA;
+  const originalRuntimeRole = process.env.AGENTOPS_POSTGRES_RUNTIME_ROLE;
   const originalFetch = globalThis.fetch;
   let schemaCreated = false;
   let fetchCalls = 0;
@@ -396,10 +425,18 @@ async function run() {
     await admin.query(`CREATE SCHEMA ${quotedSchema(schema)}`);
     schemaCreated = true;
     const contractDsn = scopedDsn(baseDsn, schema);
-    process.env.AGENTOPS_POSTGRES_DSN = contractDsn;
     const migration = await runPostgresSchemaCommand(
       "migrate",
-      { connectionString: contractDsn },
+      {
+        connectionString: contractDsn,
+        applicationSchema: schema,
+        runtimeApiSchema,
+        runtimeRole,
+        runtimePassword,
+        entitlementAdminRole,
+        entitlementAdminPassword,
+        provisionRoleBoundary: true,
+      },
     );
     assert.equal(migration.schema_contract, SCHEMA_CONTRACT);
     assert.equal(
@@ -408,6 +445,15 @@ async function run() {
     );
     await admin.query(`SET search_path TO ${quotedSchema(schema)}`);
     await seed(admin);
+    process.env.AGENTOPS_POSTGRES_DSN = roleDsn(
+      baseDsn,
+      schema,
+      runtimeRole,
+      runtimePassword,
+    );
+    process.env.AGENTOPS_POSTGRES_SCHEMA = schema;
+    process.env.AGENTOPS_POSTGRES_RUNTIME_API_SCHEMA = runtimeApiSchema;
+    process.env.AGENTOPS_POSTGRES_RUNTIME_ROLE = runtimeRole;
 
     await expectCode(
       "unauthorized",
@@ -455,6 +501,16 @@ async function run() {
       "run_agent_sibling",
       "run_agent_unassigned",
     ]);
+    const listedParent = listed.runs.find(
+      (run) => run.run_id === "run_agent_parent",
+    );
+    const listedChild = listed.runs.find(
+      (run) => run.run_id === "run_agent_child",
+    );
+    assert.equal(listedParent?.cost_usd, Number(UPPER_EXACT_COST_USD));
+    assert.equal(listedParent?.cost_usd_exact, UPPER_EXACT_COST_USD);
+    assert.equal(listedChild?.cost_usd, Number(LARGE_EXACT_COST_USD));
+    assert.equal(listedChild?.cost_usd_exact, LARGE_EXACT_COST_USD);
     assertScope(listed, "agent_token");
 
     const sessionListed = body<{
@@ -480,6 +536,8 @@ async function run() {
       "run_agent_parent",
     ));
     assert.equal(detail.run.run_id, "run_agent_parent");
+    assert.equal(detail.run.cost_usd, Number(UPPER_EXACT_COST_USD));
+    assert.equal(detail.run.cost_usd_exact, UPPER_EXACT_COST_USD);
     assert.deepEqual(ids(detail.tool_calls, "tool_call_id"), ["tc_agent_read"]);
     assert.deepEqual(ids(detail.artifacts, "artifact_id"), ["art_agent_read"]);
     assert.deepEqual(ids(detail.evaluations, "evaluation_id"), ["eval_agent_read"]);
@@ -508,7 +566,10 @@ async function run() {
       "run_agent_child",
     ));
     assert.equal(graph.run.run_id, "run_agent_child");
+    assert.equal(graph.run.cost_usd, Number(LARGE_EXACT_COST_USD));
+    assert.equal(graph.run.cost_usd_exact, LARGE_EXACT_COST_USD);
     assert.equal(graph.parent?.run_id, "run_agent_parent");
+    assert.equal(graph.parent?.cost_usd_exact, UPPER_EXACT_COST_USD);
     assert.deepEqual(graph.children, []);
     assert.deepEqual(ids(graph.siblings_by_delegation, "run_id").sort(), [
       "run_agent_parent",
@@ -571,6 +632,8 @@ async function run() {
       cross_workspace_blocked: true,
       cross_agent_impersonation_blocked: true,
       mismatched_evidence_excluded: true,
+      legacy_numeric_cost_projection_compatible: true,
+      exact_cost_projection_numeric_18_6: true,
       raw_content_omitted: true,
       provider_calls: fetchCalls,
       python_proxy_performed: false,
@@ -583,6 +646,13 @@ async function run() {
     if (schemaCreated) {
       await admin.query("SET search_path TO public");
       await admin.query(`DROP SCHEMA ${quotedSchema(schema)} CASCADE`);
+      await admin.query(
+        `DROP SCHEMA IF EXISTS ${quotedSchema(runtimeApiSchema)} CASCADE`,
+      );
+      await admin.query(`DROP ROLE IF EXISTS ${quotedSchema(runtimeRole)}`);
+      await admin.query(
+        `DROP ROLE IF EXISTS ${quotedSchema(entitlementAdminRole)}`,
+      );
     }
     await admin.end().catch(() => undefined);
     if (originalDsn === undefined) {
@@ -599,6 +669,22 @@ async function run() {
       delete process.env.AGENTOPS_CONTROL_PLANE_MODE;
     } else {
       process.env.AGENTOPS_CONTROL_PLANE_MODE = originalMode;
+    }
+    if (originalSchema === undefined) {
+      delete process.env.AGENTOPS_POSTGRES_SCHEMA;
+    } else {
+      process.env.AGENTOPS_POSTGRES_SCHEMA = originalSchema;
+    }
+    if (originalRuntimeApiSchema === undefined) {
+      delete process.env.AGENTOPS_POSTGRES_RUNTIME_API_SCHEMA;
+    } else {
+      process.env.AGENTOPS_POSTGRES_RUNTIME_API_SCHEMA =
+        originalRuntimeApiSchema;
+    }
+    if (originalRuntimeRole === undefined) {
+      delete process.env.AGENTOPS_POSTGRES_RUNTIME_ROLE;
+    } else {
+      process.env.AGENTOPS_POSTGRES_RUNTIME_ROLE = originalRuntimeRole;
     }
   }
 }

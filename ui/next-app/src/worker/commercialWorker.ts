@@ -148,45 +148,80 @@ function receiptBase(
   };
 }
 
+const PROVIDER_SUCCESS_SUMMARY =
+  "Provider response omitted; execution completed and bounded metadata was recorded.";
+const PROVIDER_FAILURE_SUMMARY =
+  "Provider response omitted; execution failed and bounded metadata was recorded.";
+const PROVIDER_ATTESTATION_REJECTED_SUMMARY =
+  "Provider response omitted; execution attestation was rejected.";
+const PROVIDER_ERROR_OMITTED =
+  "Provider error detail omitted; inspect bounded error type and execution metadata.";
+
+function normalizedErrorType(
+  value: unknown,
+  runtime: CommercialWorkerConfig["runtime"],
+  ok: boolean,
+) {
+  if (ok) return null;
+  const candidate = String(value ?? "").trim();
+  const allowed = runtime === "hermes"
+    ? /^Hermes(?:HTTP[1-5][0-9]{2}|Timeout|ExecutionFailed|EmptyResponse)$/
+    : /^OpenClaw(?:ExecutionFailed|EmptyResponse)$/;
+  return allowed.test(candidate)
+    ? candidate
+    : "RuntimeAdapterError";
+}
+
 function normalizeAdapterResult(
   result: RuntimeAdapterResult,
   runtime: CommercialWorkerConfig["runtime"],
 ): RuntimeAdapterResult {
+  const adapterReportedSuccess = result.ok === true;
+  const providerCallPerformed = result.providerCallPerformed === true;
+  const dryRun = result.dryRun !== false;
+  const providerAttestationInvalid = adapterReportedSuccess
+    && (
+      !providerCallPerformed
+      || dryRun
+    );
+  const ok = adapterReportedSuccess && !providerAttestationInvalid;
   const hash = /^[a-f0-9]{64}$/.test(result.rawPayloadHash)
     ? result.rawPayloadHash
     : stableHash({
+      envelope: "commercial_worker_adapter_metadata_v1",
       runtime,
-      output_summary: redactText(result.outputSummary, 720),
-      error_type: redactText(result.errorType, 120),
+      ok,
+      provider_call_performed: providerCallPerformed,
+      dry_run: dryRun,
+      duration_ms: boundedInteger(result.durationMs, 0, 0, 86_400_000),
+      output_tokens: boundedInteger(result.outputTokens, 0, 0, 10_000_000),
     });
   const normalized = {
     ...result,
+    ok,
     runtime,
+    providerCallPerformed,
+    dryRun,
+    retryable: result.retryable === true,
     modelName: redactText(result.modelName, 120),
-    outputSummary: redactText(result.outputSummary, 720),
+    outputSummary: providerAttestationInvalid
+      ? PROVIDER_ATTESTATION_REJECTED_SUMMARY
+      : ok
+        ? PROVIDER_SUCCESS_SUMMARY
+        : PROVIDER_FAILURE_SUMMARY,
     rawPayloadHash: hash,
     targetResource: redactText(result.targetResource, 240),
     durationMs: boundedInteger(result.durationMs, 0, 0, 86_400_000),
     outputTokens: boundedInteger(result.outputTokens, 0, 0, 10_000_000),
-    errorType: result.errorType ? redactText(result.errorType, 120) : null,
-    errorMessage: result.errorMessage
-      ? redactText(result.errorMessage, 300)
-      : null,
+    errorType: providerAttestationInvalid
+      ? "ProviderAttestationInvalid"
+      : normalizedErrorType(result.errorType, runtime, ok),
+    errorMessage: ok ? null : PROVIDER_ERROR_OMITTED,
   };
-  if (
-    normalized.ok
-    && (
-      normalized.providerCallPerformed !== true
-      || normalized.dryRun !== false
-    )
-  ) {
+  if (providerAttestationInvalid) {
     return {
       ...normalized,
-      ok: false,
       retryable: false,
-      errorType: "ProviderAttestationInvalid",
-      errorMessage: "Successful runtime result lacks provider-call attestation.",
-      outputSummary: "Runtime result was rejected because provider attestation is invalid.",
     };
   }
   return normalized;
@@ -686,6 +721,7 @@ export class CommercialWorker {
       task_id: task.task_id,
       adapter: this.#config.runtime,
       summary: result.outputSummary,
+      raw_payload_hash: result.rawPayloadHash,
       ok: result.ok,
       knowledge_packet_hash: knowledge.packetHash,
     });

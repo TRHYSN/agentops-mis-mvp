@@ -39,6 +39,8 @@ const NORMALIZED_ARGUMENT_CANARY = "contract-normalized-argument";
 const RUBRIC_CANARY = "contract-rubric-secret";
 const ARTIFACT_URI_CANARY = "https://contract-artifact-uri.example.test/private";
 const MEMORY_SOURCE_CANARY = "contract-memory-source-ref";
+const UPPER_EXACT_COST_USD = "999999999999.999999";
+const LARGE_EXACT_COST_USD = "9999999999.999999";
 const SENSITIVE_CANARIES = [
   SECRET_KEY_CANARY,
   AGENT_TOKEN_CANARY,
@@ -110,6 +112,18 @@ async function settleHistoricalRunCost(
 function scopedDsn(baseDsn: string, schema: string) {
   const parsed = new URL(baseDsn);
   parsed.searchParams.set("options", `-csearch_path=${schema}`);
+  return parsed.toString();
+}
+
+function roleDsn(
+  baseDsn: string,
+  schema: string,
+  role: string,
+  password: string,
+) {
+  const parsed = new URL(scopedDsn(baseDsn, schema));
+  parsed.username = role;
+  parsed.password = password;
   return parsed.toString();
 }
 
@@ -262,10 +276,10 @@ async function seedWorkspaceEvidence(client: Client) {
       max_monthly_cost_usd,max_concurrent_runs,effective_at,expires_at
     ) VALUES(
       $1,'team_governance','active',jsonb_build_object('run_start',true),
-      10,10,10,100,100,10,clock_timestamp()-interval '1 hour',
+      10,10,10,100,$2::numeric,10,clock_timestamp()-interval '1 hour',
       clock_timestamp()+interval '1 year'
     )`,
-    [WORKSPACE],
+    [WORKSPACE, UPPER_EXACT_COST_USD],
   );
   await client.query("BEGIN");
   try {
@@ -273,14 +287,14 @@ async function seedWorkspaceEvidence(client: Client) {
       client,
       WORKSPACE,
       "run_read_primary",
-      "0.250000",
+      LARGE_EXACT_COST_USD,
       createdAt,
     );
     await reserveHistoricalRunCost(
       client,
       FOREIGN_WORKSPACE,
       "run_read_foreign",
-      "1.000000",
+      UPPER_EXACT_COST_USD,
       createdAt,
     );
     await client.query(
@@ -304,7 +318,7 @@ async function seedWorkspaceEvidence(client: Client) {
       ) VALUES
         ('run_read_primary',$1,'tsk_read_primary','agt_read_primary','hermes',
           'completed',$3,$4,10000,$5,$6,'hermes','contract-model',
-          10,20,3,0.25,NULL,NULL,'trace-primary',NULL,NULL,0,NULL,NULL,
+          10,20,3,$7::numeric,NULL,NULL,'trace-primary',NULL,NULL,0,NULL,NULL,
           'historical_execution',$3),
         ('run_read_active',$1,'tsk_read_active','agt_read_active','openclaw',
           'running',$3,NULL,NULL,NULL,NULL,'openclaw','contract-model',
@@ -312,7 +326,7 @@ async function seedWorkspaceEvidence(client: Client) {
           'metered_execution',$3),
         ('run_read_foreign',$2,'tsk_read_foreign','agt_read_foreign','hermes',
           'completed',$3,$4,10000,'Foreign input','Foreign output','hermes',
-          'contract-model',1,1,0,0,NULL,NULL,'trace-foreign',NULL,NULL,0,
+          'contract-model',1,1,0,$8::numeric,NULL,NULL,'trace-foreign',NULL,NULL,0,
           NULL,NULL,'historical_execution',$3)`,
       [
         WORKSPACE,
@@ -321,19 +335,21 @@ async function seedWorkspaceEvidence(client: Client) {
         endedAt,
         `Bearer ${AGENT_TOKEN_CANARY}`,
         `Result ${SECRET_KEY_CANARY}`,
+        LARGE_EXACT_COST_USD,
+        UPPER_EXACT_COST_USD,
       ],
     );
     await settleHistoricalRunCost(
       client,
       WORKSPACE,
       "run_read_primary",
-      "0.250000",
+      LARGE_EXACT_COST_USD,
     );
     await settleHistoricalRunCost(
       client,
       FOREIGN_WORKSPACE,
       "run_read_foreign",
-      "0.000000",
+      UPPER_EXACT_COST_USD,
     );
     await client.query("COMMIT");
   } catch (error) {
@@ -502,6 +518,11 @@ async function run() {
   const baseDsn = String(process.env.AGENTOPS_POSTGRES_DSN || "").trim();
   assert.ok(baseDsn, "AGENTOPS_POSTGRES_DSN is required");
   const schema = `human_task_run_read_${randomUUID().replaceAll("-", "")}`;
+  const runtimeApiSchema = `api_human_${randomBytes(8).toString("hex")}`;
+  const runtimeRole = `rt_human_${randomBytes(8).toString("hex")}`;
+  const runtimePassword = randomBytes(24).toString("base64url");
+  const entitlementAdminRole = `ea_human_${randomBytes(8).toString("hex")}`;
+  const entitlementAdminPassword = randomBytes(24).toString("base64url");
   const admin = new Client({ connectionString: baseDsn });
   const originalFetch = globalThis.fetch;
   let fetchCalls = 0;
@@ -525,10 +546,18 @@ async function run() {
     await admin.query(`CREATE SCHEMA ${quotedSchema(schema)}`);
     schemaCreated = true;
     const contractDsn = scopedDsn(baseDsn, schema);
-    process.env.AGENTOPS_POSTGRES_DSN = contractDsn;
     const migration = await runPostgresSchemaCommand(
       "migrate",
-      { connectionString: contractDsn },
+      {
+        connectionString: contractDsn,
+        applicationSchema: schema,
+        runtimeApiSchema,
+        runtimeRole,
+        runtimePassword,
+        entitlementAdminRole,
+        entitlementAdminPassword,
+        provisionRoleBoundary: true,
+      },
     );
     assert.equal(migration.schema_contract, SCHEMA_CONTRACT);
     assert.equal(
@@ -549,6 +578,15 @@ async function run() {
       FOREIGN_WORKSPACE,
     );
     await seedWorkspaceEvidence(admin);
+    process.env.AGENTOPS_POSTGRES_DSN = roleDsn(
+      baseDsn,
+      schema,
+      runtimeRole,
+      runtimePassword,
+    );
+    process.env.AGENTOPS_POSTGRES_SCHEMA = schema;
+    process.env.AGENTOPS_POSTGRES_RUNTIME_API_SCHEMA = runtimeApiSchema;
+    process.env.AGENTOPS_POSTGRES_RUNTIME_ROLE = runtimeRole;
 
     const owner = await login("read-owner");
     const reviewer = await login("read-reviewer");
@@ -579,6 +617,11 @@ async function run() {
         runs.body.map((run) => run.run_id).sort(),
         ["run_read_active", "run_read_primary"],
       );
+      const primaryRun = runs.body.find(
+        (run) => run.run_id === "run_read_primary",
+      );
+      assert.equal(primaryRun?.cost_usd, Number(LARGE_EXACT_COST_USD));
+      assert.equal(primaryRun?.cost_usd_exact, LARGE_EXACT_COST_USD);
     }
 
     const limitedTasks = await listWorkspaceTasks(
@@ -678,6 +721,14 @@ async function run() {
       "run_read_primary",
     );
     assert.equal(runDetail.body.run.run_id, "run_read_primary");
+    assert.equal(
+      runDetail.body.run.cost_usd,
+      Number(LARGE_EXACT_COST_USD),
+    );
+    assert.equal(
+      runDetail.body.run.cost_usd_exact,
+      LARGE_EXACT_COST_USD,
+    );
     assert.deepEqual(
       runDetail.body.tool_calls.map((tool) => tool.tool_call_id),
       ["tc_read_primary"],
@@ -707,6 +758,19 @@ async function run() {
     assert.deepEqual(foreignTasks.body.map((task) => task.task_id), [
       "tsk_read_foreign",
     ]);
+    const foreignRunDetail = await readWorkspaceRunDetail(
+      browserHeaders(foreign, FOREIGN_WORKSPACE),
+      FOREIGN_WORKSPACE,
+      "run_read_foreign",
+    );
+    assert.equal(
+      foreignRunDetail.body.run.cost_usd,
+      Number(UPPER_EXACT_COST_USD),
+    );
+    assert.equal(
+      foreignRunDetail.body.run.cost_usd_exact,
+      UPPER_EXACT_COST_USD,
+    );
     await expectCode("task_not_found", () => readWorkspaceTaskDetail(
       browserHeaders(owner),
       WORKSPACE,
@@ -795,6 +859,8 @@ async function run() {
       workspaces_verified: 2,
       human_roles_verified: ["owner", "reviewer", "operator", "viewer"],
       run_task_agent_offset_filters: true,
+      legacy_numeric_cost_projection_compatible: true,
+      exact_cost_projection_numeric_18_6: true,
       routes_verified: [
         "GET /api/mis/tasks",
         "GET /api/mis/tasks/:taskId",
@@ -810,6 +876,13 @@ async function run() {
     await closeControlPlanePoolForTests();
     if (schemaCreated) {
       await admin.query(`DROP SCHEMA IF EXISTS ${quotedSchema(schema)} CASCADE`);
+      await admin.query(
+        `DROP SCHEMA IF EXISTS ${quotedSchema(runtimeApiSchema)} CASCADE`,
+      );
+      await admin.query(`DROP ROLE IF EXISTS ${quotedSchema(runtimeRole)}`);
+      await admin.query(
+        `DROP ROLE IF EXISTS ${quotedSchema(entitlementAdminRole)}`,
+      );
     }
     await admin.end().catch(() => undefined);
   }

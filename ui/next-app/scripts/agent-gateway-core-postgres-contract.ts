@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash, randomBytes } from "node:crypto";
+import { readFile } from "node:fs/promises";
 import http from "node:http";
 
 import { Client } from "pg";
@@ -19,6 +20,7 @@ import {
   submitAgentGatewayEvaluation,
 } from "../src/server/controlPlane/agentGatewayEvidence";
 import { emitAgentAudit } from "../src/server/controlPlane/agentGatewayEvidenceSupport";
+import { costUsdExact } from "../src/server/controlPlane/costProjection";
 import {
   heartbeatAgentGatewayRun,
   startAgentGatewayRun,
@@ -44,6 +46,10 @@ const workspaceId = "ws_gateway_core";
 const otherWorkspaceId = "ws_gateway_foreign";
 const postgresApplicationName =
   `agentops-core-${randomBytes(6).toString("hex")}`;
+const EXACT_COST_BOUNDARIES = [
+  "999999999999.999999",
+  "9999999999.999999",
+] as const;
 let pythonObserverRequests = 0;
 
 function sha(value: string) {
@@ -57,6 +63,13 @@ function scopedDsn() {
     `-csearch_path=${schema} -cstatement_timeout=8000 -clock_timeout=6000`,
   );
   parsed.searchParams.set("application_name", postgresApplicationName);
+  return parsed.toString();
+}
+
+function roleDsn(role: string, password: string) {
+  const parsed = new URL(scopedDsn());
+  parsed.username = role;
+  parsed.password = password;
   return parsed.toString();
 }
 
@@ -379,6 +392,11 @@ async function seed(client: Client) {
 
 async function runContract() {
   assert.ok(baseDsn, "AGENTOPS_POSTGRES_DSN is required");
+  const runtimeApiSchema = `api_core_${randomBytes(8).toString("hex")}`;
+  const runtimeRole = `rt_core_${randomBytes(8).toString("hex")}`;
+  const runtimePassword = randomBytes(24).toString("base64url");
+  const entitlementAdminRole = `ea_core_${randomBytes(8).toString("hex")}`;
+  const entitlementAdminPassword = randomBytes(24).toString("base64url");
   const admin = new Client({ connectionString: baseDsn });
   await admin.connect();
   const observer = http.createServer((_request, response) => {
@@ -394,10 +412,12 @@ async function runContract() {
     mode: process.env.AGENTOPS_CONTROL_PLANE_MODE,
     upstream: process.env.AGENTOPS_API_BASE,
     applicationName: process.env.AGENTOPS_POSTGRES_APPLICATION_NAME,
+    schema: process.env.AGENTOPS_POSTGRES_SCHEMA,
+    runtimeApiSchema: process.env.AGENTOPS_POSTGRES_RUNTIME_API_SCHEMA,
+    runtimeRole: process.env.AGENTOPS_POSTGRES_RUNTIME_ROLE,
   };
   try {
     await admin.query(`CREATE SCHEMA "${schema}"`);
-    process.env.AGENTOPS_POSTGRES_DSN = scopedDsn();
     process.env.AGENTOPS_DEPLOYMENT_MODE = "production";
     process.env.AGENTOPS_CONTROL_PLANE_MODE = "postgres";
     process.env.AGENTOPS_API_BASE = `http://127.0.0.1:${address.port}/api`;
@@ -405,14 +425,97 @@ async function runContract() {
       postgresApplicationName;
     await runPostgresSchemaCommand(
       "migrate",
-      { connectionString: scopedDsn() },
+      {
+        connectionString: scopedDsn(),
+        applicationSchema: schema,
+        runtimeApiSchema,
+        runtimeRole,
+        runtimePassword,
+        entitlementAdminRole,
+        entitlementAdminPassword,
+        provisionRoleBoundary: true,
+      },
     );
     const client = new Client({ connectionString: scopedDsn() });
     await client.connect();
     try {
+      const exactCosts = await client.query<{ cost_usd: string }>(
+        `SELECT cost_usd::numeric(18,6)::text AS cost_usd
+        FROM unnest($1::text[]) WITH ORDINALITY AS value(cost_usd, ordinal)
+        ORDER BY ordinal`,
+        [[...EXACT_COST_BOUNDARIES]],
+      );
+      assert.deepEqual(
+        exactCosts.rows.map((row) => costUsdExact(row.cost_usd)),
+        [...EXACT_COST_BOUNDARIES],
+      );
+      assert.deepEqual(
+        exactCosts.rows.map((row) => Number(row.cost_usd)),
+        EXACT_COST_BOUNDARIES.map((value) => Number(value)),
+      );
+      const evidenceOwnerSource = await readFile(
+        new URL(
+          "../src/server/controlPlane/agentGatewayEvidence.ts",
+          import.meta.url,
+        ),
+        "utf8",
+      );
+      assert.match(
+        evidenceOwnerSource,
+        /function runSnapshot[\s\S]*?cost_usd_exact:\s*costUsdExact\(row\.cost_usd\)/,
+      );
       await seed(client);
     } finally {
       await client.end();
+    }
+    process.env.AGENTOPS_POSTGRES_DSN = roleDsn(
+      runtimeRole,
+      runtimePassword,
+    );
+    process.env.AGENTOPS_POSTGRES_SCHEMA = schema;
+    process.env.AGENTOPS_POSTGRES_RUNTIME_API_SCHEMA = runtimeApiSchema;
+    process.env.AGENTOPS_POSTGRES_RUNTIME_ROLE = runtimeRole;
+    const runtimeAclClient = new Client({
+      connectionString: roleDsn(runtimeRole, runtimePassword),
+    });
+    await runtimeAclClient.connect();
+    try {
+      const entitlementAcl = await runtimeAclClient.query<{
+        select_allowed: boolean;
+        insert_allowed: boolean;
+        update_allowed: boolean;
+        delete_allowed: boolean;
+        truncate_allowed: boolean;
+      }>(
+        `SELECT
+          has_table_privilege(current_user,relation_row.oid,'SELECT')
+            AS select_allowed,
+          has_table_privilege(current_user,relation_row.oid,'INSERT')
+            AS insert_allowed,
+          has_table_privilege(current_user,relation_row.oid,'UPDATE')
+            AS update_allowed,
+          has_table_privilege(current_user,relation_row.oid,'DELETE')
+            AS delete_allowed,
+          has_table_privilege(current_user,relation_row.oid,'TRUNCATE')
+            AS truncate_allowed
+        FROM pg_class relation_row
+        JOIN pg_namespace namespace_row
+          ON namespace_row.oid=relation_row.relnamespace
+        WHERE namespace_row.nspname=$1
+          AND relation_row.relname='workspace_entitlements'`,
+        [schema],
+      );
+      assert.equal(entitlementAcl.rows[0]?.select_allowed, true);
+      assert.equal(entitlementAcl.rows[0]?.insert_allowed, false);
+      assert.equal(entitlementAcl.rows[0]?.update_allowed, false);
+      assert.equal(entitlementAcl.rows[0]?.delete_allowed, false);
+      assert.equal(entitlementAcl.rows[0]?.truncate_allowed, false);
+      const entitlementRead = await runtimeAclClient.query<{ count: string }>(
+        "SELECT COUNT(*)::text AS count FROM workspace_entitlements",
+      );
+      assert.equal(Number(entitlementRead.rows[0]?.count || 0) > 0, true);
+    } finally {
+      await runtimeAclClient.end();
     }
 
     await expectCode(
@@ -1182,10 +1285,17 @@ async function runContract() {
       plan_hash_and_verification_bound: true,
       run_plan_binding: true,
       run_start_entitlement_fail_closed: true,
+      runtime_entitlement_select_only: true,
+      entitlement_missing_controlled_403: true,
+      entitlement_denied_controlled_403: true,
+      entitlement_allowed_with_restricted_runtime: true,
       run_start_before_global_audit_lock_order: true,
       entitlement_denial_audit_persisted: true,
       run_replay_bypasses_entitlement_usage: true,
       immutable_evidence_replay: true,
+      evidence_exact_cost_projection_numeric_18_6: true,
+      evidence_run_snapshot_exact_field_bound: true,
+      legacy_numeric_cost_projection_compatible: true,
       commercial_manifest_provenance_fail_closed: true,
       stale_manifest_hash_denied: true,
       raw_prompt_response_token_omitted: true,
@@ -1209,7 +1319,26 @@ async function runContract() {
       process.env.AGENTOPS_POSTGRES_APPLICATION_NAME =
         originalEnv.applicationName;
     }
+    if (originalEnv.schema === undefined) {
+      delete process.env.AGENTOPS_POSTGRES_SCHEMA;
+    } else {
+      process.env.AGENTOPS_POSTGRES_SCHEMA = originalEnv.schema;
+    }
+    if (originalEnv.runtimeApiSchema === undefined) {
+      delete process.env.AGENTOPS_POSTGRES_RUNTIME_API_SCHEMA;
+    } else {
+      process.env.AGENTOPS_POSTGRES_RUNTIME_API_SCHEMA =
+        originalEnv.runtimeApiSchema;
+    }
+    if (originalEnv.runtimeRole === undefined) {
+      delete process.env.AGENTOPS_POSTGRES_RUNTIME_ROLE;
+    } else {
+      process.env.AGENTOPS_POSTGRES_RUNTIME_ROLE = originalEnv.runtimeRole;
+    }
     await admin.query(`DROP SCHEMA IF EXISTS "${schema}" CASCADE`);
+    await admin.query(`DROP SCHEMA IF EXISTS "${runtimeApiSchema}" CASCADE`);
+    await admin.query(`DROP ROLE IF EXISTS "${runtimeRole}"`);
+    await admin.query(`DROP ROLE IF EXISTS "${entitlementAdminRole}"`);
     await admin.end();
   }
 }

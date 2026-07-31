@@ -15,6 +15,7 @@ import {
   verifyCurrentAgentGatewayPlanEvidenceManifest,
 } from "./agentGatewayPlans";
 import { boundedJsonObject } from "./boundedJson";
+import { postgresApplicationSchema } from "./config";
 import { withPostgresTransaction } from "./db";
 import { ControlPlaneHttpError } from "./http";
 import { appendAudit, appendRuntimeEvent, stableHash } from "./ledger";
@@ -609,12 +610,19 @@ function publicExecutionReceipt(row: ExecutionReceiptRow | undefined) {
 }
 
 async function assertPreparedActionSchemaReady(client: PoolClient) {
+  const applicationSchema = postgresApplicationSchema();
   const tables = Object.keys(REQUIRED_V6_COLUMNS);
   const columns = await client.query<{ table_name: string; column_name: string }>(
-    `SELECT table_name,column_name
-    FROM information_schema.columns
-    WHERE table_schema=current_schema() AND table_name=ANY($1::text[])`,
-    [tables],
+    `SELECT relation.relname AS table_name,
+      attribute.attname AS column_name
+    FROM pg_attribute attribute
+    JOIN pg_class relation ON relation.oid=attribute.attrelid
+    JOIN pg_namespace namespace ON namespace.oid=relation.relnamespace
+    WHERE namespace.nspname=$1
+      AND relation.relname=ANY($2::text[])
+      AND attribute.attnum>0
+      AND NOT attribute.attisdropped`,
+    [applicationSchema, tables],
   ).catch(() => ({ rows: [] as Array<{ table_name: string; column_name: string }> }));
   const presentColumns = new Set(
     columns.rows.map((row) => `${row.table_name}.${row.column_name}`),
@@ -628,17 +636,21 @@ async function assertPreparedActionSchemaReady(client: PoolClient) {
     FROM pg_trigger trigger_record
     JOIN pg_class relation ON relation.oid=trigger_record.tgrelid
     JOIN pg_namespace namespace ON namespace.oid=relation.relnamespace
-    WHERE namespace.nspname=current_schema()
+    WHERE namespace.nspname=$1
       AND NOT trigger_record.tgisinternal
       AND trigger_record.tgenabled='O'
-      AND trigger_record.tgname=ANY($1::text[])`,
-    [[...REQUIRED_V6_TRIGGERS]],
+      AND trigger_record.tgname=ANY($2::text[])`,
+    [applicationSchema, [...REQUIRED_V6_TRIGGERS]],
   ).catch(() => ({ rows: [] as Array<{ trigger_name: string }> }));
   const presentTriggers = new Set(triggers.rows.map((row) => row.trigger_name));
   const indexRows = await client.query<{ relation: string | null }>(
     `SELECT to_regclass(
-      'idx_prepared_action_lease_claim_idempotency_v6'
+      format('%I.%I',$1::text,$2::text)
     )::text AS relation`,
+    [
+      applicationSchema,
+      "idx_prepared_action_lease_claim_idempotency_v6",
+    ],
   ).catch(() => ({ rows: [{ relation: null }] }));
   if (
     missingColumn

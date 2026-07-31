@@ -196,11 +196,28 @@ function canonicalRows(
   const quotedSchemaPrefix =
     `"${schemaName.replaceAll('"', '""')}".`;
   const schemaPrefix = `${schemaName}.`;
-  const normalize = (value: string) => value
-    .replaceAll("\r\n", "\n")
-    .replaceAll(quotedSchemaPrefix, "__agentops_schema__.")
-    .replaceAll(schemaPrefix, "__agentops_schema__.")
-    .trim();
+  const quotedLiteralSchema = schemaName.replaceAll("'", "''");
+  const searchPathPatterns = [
+    `search_path=pg_catalog, ${schemaName}, pg_temp`,
+    `search_path=pg_catalog,${schemaName},pg_temp`,
+    `SET search_path TO 'pg_catalog', '${quotedLiteralSchema}', 'pg_temp'`,
+    `SET search_path TO pg_catalog, ${schemaName}, pg_temp`,
+  ];
+  const normalize = (value: string) => {
+    let normalized = value
+      .replaceAll("\r\n", "\n")
+      .replaceAll(quotedSchemaPrefix, "__agentops_schema__.")
+      .replaceAll(schemaPrefix, "__agentops_schema__.");
+    for (const pattern of searchPathPatterns) {
+      normalized = normalized.replaceAll(
+        pattern,
+        pattern
+          .replace(schemaName, "__agentops_schema__")
+          .replace(quotedLiteralSchema, "__agentops_schema__"),
+      );
+    }
+    return normalized.trim();
+  };
   return rows.map((row) => [
     row.object_kind,
     normalize(row.object_identity),

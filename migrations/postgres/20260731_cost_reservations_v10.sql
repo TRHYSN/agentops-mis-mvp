@@ -85,6 +85,32 @@ ALTER COLUMN cost_usd SET NOT NULL;
 -- A run has one explicit billing class. Existing execution runs become
 -- historical_execution exactly once. Agent enrollment approval runs are the
 -- sole non-billable management class and require their canonical graph.
+DO $$
+BEGIN
+  IF to_regclass('run_cost_reservations') IS NULL
+    AND EXISTS (
+      SELECT 1
+      FROM runs run
+      WHERE run.status IN ('running','waiting_approval')
+        AND NOT EXISTS (
+          SELECT 1
+          FROM agent_gateway_enrollment_requests request
+          WHERE request.run_id=run.run_id
+            AND request.workspace_id=run.workspace_id
+            AND request.task_id=run.task_id
+            AND request.agent_id=run.agent_id
+            AND run.model_provider='agent-gateway'
+            AND run.model_name='enrollment-request'
+        )
+    )
+  THEN
+    RAISE EXCEPTION USING
+      ERRCODE='55000',
+      MESSAGE='cost_authority_active_runs_must_be_drained';
+  END IF;
+END
+$$;
+
 ALTER TABLE runs
 ADD COLUMN IF NOT EXISTS billing_class TEXT;
 
@@ -378,20 +404,40 @@ SELECT
   run.run_id,
   'historical_execution',
   CASE
-    WHEN run.started_at ~ '^[0-9]{4}-(0[1-9]|1[0-2])-'
-      AND substring(run.started_at FROM 1 FOR 4)::INTEGER BETWEEN 1 AND 9999
-    THEN make_date(
-      substring(run.started_at FROM 1 FOR 4)::INTEGER,
-      substring(run.started_at FROM 6 FOR 2)::INTEGER,
-      1
-    )
-    WHEN run.created_at ~ '^[0-9]{4}-(0[1-9]|1[0-2])-'
-      AND substring(run.created_at FROM 1 FOR 4)::INTEGER BETWEEN 1 AND 9999
-    THEN make_date(
-      substring(run.created_at FROM 1 FOR 4)::INTEGER,
-      substring(run.created_at FROM 6 FOR 2)::INTEGER,
-      1
-    )
+    WHEN btrim(run.started_at) ~*
+      '(Z|[+-][0-9]{2}(:?[0-9]{2})?(:?[0-9]{2}(\.[0-9]+)?)?)$'
+      AND pg_input_is_valid(run.started_at,'timestamp with time zone')
+    THEN date_trunc(
+      'month',
+      run.started_at::TIMESTAMPTZ AT TIME ZONE 'UTC'
+    )::DATE
+    WHEN pg_input_is_valid(run.started_at,'timestamp without time zone')
+    THEN date_trunc(
+      'month',
+      run.started_at::TIMESTAMP WITHOUT TIME ZONE
+    )::DATE
+    WHEN pg_input_is_valid(run.started_at,'timestamp with time zone')
+    THEN date_trunc(
+      'month',
+      run.started_at::TIMESTAMPTZ AT TIME ZONE 'UTC'
+    )::DATE
+    WHEN btrim(run.created_at) ~*
+      '(Z|[+-][0-9]{2}(:?[0-9]{2})?(:?[0-9]{2}(\.[0-9]+)?)?)$'
+      AND pg_input_is_valid(run.created_at,'timestamp with time zone')
+    THEN date_trunc(
+      'month',
+      run.created_at::TIMESTAMPTZ AT TIME ZONE 'UTC'
+    )::DATE
+    WHEN pg_input_is_valid(run.created_at,'timestamp without time zone')
+    THEN date_trunc(
+      'month',
+      run.created_at::TIMESTAMP WITHOUT TIME ZONE
+    )::DATE
+    WHEN pg_input_is_valid(run.created_at,'timestamp with time zone')
+    THEN date_trunc(
+      'month',
+      run.created_at::TIMESTAMPTZ AT TIME ZONE 'UTC'
+    )::DATE
     ELSE date_trunc(
       'month',
       migration_clock.now AT TIME ZONE 'UTC'
@@ -743,6 +789,14 @@ $$;
 DROP TRIGGER IF EXISTS runs_billable_ledger_v10 ON runs;
 CREATE CONSTRAINT TRIGGER runs_billable_ledger_v10
 AFTER INSERT OR UPDATE ON runs
+DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW
+EXECUTE FUNCTION agentops_enforce_billable_run_ledger_v10();
+
+DROP TRIGGER IF EXISTS run_cost_reservations_billable_ledger_v10
+ON run_cost_reservations;
+CREATE CONSTRAINT TRIGGER run_cost_reservations_billable_ledger_v10
+AFTER INSERT OR UPDATE ON run_cost_reservations
 DEFERRABLE INITIALLY DEFERRED
 FOR EACH ROW
 EXECUTE FUNCTION agentops_enforce_billable_run_ledger_v10();
@@ -1272,6 +1326,7 @@ BEGIN
   UPDATE run_cost_reservations
   SET
     state='settled',
+    observed_cost_usd=p_actual_cost_usd::NUMERIC(18,6),
     settled_cost_usd=p_actual_cost_usd::NUMERIC(18,6),
     settlement_idempotency_key_hash=p_idempotency_key_hash,
     settlement_request_hash=p_request_hash,

@@ -749,7 +749,10 @@ async function authenticateWorkspaceMembership(
   client: PoolClient,
   headers: Headers,
   requestedWorkspaceId: unknown,
-  requireReviewAuthority: boolean,
+  options: Readonly<{
+    requireReviewAuthority: boolean;
+    requireCsrf: boolean;
+  }>,
 ) {
   const { row, token } = await lockSession(client, headers);
   const requestedWorkspace = requestedWorkspaceId === undefined
@@ -812,14 +815,17 @@ async function authenticateWorkspaceMembership(
       "The Human Session is not a member of this workspace.",
     );
   }
-  if (requireReviewAuthority && !humanRoleCanReview(membership.role)) {
+  if (
+    options.requireReviewAuthority
+    && !humanRoleCanReview(membership.role)
+  ) {
     throw new ControlPlaneHttpError(
       403,
       "human_role_forbidden",
       "Customer-delivery review requires reviewer, workspace-admin, or owner authority.",
     );
   }
-  if (requireReviewAuthority) {
+  if (options.requireCsrf) {
     validateWriteOrigin(headers);
     const suppliedCsrf = String(headers.get("x-agentops-csrf") || "").trim();
     if (!suppliedCsrf || !sameValue(suppliedCsrf, csrfToken(token))) {
@@ -854,7 +860,10 @@ export async function authenticateHumanReviewer(
     client,
     headers,
     requestedWorkspaceId,
-    true,
+    {
+      requireReviewAuthority: true,
+      requireCsrf: true,
+    },
   );
 }
 
@@ -867,7 +876,26 @@ export async function authenticateHumanMember(
     client,
     headers,
     requestedWorkspaceId,
-    false,
+    {
+      requireReviewAuthority: false,
+      requireCsrf: false,
+    },
+  );
+}
+
+export async function authenticateHumanWriteMember(
+  client: PoolClient,
+  headers: Headers,
+  requestedWorkspaceId: unknown,
+): Promise<HumanSessionIdentity> {
+  return authenticateWorkspaceMembership(
+    client,
+    headers,
+    requestedWorkspaceId,
+    {
+      requireReviewAuthority: false,
+      requireCsrf: true,
+    },
   );
 }
 

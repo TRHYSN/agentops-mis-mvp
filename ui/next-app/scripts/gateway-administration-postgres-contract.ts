@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import {
   createHash,
   randomBytes,
-  randomUUID,
   scryptSync,
 } from "node:crypto";
 import { readFile } from "node:fs/promises";
@@ -28,10 +27,11 @@ import {
 import { HUMAN_SCRYPT_PARAMS } from "../src/server/controlPlane/humanPasswordPolicy";
 import { ControlPlaneHttpError } from "../src/server/controlPlane/http";
 import {
-  POSTGRES_MIGRATION_MANIFEST,
-  runPostgresSchemaCommand,
   SCHEMA_CONTRACT,
 } from "../src/server/controlPlane/schemaReadiness";
+import {
+  createPostgresRoleBoundaryFixture,
+} from "./postgres-role-boundary-test-helper";
 
 const ORIGIN = "https://mis.example.test";
 const HOST = "mis.example.test";
@@ -50,21 +50,6 @@ type HumanSession = {
 
 function sha(value: string) {
   return createHash("sha256").update(value, "utf8").digest("hex");
-}
-
-function scopedDsn(baseDsn: string, schema: string) {
-  const parsed = new URL(baseDsn);
-  parsed.searchParams.set(
-    "options",
-    `-csearch_path=${schema} -cstatement_timeout=8000 -clock_timeout=6000`,
-  );
-  parsed.searchParams.set("application_name", POSTGRES_APPLICATION_NAME);
-  return parsed.toString();
-}
-
-function quotedSchema(value: string) {
-  assert.match(value, /^[a-z][a-z0-9_]+$/);
-  return `"${value}"`;
 }
 
 function loginHeaders() {
@@ -359,21 +344,19 @@ async function assertStaticOwnership() {
 async function run() {
   const baseDsn = String(process.env.AGENTOPS_POSTGRES_DSN || "").trim();
   assert.ok(baseDsn, "AGENTOPS_POSTGRES_DSN is required");
-  const schema = `gateway_admin_${randomUUID().replaceAll("-", "")}`;
-  const admin = new Client({ connectionString: baseDsn });
-  const originalDsn = process.env.AGENTOPS_POSTGRES_DSN;
-  const originalDeployment = process.env.AGENTOPS_DEPLOYMENT_MODE;
-  const originalMode = process.env.AGENTOPS_CONTROL_PLANE_MODE;
   const originalOrigins = process.env.AGENTOPS_ALLOWED_ORIGINS;
   const originalHmac = process.env.AGENTOPS_HUMAN_SESSION_HMAC_KEY;
   const originalApplicationName =
     process.env.AGENTOPS_POSTGRES_APPLICATION_NAME;
   const originalFetch = globalThis.fetch;
+  const roleFixture = await createPostgresRoleBoundaryFixture(
+    baseDsn,
+    "gateway_admin",
+  );
+  const admin = roleFixture.owner;
+  let restoreRuntimeEnvironment: () => void = () => undefined;
   let fetchCalls = 0;
-  let schemaCreated = false;
 
-  process.env.AGENTOPS_DEPLOYMENT_MODE = "production";
-  process.env.AGENTOPS_CONTROL_PLANE_MODE = "postgres";
   process.env.AGENTOPS_ALLOWED_ORIGINS = ORIGIN;
   process.env.AGENTOPS_HUMAN_SESSION_HMAC_KEY = randomBytes(48)
     .toString("base64url");
@@ -385,25 +368,32 @@ async function run() {
   };
 
   try {
-    await admin.connect();
     const version = await admin.query<{ server_version: string }>(
       "SHOW server_version",
     );
     assert.match(version.rows[0]?.server_version || "", /^16\./);
-    await admin.query(`CREATE SCHEMA ${quotedSchema(schema)}`);
-    schemaCreated = true;
-    const contractDsn = scopedDsn(baseDsn, schema);
-    process.env.AGENTOPS_POSTGRES_DSN = contractDsn;
-    const migration = await runPostgresSchemaCommand(
-      "migrate",
-      { connectionString: contractDsn },
-    );
+    const migration = roleFixture.migration;
     assert.equal(migration.schema_contract, SCHEMA_CONTRACT);
-    assert.equal(
-      migration.applied_count,
-      POSTGRES_MIGRATION_MANIFEST.length,
+    assert.equal(migration.schema_fingerprint_verified, true);
+    const runtimeEntitlementPrivileges = await admin.query<{
+      can_insert: boolean;
+      can_update: boolean;
+      can_delete: boolean;
+      can_truncate: boolean;
+    }>(
+      `SELECT
+        has_table_privilege($1,'workspace_entitlements','INSERT') AS can_insert,
+        has_table_privilege($1,'workspace_entitlements','UPDATE') AS can_update,
+        has_table_privilege($1,'workspace_entitlements','DELETE') AS can_delete,
+        has_table_privilege($1,'workspace_entitlements','TRUNCATE') AS can_truncate`,
+      [roleFixture.runtimeRole],
     );
-    await admin.query(`SET search_path TO ${quotedSchema(schema)}`);
+    assert.deepEqual(runtimeEntitlementPrivileges.rows[0], {
+      can_insert: false,
+      can_update: false,
+      can_delete: false,
+      can_truncate: false,
+    });
     await seedHuman(admin, "usr_admin_owner", "admin-owner", "owner");
     await seedHuman(admin, "usr_admin_reviewer", "admin-reviewer", "approver");
     await seedHuman(
@@ -427,6 +417,7 @@ async function run() {
       FOREIGN_WORKSPACE,
       "usr_admin_foreign",
     );
+    restoreRuntimeEnvironment = roleFixture.activateRuntimeEnvironment();
     const owner = await login("admin-owner");
     const reviewer = await login("admin-reviewer");
     const foreign = await login("admin-foreign");
@@ -766,9 +757,11 @@ async function run() {
       ).find((row) => row.agent_id === "agt_admin_contract")?.session_ref || "",
     );
     assert.match(lockOrderSessionRef, /^session_ref_[a-f0-9]{16}$/);
-    const lockOrderBlocker = new Client({ connectionString: contractDsn });
+    const lockOrderBlocker = new Client({
+      connectionString: roleFixture.ownerDsn,
+    });
     const lockOrderObserver = new Client({
-      connectionString: contractDsn,
+      connectionString: roleFixture.ownerDsn,
       application_name: "agentops-admin-lock-observer",
     });
     await lockOrderBlocker.connect();
@@ -1222,6 +1215,8 @@ async function run() {
       child_session_revoke_cascade: true,
       direct_session_revoke: true,
       entitlement_fail_closed_and_audited: true,
+      runtime_role_boundary_verified: true,
+      runtime_entitlement_dml_granted: false,
       revocation_available_while_suspended: true,
       cross_workspace_denied: true,
       token_hash_only_at_rest: true,
@@ -1232,12 +1227,8 @@ async function run() {
     }, null, 2));
   } finally {
     await closeControlPlanePoolForTests();
+    restoreRuntimeEnvironment();
     globalThis.fetch = originalFetch;
-    if (schemaCreated) {
-      await admin.query("SET search_path TO public");
-      await admin.query(`DROP SCHEMA ${quotedSchema(schema)} CASCADE`);
-    }
-    await admin.end().catch(() => undefined);
     const restore = (
       key: string,
       value: string | undefined,
@@ -1248,15 +1239,13 @@ async function run() {
         process.env[key] = value;
       }
     };
-    restore("AGENTOPS_POSTGRES_DSN", originalDsn);
-    restore("AGENTOPS_DEPLOYMENT_MODE", originalDeployment);
-    restore("AGENTOPS_CONTROL_PLANE_MODE", originalMode);
     restore("AGENTOPS_ALLOWED_ORIGINS", originalOrigins);
     restore("AGENTOPS_HUMAN_SESSION_HMAC_KEY", originalHmac);
     restore(
       "AGENTOPS_POSTGRES_APPLICATION_NAME",
       originalApplicationName,
     );
+    await roleFixture.cleanup();
   }
 }
 

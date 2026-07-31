@@ -12,16 +12,25 @@ SQLite as an authority store.
    ```bash
    install -d -m 700 deploy/byoc/secrets
    umask 077
-   openssl rand -hex 32 > deploy/byoc/secrets/postgres-password
+   openssl rand -hex 32 > deploy/byoc/secrets/postgres-migrator-password
+   openssl rand -hex 32 > deploy/byoc/secrets/postgres-runtime-password
+   openssl rand -hex 32 > deploy/byoc/secrets/postgres-entitlement-admin-password
+   openssl rand -base64 32 > deploy/byoc/secrets/entitlement-operator-password
    openssl rand -hex 32 > deploy/byoc/secrets/human-session-hmac-key
-   chmod 600 deploy/byoc/secrets/postgres-password \
+   chmod 600 deploy/byoc/secrets/postgres-migrator-password \
+     deploy/byoc/secrets/postgres-runtime-password \
+     deploy/byoc/secrets/postgres-entitlement-admin-password \
+     deploy/byoc/secrets/entitlement-operator-password \
      deploy/byoc/secrets/human-session-hmac-key
    ```
 
 3. For secret settings, keep only file paths in `.env`:
 
    ```dotenv
-   AGENTOPS_POSTGRES_PASSWORD_FILE=./secrets/postgres-password
+   AGENTOPS_POSTGRES_MIGRATOR_PASSWORD_FILE=./secrets/postgres-migrator-password
+   AGENTOPS_POSTGRES_RUNTIME_PASSWORD_FILE=./secrets/postgres-runtime-password
+   AGENTOPS_POSTGRES_ENTITLEMENT_ADMIN_PASSWORD_FILE=./secrets/postgres-entitlement-admin-password
+   AGENTOPS_ENTITLEMENT_OPERATOR_PASSWORD_FILE=./secrets/entitlement-operator-password
    AGENTOPS_HUMAN_SESSION_HMAC_KEY_FILE=./secrets/human-session-hmac-key
    ```
 
@@ -30,12 +39,97 @@ SQLite as an authority store.
 4. Keep `AGENTOPS_BIND_ADDRESS=127.0.0.1` unless TLS is terminated by a trusted
    reverse proxy on the same private deployment boundary.
 5. Set `AGENTOPS_ALLOWED_ORIGINS` to the exact HTTPS browser origin.
+6. Set `AGENTOPS_ENTITLEMENT_CONTROL_PLANE_URL` to an externally reachable,
+   trusted HTTPS URL and `AGENTOPS_ENTITLEMENT_OPERATOR_USERNAME` to the
+   intended Human operator. Optionally set
+   `AGENTOPS_ENTITLEMENT_CONTROL_PLANE_ORIGIN` to the browser origin used for
+   Origin/CSRF binding. These values are routing and identity configuration,
+   not secrets.
 
 Do not put a raw PostgreSQL password, Human Session HMAC key, or credentialed
-DSN in `.env`. Compose mounts the PostgreSQL secret at
-`/run/secrets/postgres_password` for PostgreSQL, the one-shot migrator, and the
-control plane. It mounts `/run/secrets/human_session_hmac_key` only for the
-control plane; the migrator cannot read the Human Session HMAC key.
+DSN in `.env`. The PostgreSQL container and one-shot migrator receive only the
+migrator password. The migrator additionally receives the runtime and
+entitlement-admin passwords only long enough to create or rotate those
+restricted logins. The control plane receives only the runtime password and
+Human Session HMAC key; it cannot read the migrator, entitlement-admin, or
+operator password, and the migrator cannot read the Human Session HMAC key.
+
+The three database identities are intentionally different:
+
+- `agentops_migrator` owns the application schema and applies the
+  checksum-pinned manifest.
+- `agentops_runtime` owns no protected relation, cannot alter the schema,
+  cannot write `agentops_schema_migrations`, and cannot directly
+  `INSERT`, `UPDATE`, `DELETE`, or `TRUNCATE` `run_cost_reservations` or
+  `workspace_entitlements`.
+- `agentops_entitlement_admin` can execute only the v11 entitlement challenge
+  plan/apply API. It has no direct table access to Human credentials,
+  entitlements, audit rows, reservations, runs, memberships, or migration
+  state.
+
+Cost reservation writes cross a separately owned
+`agentops_runtime_api` schema through five explicitly granted
+`SECURITY DEFINER` functions with a fixed search path. The runtime retains
+ordinary application table operations but cannot invoke the original owner
+functions directly. Production startup and health transactions verify this
+role boundary against the PostgreSQL catalog and fail closed if an owner or
+over-privileged DSN is supplied.
+
+Provisioning also removes the migrator's global default `PUBLIC EXECUTE` grant
+for future functions. Existing and newly created application functions are not
+runtime-executable unless the bounded API grants them explicitly. Runtime
+readiness verifies the complete application-function allowlist; it contains
+only the approval-binding and PreparedAction-lease validation helpers required
+by ordinary trigger-backed writes. The remaining promotion hardening item is a
+dedicated restricted `NOLOGIN` owner for `SECURITY DEFINER` functions; the
+current candidate still assigns those functions to the migrator.
+
+Entitlement administration is a high-privilege operator action, not a normal
+control-plane request. The optional `entitlement-admin` Compose profile is
+one-shot and mounts only the entitlement-admin database password and the Human
+operator password. It never receives migrator, runtime, or Human Session HMAC
+secrets. It waits for the TypeScript control plane to become healthy, requires
+an externally trusted HTTPS control-plane URL (plain HTTP is accepted only for
+an explicit loopback test/local URL), and probes the workspace-scoped v11
+challenge route before starting the CLI. Do not use the Compose-internal
+`http://control-plane` service address as a commercial authentication channel.
+A missing route, redirect, transport error, or route that does not advertise
+`POST` fails closed before entitlement code runs.
+
+The CLI uses the Human operator login to request a short-lived, single-use
+challenge bound to the complete entitlement request, then uses the separate
+admin database identity to plan or apply it. It never receives the runtime or
+migrator DSN and cannot fall back to the legacy direct-table administration
+path when the challenge API is unavailable. Preview a change without
+`--confirm` first:
+
+```bash
+docker compose --env-file deploy/byoc/.env \
+  -f deploy/byoc/compose.yaml \
+  --profile entitlement-admin run --rm entitlement-admin \
+  --workspace-id ws_customer \
+  --operator-user-id usr_owner \
+  --edition team_governance \
+  --status active \
+  --capabilities enrollment_issue,session_issue,run_start \
+  --max-agents 20 \
+  --max-active-enrollments 20 \
+  --max-active-sessions-per-agent 5 \
+  --max-concurrent-runs 10 \
+  --max-monthly-runs 1000 \
+  --max-monthly-cost-usd 1000.000000 \
+  --effective-at 2026-08-01T00:00:00.000Z \
+  --expires-at 2027-08-01T00:00:00.000Z
+```
+
+After reviewing the plan receipt, repeat with `--confirm --expect-absent` for
+initial creation, or `--confirm --expected-revision <sha256>` for an update.
+The password in `entitlement-operator-password` must match the intended Human
+operator's active login credential, and `AGENTOPS_ENTITLEMENT_OPERATOR_USERNAME`
+must identify that same account. Never mount either admin secret into the
+long-running control-plane service. The preflight does not read an API response
+body and neither the entrypoint nor its errors print request URLs, URL
+credentials, cookies, CSRF values, operator passwords, or challenge tokens.
 
 The Node services do not depend on the host file UID being `1000`. Their
 entrypoint is PID 1 and starts with only the capabilities needed to read the
@@ -70,9 +164,17 @@ docker compose --env-file deploy/byoc/.env \
 ```
 
 The one-shot `migrate` service applies the checksum-pinned PostgreSQL manifest
-before the control plane starts. The application then checks the same manifest
-and its expected PostgreSQL catalog fingerprint, and fails closed if the schema
-is missing or has drifted.
+through `AGENTOPS_POSTGRES_MIGRATOR_DSN(_FILE)` or the equivalent migrator
+component settings. It then provisions the restricted runtime role and grants
+the bounded cost API. The application uses only
+`AGENTOPS_POSTGRES_DSN(_FILE)` or the equivalent runtime component settings,
+checks the same manifest and catalog fingerprint, verifies the role boundary,
+and fails closed if the schema, ownership, or privileges have drifted.
+
+Existing installations that used one PostgreSQL role do not silently continue
+with that shared owner. Add all three database password files and role names to the
+untracked `.env`, then run the one-shot migrator. It creates the restricted
+runtime login transactionally before the control plane is allowed to start.
 
 ```bash
 curl --fail http://127.0.0.1:3001/api/mis/health

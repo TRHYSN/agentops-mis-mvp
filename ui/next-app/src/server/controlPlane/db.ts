@@ -1,11 +1,16 @@
 import { Pool, type PoolClient } from "pg";
 
 import {
+  isProductionDeployment,
   postgresApplicationName,
+  postgresApplicationSchema,
   postgresDsn,
+  postgresRuntimeApiSchema,
+  postgresRuntimeRole,
   postgresSslEnabled,
 } from "./config";
 import { ControlPlaneHttpError } from "./http";
+import { assertPostgresRuntimeRoleBoundary } from "./schemaReadiness";
 
 declare global {
   var __agentOpsControlPlanePool: Pool | undefined;
@@ -33,6 +38,26 @@ export async function withPostgresTransaction<T>(
   const client = await controlPlanePool().connect();
   try {
     await client.query("BEGIN");
+    if (isProductionDeployment()) {
+      const applicationSchema = postgresApplicationSchema();
+      const runtimeApiSchema = postgresRuntimeApiSchema();
+      await assertPostgresRuntimeRoleBoundary(client, {
+        applicationSchema,
+        runtimeApiSchema,
+        runtimeRole: postgresRuntimeRole(false) || undefined,
+      });
+      const searchPath = [
+        "pg_catalog",
+        runtimeApiSchema,
+        applicationSchema,
+        "pg_temp",
+      ]
+        .map((schema) => `"${schema}"`)
+        .join(", ");
+      await client.query("SELECT set_config('search_path',$1,true)", [
+        searchPath,
+      ]);
+    }
     const result = await work(client);
     await client.query("COMMIT");
     return result;

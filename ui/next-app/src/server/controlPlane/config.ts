@@ -81,32 +81,41 @@ export function secretEnvironmentValue(name: string) {
   }
 }
 
-export function postgresDsn() {
+type PostgresDsnFamily = Readonly<{
+  dsn: string;
+  host: string;
+  port: string;
+  database: string;
+  user: string;
+  password: string;
+}>;
+
+function postgresDsnFromFamily(family: PostgresDsnFamily) {
   const dsnFamilyConfigured = Boolean(
-    String(process.env.AGENTOPS_POSTGRES_DSN || "")
-    || String(process.env.AGENTOPS_POSTGRES_DSN_FILE || "").trim()
+    String(process.env[family.dsn] || "")
+    || String(process.env[`${family.dsn}_FILE`] || "").trim()
   );
   const componentFamilyConfigured = [
-    "AGENTOPS_POSTGRES_HOST",
-    "AGENTOPS_POSTGRES_PORT",
-    "AGENTOPS_POSTGRES_DATABASE",
-    "AGENTOPS_POSTGRES_USER",
-    "AGENTOPS_POSTGRES_PASSWORD",
-    "AGENTOPS_POSTGRES_PASSWORD_FILE",
+    family.host,
+    family.port,
+    family.database,
+    family.user,
+    family.password,
+    `${family.password}_FILE`,
   ].some((name) => Boolean(String(process.env[name] || "").trim()));
   if (dsnFamilyConfigured && componentFamilyConfigured) {
     throw new Error(
-      "Postgres DSN and component configuration families are mutually exclusive.",
+      `${family.dsn} and its component configuration families are mutually exclusive.`,
     );
   }
-  const configuredDsn = secretEnvironmentValue("AGENTOPS_POSTGRES_DSN").trim();
+  const configuredDsn = secretEnvironmentValue(family.dsn).trim();
   if (configuredDsn) return configuredDsn;
 
-  const host = String(process.env.AGENTOPS_POSTGRES_HOST || "").trim();
-  const database = String(process.env.AGENTOPS_POSTGRES_DATABASE || "").trim();
-  const user = String(process.env.AGENTOPS_POSTGRES_USER || "").trim();
-  const password = secretEnvironmentValue("AGENTOPS_POSTGRES_PASSWORD");
-  const port = Number(process.env.AGENTOPS_POSTGRES_PORT || 5432);
+  const host = String(process.env[family.host] || "").trim();
+  const database = String(process.env[family.database] || "").trim();
+  const user = String(process.env[family.user] || "").trim();
+  const password = secretEnvironmentValue(family.password);
+  const port = Number(process.env[family.port] || 5432);
   if (
     !/^[A-Za-z0-9.-]+$/.test(host)
     || !/^[A-Za-z_][A-Za-z0-9_.-]{0,62}$/.test(database)
@@ -117,11 +126,102 @@ export function postgresDsn() {
     || port > 65535
   ) {
     throw new Error(
-      "AGENTOPS_POSTGRES_DSN(_FILE) or valid Postgres host/database/user/password-file settings are required.",
+      `${family.dsn}(_FILE) or valid Postgres host/database/user/password-file settings are required.`,
     );
   }
   return `postgresql://${encodeURIComponent(user)}:${encodeURIComponent(password)}`
     + `@${host}:${port}/${encodeURIComponent(database)}`;
+}
+
+const RUNTIME_POSTGRES_FAMILY = Object.freeze({
+  dsn: "AGENTOPS_POSTGRES_DSN",
+  host: "AGENTOPS_POSTGRES_HOST",
+  port: "AGENTOPS_POSTGRES_PORT",
+  database: "AGENTOPS_POSTGRES_DATABASE",
+  user: "AGENTOPS_POSTGRES_USER",
+  password: "AGENTOPS_POSTGRES_PASSWORD",
+});
+
+const MIGRATOR_POSTGRES_FAMILY = Object.freeze({
+  dsn: "AGENTOPS_POSTGRES_MIGRATOR_DSN",
+  host: "AGENTOPS_POSTGRES_MIGRATOR_HOST",
+  port: "AGENTOPS_POSTGRES_MIGRATOR_PORT",
+  database: "AGENTOPS_POSTGRES_MIGRATOR_DATABASE",
+  user: "AGENTOPS_POSTGRES_MIGRATOR_USER",
+  password: "AGENTOPS_POSTGRES_MIGRATOR_PASSWORD",
+});
+
+const ENTITLEMENT_ADMIN_POSTGRES_FAMILY = Object.freeze({
+  dsn: "AGENTOPS_POSTGRES_ENTITLEMENT_ADMIN_DSN",
+  host: "AGENTOPS_POSTGRES_ENTITLEMENT_ADMIN_HOST",
+  port: "AGENTOPS_POSTGRES_ENTITLEMENT_ADMIN_PORT",
+  database: "AGENTOPS_POSTGRES_ENTITLEMENT_ADMIN_DATABASE",
+  user: "AGENTOPS_POSTGRES_ENTITLEMENT_ADMIN_USER",
+  password: "AGENTOPS_POSTGRES_ENTITLEMENT_ADMIN_PASSWORD",
+});
+
+export function postgresDsn() {
+  return postgresDsnFromFamily(RUNTIME_POSTGRES_FAMILY);
+}
+
+export function postgresMigratorDsn() {
+  try {
+    return postgresDsnFromFamily(MIGRATOR_POSTGRES_FAMILY);
+  } catch (error) {
+    if (!isProductionDeployment()) return postgresDsn();
+    throw error;
+  }
+}
+
+export function postgresEntitlementAdminDsn() {
+  return postgresDsnFromFamily(ENTITLEMENT_ADMIN_POSTGRES_FAMILY);
+}
+
+function safePostgresIdentifier(name: string, fallback: string) {
+  const value = String(process.env[name] || fallback).trim();
+  if (!/^[A-Za-z_][A-Za-z0-9_]{0,62}$/.test(value)) {
+    throw new Error(`${name} must be a safe PostgreSQL identifier.`);
+  }
+  return value;
+}
+
+export function postgresApplicationSchema() {
+  return safePostgresIdentifier("AGENTOPS_POSTGRES_SCHEMA", "public");
+}
+
+export function postgresRuntimeApiSchema() {
+  return safePostgresIdentifier(
+    "AGENTOPS_POSTGRES_RUNTIME_API_SCHEMA",
+    "agentops_runtime_api",
+  );
+}
+
+export function postgresRuntimeRole(required = isProductionDeployment()) {
+  const configured = String(
+    process.env.AGENTOPS_POSTGRES_RUNTIME_ROLE || "",
+  ).trim();
+  if (!configured && !required) return "";
+  if (!/^[A-Za-z_][A-Za-z0-9_]{0,62}$/.test(configured)) {
+    throw new Error(
+      "AGENTOPS_POSTGRES_RUNTIME_ROLE must be a safe PostgreSQL identifier.",
+    );
+  }
+  return configured;
+}
+
+export function postgresEntitlementAdminRole(
+  required = isProductionDeployment(),
+) {
+  const configured = String(
+    process.env.AGENTOPS_POSTGRES_ENTITLEMENT_ADMIN_ROLE || "",
+  ).trim();
+  if (!configured && !required) return "";
+  if (!/^[A-Za-z_][A-Za-z0-9_]{0,62}$/.test(configured)) {
+    throw new Error(
+      "AGENTOPS_POSTGRES_ENTITLEMENT_ADMIN_ROLE must be a safe PostgreSQL identifier.",
+    );
+  }
+  return configured;
 }
 
 export function proxyBaseUrl() {

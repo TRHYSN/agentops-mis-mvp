@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import {
   createHash,
   randomBytes,
-  randomUUID,
   scryptSync,
 } from "node:crypto";
 import { readFile } from "node:fs/promises";
@@ -19,10 +18,12 @@ import { HUMAN_SCRYPT_PARAMS } from "../src/server/controlPlane/humanPasswordPol
 import { ControlPlaneHttpError } from "../src/server/controlPlane/http";
 import {
   POSTGRES_MIGRATION_MANIFEST,
-  runPostgresSchemaCommand,
   SCHEMA_CONTRACT,
 } from "../src/server/controlPlane/schemaReadiness";
 import { readWorkspaceRunEvidenceGraph } from "../src/server/controlPlane/workspaceRunEvidenceGraph";
+import {
+  createPostgresRoleBoundaryFixture,
+} from "./postgres-role-boundary-test-helper";
 
 const ORIGIN = "https://mis.example.test";
 const HOST = "mis.example.test";
@@ -142,17 +143,6 @@ async function settleHistoricalRunCost(
       sha(`historical-settle-request:${workspaceId}:${runId}`),
     ],
   );
-}
-
-function scopedDsn(baseDsn: string, schema: string) {
-  const parsed = new URL(baseDsn);
-  parsed.searchParams.set("options", `-csearch_path=${schema}`);
-  return parsed.toString();
-}
-
-function quotedSchema(value: string) {
-  assert.match(value, /^[a-z][a-z0-9_]+$/);
-  return `"${value}"`;
 }
 
 function loginHeaders() {
@@ -796,49 +786,56 @@ async function assertStaticProductionBoundary() {
 async function run() {
   const baseDsn = String(process.env.AGENTOPS_POSTGRES_DSN || "").trim();
   assert.ok(baseDsn, "AGENTOPS_POSTGRES_DSN is required");
-  const schema = `human_run_graph_${randomUUID().replaceAll("-", "")}`;
-  const admin = new Client({ connectionString: baseDsn });
   const originalFetch = globalThis.fetch;
+  const environmentKeys = [
+    "AGENTOPS_DEPLOYMENT_MODE",
+    "AGENTOPS_CONTROL_PLANE_MODE",
+    "AGENTOPS_POSTGRES_DSN",
+    "AGENTOPS_POSTGRES_DSN_FILE",
+    "AGENTOPS_POSTGRES_SCHEMA",
+    "AGENTOPS_POSTGRES_RUNTIME_API_SCHEMA",
+    "AGENTOPS_POSTGRES_RUNTIME_ROLE",
+    "AGENTOPS_ALLOWED_ORIGINS",
+    "AGENTOPS_HUMAN_SESSION_HMAC_KEY",
+  ] as const;
+  const originalEnvironment = Object.fromEntries(
+    environmentKeys.map((key) => [key, process.env[key]]),
+  );
+  let roleFixture: Awaited<
+    ReturnType<typeof createPostgresRoleBoundaryFixture>
+  > | undefined;
+  let restoreRuntimeEnvironment: () => void = () => undefined;
   let fetchCalls = 0;
-  let schemaCreated = false;
-
-  process.env.AGENTOPS_DEPLOYMENT_MODE = "free_local";
-  process.env.AGENTOPS_CONTROL_PLANE_MODE = "proxy";
-  assert.equal(controlPlaneMode(), "proxy");
-  assert.equal(legacyPythonProxyAllowed(), true);
-  process.env.AGENTOPS_DEPLOYMENT_MODE = "production";
-  process.env.AGENTOPS_CONTROL_PLANE_MODE = "proxy";
-  assert.equal(controlPlaneMode(), "postgres");
-  assert.equal(legacyPythonProxyAllowed(), false);
-  process.env.AGENTOPS_CONTROL_PLANE_MODE = "postgres";
-  process.env.AGENTOPS_ALLOWED_ORIGINS = ORIGIN;
-  process.env.AGENTOPS_HUMAN_SESSION_HMAC_KEY = randomBytes(48)
-    .toString("base64url");
-  globalThis.fetch = async () => {
-    fetchCalls += 1;
-    throw new Error("Network access is forbidden in the graph contract.");
-  };
 
   try {
-    await admin.connect();
+    process.env.AGENTOPS_DEPLOYMENT_MODE = "free_local";
+    process.env.AGENTOPS_CONTROL_PLANE_MODE = "proxy";
+    assert.equal(controlPlaneMode(), "proxy");
+    assert.equal(legacyPythonProxyAllowed(), true);
+    process.env.AGENTOPS_DEPLOYMENT_MODE = "production";
+    process.env.AGENTOPS_CONTROL_PLANE_MODE = "proxy";
+    assert.equal(controlPlaneMode(), "postgres");
+    assert.equal(legacyPythonProxyAllowed(), false);
+    globalThis.fetch = async () => {
+      fetchCalls += 1;
+      throw new Error("Network access is forbidden in the graph contract.");
+    };
+
+    roleFixture = await createPostgresRoleBoundaryFixture(
+      baseDsn,
+      "human_run_graph",
+    );
+    const admin = roleFixture.owner;
     const version = await admin.query<{ server_version: string }>(
       "SHOW server_version",
     );
     assert.match(version.rows[0]?.server_version || "", /^16\./);
-    await admin.query(`CREATE SCHEMA ${quotedSchema(schema)}`);
-    schemaCreated = true;
-    const contractDsn = scopedDsn(baseDsn, schema);
-    process.env.AGENTOPS_POSTGRES_DSN = contractDsn;
-    const migration = await runPostgresSchemaCommand(
-      "migrate",
-      { connectionString: contractDsn },
-    );
+    const migration = roleFixture.migration;
     assert.equal(migration.schema_contract, SCHEMA_CONTRACT);
     assert.equal(
       migration.applied_count,
       POSTGRES_MIGRATION_MANIFEST.length,
     );
-    await admin.query(`SET search_path TO ${quotedSchema(schema)}`);
 
     await seedHuman(admin, {
       userId: "usr_graph_owner",
@@ -859,6 +856,10 @@ async function run() {
       workspaceId: FOREIGN_WORKSPACE,
     });
     await seedGraph(admin);
+    restoreRuntimeEnvironment = roleFixture.activateRuntimeEnvironment();
+    process.env.AGENTOPS_ALLOWED_ORIGINS = ORIGIN;
+    process.env.AGENTOPS_HUMAN_SESSION_HMAC_KEY = randomBytes(48)
+      .toString("base64url");
 
     const owner = await login("graph-owner");
     const viewer = await login("graph-viewer");
@@ -968,6 +969,9 @@ async function run() {
       route_verified: "GET /api/mis/runs/:runId/evidence-graph",
       sparse_run_evidence_counts: 0,
       graph_hash_stable: true,
+      direct_typescript_postgres_restricted_runtime: true,
+      runtime_role_boundary_verified: true,
+      runtime_relation_owner_excluded: true,
       provider_calls: fetchCalls,
       python_proxy_performed: false,
       sensitive_canaries_omitted: SENSITIVE_CANARIES.length,
@@ -975,10 +979,13 @@ async function run() {
   } finally {
     globalThis.fetch = originalFetch;
     await closeControlPlanePoolForTests();
-    if (schemaCreated) {
-      await admin.query(`DROP SCHEMA IF EXISTS ${quotedSchema(schema)} CASCADE`);
+    restoreRuntimeEnvironment();
+    for (const key of environmentKeys) {
+      const value = originalEnvironment[key];
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
     }
-    await admin.end().catch(() => undefined);
+    await roleFixture?.cleanup();
   }
 }
 

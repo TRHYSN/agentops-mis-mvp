@@ -428,13 +428,14 @@ export async function evaluateWorkspaceEntitlement(
     });
   }
 
+  // The workspace advisory lock above serializes this read with the admin CLI's
+  // entitlement write without granting the runtime role table UPDATE rights.
   const entitlementResult = await client.query<EntitlementRow>(
     `SELECT workspace_id,edition,status,capabilities_json,max_agents,
       max_active_enrollments,max_active_sessions_per_agent,max_monthly_runs,
       max_monthly_cost_usd,max_concurrent_runs,effective_at,expires_at
     FROM workspace_entitlements
-    WHERE workspace_id=$1
-    FOR SHARE`,
+    WHERE workspace_id=$1`,
     [workspaceId],
   );
   const entitlement = entitlementResult.rows[0];

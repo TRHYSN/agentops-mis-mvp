@@ -14,20 +14,16 @@ import {
 import { ControlPlaneHttpError } from "../src/server/controlPlane/http";
 import {
   POSTGRES_MIGRATION_MANIFEST,
-  runPostgresSchemaCommand,
   SCHEMA_CONTRACT,
 } from "../src/server/controlPlane/schemaReadiness";
+import {
+  createPostgresRoleBoundaryFixture,
+} from "./postgres-role-boundary-test-helper";
 
 const baseDsn = String(process.env.AGENTOPS_POSTGRES_DSN || "").trim();
 
 function sha(value: string) {
   return createHash("sha256").update(value, "utf8").digest("hex");
-}
-
-function scopedDsn(schema: string) {
-  const parsed = new URL(baseDsn);
-  parsed.searchParams.set("options", `-csearch_path=${schema}`);
-  return parsed.toString();
 }
 
 function gatewayRequest(
@@ -188,27 +184,24 @@ async function seedFixture(
 async function runContract() {
   assert(baseDsn, "AGENTOPS_POSTGRES_DSN is required");
   await assertSourceOwnership();
-  const schema = `gateway_lifecycle_${randomUUID().replaceAll("-", "")}`;
-  const admin = new Client({ connectionString: baseDsn });
-  await admin.connect();
+  const roleFixture = await createPostgresRoleBoundaryFixture(
+    baseDsn,
+    "gateway_lifecycle",
+  );
+  const admin = roleFixture.owner;
+  const restoreRuntimeEnvironment =
+    roleFixture.activateRuntimeEnvironment();
   const parentToken = `contract_parent_token_${randomUUID()}`;
   const otherToken = `contract_other_token_${randomUUID()}`;
   const expiredToken = `contract_expired_token_${randomUUID()}`;
   const rawCanary = `raw_prompt_${randomUUID()}`;
   try {
-    await admin.query(`CREATE SCHEMA "${schema}"`);
-    const migration = await runPostgresSchemaCommand("migrate", {
-      connectionString: scopedDsn(schema),
-    });
+    const migration = roleFixture.migration;
     assert.equal(migration.schema_contract, SCHEMA_CONTRACT);
     assert.equal(migration.applied_count, POSTGRES_MIGRATION_MANIFEST.length);
     assert.equal(migration.manifest_count, POSTGRES_MIGRATION_MANIFEST.length);
-    await admin.query(`SET search_path TO "${schema}"`);
     await seedFixture(admin, parentToken, otherToken, expiredToken);
 
-    process.env.AGENTOPS_DEPLOYMENT_MODE = "production";
-    process.env.AGENTOPS_CONTROL_PLANE_MODE = "postgres";
-    process.env.AGENTOPS_POSTGRES_DSN = scopedDsn(schema);
     process.env.AGENTOPS_POSTGRES_POOL_MAX = "16";
 
     const tokenStatus = await getGatewayStatus(
@@ -612,9 +605,8 @@ async function runContract() {
     }, null, 2));
   } finally {
     await closeControlPlanePoolForTests();
-    await admin.query("RESET search_path").catch(() => undefined);
-    await admin.query(`DROP SCHEMA IF EXISTS "${schema}" CASCADE`).catch(() => undefined);
-    await admin.end();
+    restoreRuntimeEnvironment();
+    await roleFixture.cleanup();
   }
 }
 

@@ -1,16 +1,17 @@
 import assert from "node:assert/strict";
-import { randomBytes, randomUUID } from "node:crypto";
+import { randomBytes } from "node:crypto";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 
-import { Client } from "pg";
-
 import {
   POSTGRES_MIGRATION_MANIFEST,
-  runPostgresSchemaCommand,
   SCHEMA_CONTRACT,
 } from "../src/server/controlPlane/schemaReadiness";
+import {
+  createPostgresRoleBoundaryFixture,
+  type PostgresRoleBoundaryFixture,
+} from "./postgres-role-boundary-test-helper";
 
 const baseDsn = String(process.env.AGENTOPS_POSTGRES_DSN || "").trim();
 assert.ok(baseDsn, "AGENTOPS_POSTGRES_DSN is required");
@@ -21,16 +22,11 @@ const scriptPath = fileURLToPath(
 const appRoot = path.resolve(path.dirname(scriptPath), "..");
 const tsxPath = path.join(appRoot, "node_modules", "tsx", "dist", "cli.mjs");
 
-function scopedDsn(schema: string) {
-  const dsn = new URL(baseDsn);
-  dsn.searchParams.set("options", `-csearch_path=${schema}`);
-  return dsn.toString();
-}
-
 function runBootstrap(
   dsn: string,
   args: string[],
   password = "",
+  boundary?: PostgresRoleBoundaryFixture,
 ): Promise<{
   code: number;
   stdout: string;
@@ -45,6 +41,14 @@ function runBootstrap(
         AGENTOPS_DEPLOYMENT_MODE: "production",
         AGENTOPS_CONTROL_PLANE_MODE: "postgres",
         AGENTOPS_POSTGRES_DSN: dsn,
+        ...(boundary
+          ? {
+              AGENTOPS_POSTGRES_SCHEMA: boundary.applicationSchema,
+              AGENTOPS_POSTGRES_RUNTIME_API_SCHEMA:
+                boundary.runtimeApiSchema,
+              AGENTOPS_POSTGRES_RUNTIME_ROLE: boundary.runtimeRole,
+            }
+          : {}),
       },
       stdio: ["pipe", "pipe", "pipe"],
     });
@@ -73,15 +77,13 @@ function runBootstrap(
 }
 
 async function main() {
-  const schema = `owner_bootstrap_${randomUUID().replaceAll("-", "")}`;
-  const admin = new Client({ connectionString: baseDsn });
-  await admin.connect();
+  const roleFixture = await createPostgresRoleBoundaryFixture(
+    baseDsn,
+    "owner_bootstrap",
+  );
   try {
-    await admin.query(`CREATE SCHEMA "${schema}"`);
-    const dsn = scopedDsn(schema);
-    const migration = await runPostgresSchemaCommand("migrate", {
-      connectionString: dsn,
-    });
+    const dsn = roleFixture.runtimeDsn;
+    const migration = roleFixture.migration;
     assert.equal(migration.schema_contract, SCHEMA_CONTRACT);
     assert.equal(migration.applied_count, POSTGRES_MIGRATION_MANIFEST.length);
 
@@ -91,7 +93,7 @@ async function main() {
       "--username",
       "bootstrap-owner",
       "--password=forbidden-value",
-    ]);
+    ], "", roleFixture);
     assert.equal(forbiddenArg.code, 2);
     assert.equal(forbiddenArg.payload.error, "password_argv_forbidden");
 
@@ -105,6 +107,7 @@ async function main() {
         "--password-stdin",
       ],
       "too-short",
+      roleFixture,
     );
     assert.equal(weakPassword.code, 2);
     assert.equal(weakPassword.payload.error, "password_length_invalid");
@@ -122,6 +125,7 @@ async function main() {
         "--password-stdin",
       ],
       password,
+      roleFixture,
     );
     assert.equal(created.code, 0, created.stderr || created.stdout);
     assert.equal(created.payload.ok, true);
@@ -130,10 +134,7 @@ async function main() {
     assert.equal(created.payload.password_omitted, true);
     assert.equal(created.payload.python_started, false);
 
-    const fixture = new Client({ connectionString: dsn });
-    await fixture.connect();
-    try {
-      const rows = await fixture.query<{
+    const rows = await roleFixture.owner.query<{
         user_id: string;
         role: string;
         username: string;
@@ -152,17 +153,14 @@ async function main() {
         JOIN human_login_credentials credential
           ON credential.user_id=membership.user_id
         WHERE membership.workspace_id='ws_bootstrap_contract'`,
-      );
-      assert.equal(rows.rowCount, 1);
-      assert.equal(rows.rows[0].role, "owner");
-      assert.equal(rows.rows[0].username, "bootstrap-owner");
-      assert.match(rows.rows[0].password_hash, /^[a-f0-9]{64}$/);
-      assert.match(rows.rows[0].password_salt, /^[a-f0-9]{32}$/);
-      assert.equal(Number(rows.rows[0].audits), 1);
-      assert.equal(JSON.stringify(rows.rows).includes(password), false);
-    } finally {
-      await fixture.end();
-    }
+    );
+    assert.equal(rows.rowCount, 1);
+    assert.equal(rows.rows[0].role, "owner");
+    assert.equal(rows.rows[0].username, "bootstrap-owner");
+    assert.match(rows.rows[0].password_hash, /^[a-f0-9]{64}$/);
+    assert.match(rows.rows[0].password_salt, /^[a-f0-9]{32}$/);
+    assert.equal(Number(rows.rows[0].audits), 1);
+    assert.equal(JSON.stringify(rows.rows).includes(password), false);
 
     const duplicate = await runBootstrap(
       dsn,
@@ -174,6 +172,7 @@ async function main() {
         "--password-stdin",
       ],
       password,
+      roleFixture,
     );
     assert.equal(duplicate.code, 2);
     assert.equal(duplicate.payload.error, "owner_already_initialized");
@@ -189,6 +188,8 @@ async function main() {
       duplicate_owner_rejected: true,
       scrypt_hash_only: true,
       audit_written: true,
+      restricted_runtime_verified: true,
+      migrator_runtime_distinct: true,
       credentials_omitted: true,
       python_started: false,
     });
@@ -196,8 +197,7 @@ async function main() {
     assert.equal(output.includes(baseDsn), false);
     process.stdout.write(`${output}\n`);
   } finally {
-    await admin.query(`DROP SCHEMA IF EXISTS "${schema}" CASCADE`);
-    await admin.end();
+    await roleFixture.cleanup();
   }
 }
 

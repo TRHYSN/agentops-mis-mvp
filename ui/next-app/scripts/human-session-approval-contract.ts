@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import {
   createHash,
   randomBytes,
-  randomUUID,
   scryptSync,
 } from "node:crypto";
 import { readFile } from "node:fs/promises";
@@ -34,10 +33,12 @@ import { listWorkspaceMemoryCandidates } from "../src/server/controlPlane/memory
 import { reviewWorkspaceMemory } from "../src/server/controlPlane/memoryReviews";
 import {
   POSTGRES_MIGRATION_MANIFEST,
-  runPostgresSchemaCommand,
   SCHEMA_CONTRACT,
 } from "../src/server/controlPlane/schemaReadiness";
 import { controlPlaneMode } from "../src/server/controlPlane/config";
+import {
+  createPostgresRoleBoundaryFixture,
+} from "./postgres-role-boundary-test-helper";
 
 const ORIGIN = "https://mis.example.test";
 const HOST = "mis.example.test";
@@ -112,17 +113,6 @@ async function settleHistoricalRunCost(
       sha(`historical-settle-request:${workspaceId}:${runId}`),
     ],
   );
-}
-
-function scopedDsn(baseDsn: string, schema: string) {
-  const parsed = new URL(baseDsn);
-  parsed.searchParams.set("options", `-csearch_path=${schema}`);
-  return parsed.toString();
-}
-
-function quotedSchema(value: string) {
-  assert.match(value, /^[a-z][a-z0-9_]+$/);
-  return `"${value}"`;
 }
 
 function planVerificationHash(
@@ -687,9 +677,6 @@ async function main() {
       || "",
   ).trim();
   assert.ok(baseDsn, "postgres_dsn_required");
-  const schema = `human_review_${randomUUID().replaceAll("-", "")}`;
-  const admin = new Client({ connectionString: baseDsn });
-  let schemaCreated = false;
   process.env.AGENTOPS_DEPLOYMENT_MODE = "production";
   process.env.AGENTOPS_CONTROL_PLANE_MODE = "proxy";
   process.env.AGENTOPS_ALLOWED_ORIGINS = ORIGIN;
@@ -697,9 +684,15 @@ async function main() {
   process.env.AGENTOPS_HUMAN_SESSION_TTL_SECONDS = "3600";
   process.env.AGENTOPS_HUMAN_SESSION_IDLE_TTL_SECONDS = "900";
   process.env.AGENTOPS_POSTGRES_POOL_MAX = "24";
+  const roleFixture = await createPostgresRoleBoundaryFixture(
+    baseDsn,
+    "human_session",
+  );
+  const admin = roleFixture.owner;
+  const restoreRuntimeEnvironment =
+    roleFixture.activateRuntimeEnvironment();
   try {
     await sourceBoundaryContract();
-    await admin.connect();
     const version = await admin.query<{ server_version_num: string }>(
       "SHOW server_version_num",
     );
@@ -707,18 +700,10 @@ async function main() {
       Math.floor(Number(version.rows[0].server_version_num) / 10_000),
       16,
     );
-    await admin.query(`CREATE SCHEMA ${quotedSchema(schema)}`);
-    schemaCreated = true;
-    const contractDsn = scopedDsn(baseDsn, schema);
-    process.env.AGENTOPS_POSTGRES_DSN = contractDsn;
-    const migration = await runPostgresSchemaCommand(
-      "migrate",
-      { connectionString: contractDsn },
-    );
+    const migration = roleFixture.migration;
     assert.equal(migration.schema_contract, SCHEMA_CONTRACT);
     assert.equal(migration.applied_count, POSTGRES_MIGRATION_MANIFEST.length);
     assert.equal(migration.manifest_count, POSTGRES_MIGRATION_MANIFEST.length);
-    await admin.query(`SET search_path TO ${quotedSchema(schema)}`);
 
     await seedHuman(admin, REVIEWER_ID, "reviewer", "approver");
     await seedHuman(admin, OWNER_ID, "owner", "owner");
@@ -1505,13 +1490,8 @@ async function main() {
     process.stdout.write(`${JSON.stringify(receipt, null, 2)}\n`);
   } finally {
     await closeControlPlanePoolForTests().catch(() => undefined);
-    if (schemaCreated) {
-      await admin.query("RESET search_path").catch(() => undefined);
-      await admin.query(
-        `DROP SCHEMA IF EXISTS ${quotedSchema(schema)} CASCADE`,
-      ).catch(() => undefined);
-    }
-    await admin.end().catch(() => undefined);
+    restoreRuntimeEnvironment();
+    await roleFixture.cleanup();
   }
 }
 

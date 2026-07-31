@@ -1,29 +1,16 @@
 import assert from "node:assert/strict";
-import { randomUUID } from "node:crypto";
-
 import { Client } from "pg";
 
 import { GET as commercialHealth } from "../app/api/mis/health/route";
 import { closeControlPlanePoolForTests } from "../src/server/controlPlane/db";
 import {
-  runPostgresSchemaCommand,
   SCHEMA_CONTRACT,
 } from "../src/server/controlPlane/schemaReadiness";
+import {
+  createPostgresRoleBoundaryFixture,
+} from "./postgres-role-boundary-test-helper";
 
 const baseDsn = String(process.env.AGENTOPS_POSTGRES_DSN || "").trim();
-const schema =
-  `commercial_health_${randomUUID().replaceAll("-", "")}`;
-
-function quotedIdentifier(value: string) {
-  assert.match(value, /^[a-z][a-z0-9_]+$/);
-  return `"${value}"`;
-}
-
-function scopedDsn() {
-  const parsed = new URL(baseDsn);
-  parsed.searchParams.set("options", `-csearch_path=${schema}`);
-  return parsed.toString();
-}
 
 async function responseBody(response: Response) {
   return await response.json() as Record<string, unknown>;
@@ -37,19 +24,13 @@ async function run() {
     deployment: process.env.AGENTOPS_DEPLOYMENT_MODE,
     mode: process.env.AGENTOPS_CONTROL_PLANE_MODE,
   };
-  const admin = new Client({ connectionString: baseDsn });
-  await admin.connect();
-  let schemaCreated = false;
+  const roleFixture = await createPostgresRoleBoundaryFixture(
+    baseDsn,
+    "commercial_health",
+  );
+  const restoreRuntimeEnvironment =
+    roleFixture.activateRuntimeEnvironment();
   try {
-    await admin.query(`CREATE SCHEMA ${quotedIdentifier(schema)}`);
-    schemaCreated = true;
-    const connectionString = scopedDsn();
-    await runPostgresSchemaCommand("migrate", { connectionString });
-    process.env.AGENTOPS_POSTGRES_DSN = connectionString;
-    delete process.env.AGENTOPS_POSTGRES_DSN_FILE;
-    process.env.AGENTOPS_DEPLOYMENT_MODE = "production";
-    process.env.AGENTOPS_CONTROL_PLANE_MODE = "postgres";
-
     const readyResponse = await commercialHealth();
     const readyBody = await responseBody(readyResponse);
     assert.equal(readyResponse.status, 200);
@@ -62,7 +43,9 @@ async function run() {
     assert.equal(readyBody.python_proxy_performed, false);
     assert.equal(readyBody.sqlite_used, false);
 
-    const driftClient = new Client({ connectionString });
+    const driftClient = new Client({
+      connectionString: roleFixture.ownerDsn,
+    });
     await driftClient.connect();
     try {
       await driftClient.query(
@@ -88,7 +71,8 @@ async function run() {
       catalog_drift_returns_503: true,
       schema_contract: SCHEMA_CONTRACT,
       schema_fingerprint_verified: true,
-      typescript_postgres_owner: true,
+      typescript_postgres_restricted_runtime: true,
+      database_role_boundary_verified: true,
       python_used: false,
       sqlite_used: false,
       credentials_omitted: true,
@@ -96,12 +80,8 @@ async function run() {
     }));
   } finally {
     await closeControlPlanePoolForTests();
-    if (schemaCreated) {
-      await admin.query(
-        `DROP SCHEMA IF EXISTS ${quotedIdentifier(schema)} CASCADE`,
-      );
-    }
-    await admin.end().catch(() => undefined);
+    restoreRuntimeEnvironment();
+    await roleFixture.cleanup();
     const restore = (key: string, value: string | undefined) => {
       if (value === undefined) delete process.env[key];
       else process.env[key] = value;

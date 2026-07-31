@@ -1,5 +1,6 @@
 import type { PoolClient } from "pg";
 
+import { postgresApplicationSchema } from "./config";
 import { ControlPlaneHttpError } from "./http";
 
 export const CUSTOMER_DELIVERY_SCHEMA_ASSUMPTIONS = {
@@ -161,14 +162,15 @@ function schemaUnavailable() {
 }
 
 export async function assertCustomerDeliverySchemaReady(client: PoolClient) {
+  const applicationSchema = postgresApplicationSchema();
   const tableNames = Object.keys(REQUIRED_COLUMNS);
   let columnRows: Array<{ table_name: string; column_name: string }>;
   try {
     const result = await client.query<{ table_name: string; column_name: string }>(
       `SELECT table_name,column_name
       FROM information_schema.columns
-      WHERE table_schema=current_schema() AND table_name=ANY($1::text[])`,
-      [tableNames],
+      WHERE table_schema=$1 AND table_name=ANY($2::text[])`,
+      [applicationSchema, tableNames],
     );
     columnRows = result.rows;
   } catch {
@@ -202,8 +204,11 @@ export async function assertCustomerDeliverySchemaReady(client: PoolClient) {
     JOIN pg_class index_relation ON index_relation.oid=index_record.indexrelid
     JOIN pg_class table_relation ON table_relation.oid=index_record.indrelid
     JOIN pg_namespace namespace ON namespace.oid=index_relation.relnamespace
-    WHERE namespace.nspname=current_schema() AND index_relation.relname=$1`,
-    [CUSTOMER_DELIVERY_SCHEMA_ASSUMPTIONS.uniqueIndex],
+    WHERE namespace.nspname=$1 AND index_relation.relname=$2`,
+    [
+      applicationSchema,
+      CUSTOMER_DELIVERY_SCHEMA_ASSUMPTIONS.uniqueIndex,
+    ],
   );
   const index = indexResult.rows[0];
   const predicate = String(index?.predicate || "").toLowerCase();
@@ -224,11 +229,14 @@ export async function assertCustomerDeliverySchemaReady(client: PoolClient) {
     FROM pg_trigger trigger_record
     JOIN pg_class relation ON relation.oid=trigger_record.tgrelid
     JOIN pg_namespace namespace ON namespace.oid=relation.relnamespace
-    WHERE namespace.nspname=current_schema()
+    WHERE namespace.nspname=$1
       AND NOT trigger_record.tgisinternal
       AND trigger_record.tgenabled='O'
-      AND trigger_record.tgname=ANY($1::text[])`,
-    [[...CUSTOMER_DELIVERY_SCHEMA_ASSUMPTIONS.requiredTriggers]],
+      AND trigger_record.tgname=ANY($2::text[])`,
+    [
+      applicationSchema,
+      [...CUSTOMER_DELIVERY_SCHEMA_ASSUMPTIONS.requiredTriggers],
+    ],
   );
   const triggers = new Set(triggerResult.rows.map((row) => row.trigger_name));
   if (

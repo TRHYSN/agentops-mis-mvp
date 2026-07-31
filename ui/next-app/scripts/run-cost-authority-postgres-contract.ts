@@ -7,18 +7,32 @@ import {
   heartbeatAgentGatewayRun,
   startAgentGatewayRun,
 } from "../src/server/controlPlane/agentGatewayRuns";
+import { costUsdExact } from "../src/server/controlPlane/costProjection";
 import { closeControlPlanePoolForTests } from "../src/server/controlPlane/db";
 import { ControlPlaneHttpError } from "../src/server/controlPlane/http";
 import {
-  runPostgresSchemaCommand,
   SchemaReadinessError,
 } from "../src/server/controlPlane/schemaReadiness";
+import {
+  createPostgresRoleBoundaryFixture,
+} from "./postgres-role-boundary-test-helper";
 
 const CONTRACT = "agentops_run_cost_authority_postgres_contract_v1";
 const baseDsn = String(process.env.AGENTOPS_POSTGRES_DSN || "").trim();
-const schema = `agentops_run_cost_api_${randomBytes(6).toString("hex")}`;
 const applicationName = `agentops-run-cost-api-${randomBytes(5).toString("hex")}`;
 const ownerUserId = "usr_run_cost_authority";
+
+function assertExactProjectionRejectsNumber() {
+  assert.equal(costUsdExact("999999999999.999999"), "999999999999.999999");
+  assert.equal(costUsdExact(null), "0.000000");
+  assert.throws(
+    () => {
+      // @ts-expect-error Exact PostgreSQL NUMERIC values must remain strings.
+      costUsdExact(0.100002);
+    },
+    /authoritative_cost_usd_string_required/,
+  );
+}
 
 const fixtures = Object.freeze({
   main: {
@@ -37,6 +51,12 @@ const fixtures = Object.freeze({
     workspaceId: "ws_run_cost_expiry",
     agentId: "agt_run_cost_expiry",
     tokenId: "tok_run_cost_expiry",
+    token: `contract_token_${randomBytes(18).toString("hex")}`,
+  },
+  boundary: {
+    workspaceId: "ws_run_cost_boundary",
+    agentId: "agt_run_cost_boundary",
+    tokenId: "tok_run_cost_boundary",
     token: `contract_token_${randomBytes(18).toString("hex")}`,
   },
 });
@@ -60,21 +80,6 @@ let failureStage = "bootstrap";
 
 function sha256(value: string) {
   return createHash("sha256").update(value, "utf8").digest("hex");
-}
-
-function quotedIdentifier(value: string) {
-  assert.match(value, /^[a-z][a-z0-9_]{0,62}$/);
-  return `"${value}"`;
-}
-
-function scopedDsn() {
-  const parsed = new URL(baseDsn);
-  parsed.searchParams.set(
-    "options",
-    `-csearch_path=${schema} -cstatement_timeout=12000 -clock_timeout=8000`,
-  );
-  parsed.searchParams.set("application_name", applicationName);
-  return parsed.toString();
 }
 
 function request(
@@ -403,6 +408,16 @@ async function seed(client: Client) {
       maxConcurrentRuns: 2,
       maxMonthlyRuns: 1,
       maxMonthlyCostUsd: "100.000000",
+    },
+  );
+  await seedFixture(
+    client,
+    fixtures.boundary,
+    ["tsk_run_cost_boundary"],
+    {
+      maxConcurrentRuns: 1,
+      maxMonthlyRuns: 1,
+      maxMonthlyCostUsd: "999999999999.999999",
     },
   );
 }
@@ -734,9 +749,116 @@ async function assertPrecisionReplayAndTerminal(client: Client) {
     estimateRunId,
   );
   assert.equal(estimateSettled.state, "settled");
+  assert.equal(estimateSettled.observed_cost_usd, "1.234567");
   assert.equal(estimateSettled.settled_cost_usd, "1.234567");
   assert.equal(estimateSettled.run_cost_usd, "1.234567");
   assert.equal(estimateSettled.run_status, "failed");
+}
+
+async function assertNumericBoundaryAuthority(client: Client) {
+  const fixture = fixtures.boundary;
+  const runId = "run_cost_authority_boundary";
+  const estimatedCostUsd = "999999999999.999999";
+  const microSensitiveCostUsd = "9999999999.999999";
+
+  failureStage = "numeric_boundary_start";
+  const created = await start(
+    fixture,
+    startBody(
+      fixture,
+      "tsk_run_cost_boundary",
+      runId,
+      estimatedCostUsd,
+    ),
+  );
+  assertAllowedStart(created, 201);
+  assert.equal(
+    reservation(created.body).estimated_cost_usd,
+    estimatedCostUsd,
+  );
+
+  failureStage = "numeric_boundary_micro_heartbeat";
+  const microHeartbeat = await heartbeat(fixture, runId, {
+    workspace_id: fixture.workspaceId,
+    status: "running",
+    cost_usd: microSensitiveCostUsd,
+  });
+  assertAllowedHeartbeat(microHeartbeat);
+  assert.equal(
+    reservation(microHeartbeat.body).observed_cost_usd,
+    microSensitiveCostUsd,
+  );
+  assert.equal(
+    publicNumber(
+      record(microHeartbeat.body.run, "run").cost_usd,
+      "run.cost_usd",
+    ),
+    9999999999.999998,
+  );
+  assert.notEqual(
+    String(
+      publicNumber(
+        record(microHeartbeat.body.run, "run").cost_usd,
+        "run.cost_usd",
+      ),
+    ),
+    microSensitiveCostUsd,
+  );
+  assert.equal(
+    record(microHeartbeat.body.run, "run").cost_usd_exact,
+    microSensitiveCostUsd,
+  );
+  let boundarySnapshot = await snapshot(client, fixture.workspaceId, runId);
+  assert.equal(boundarySnapshot.observed_cost_usd, microSensitiveCostUsd);
+  assert.equal(boundarySnapshot.run_cost_usd, microSensitiveCostUsd);
+
+  failureStage = "numeric_boundary_terminal";
+  const terminalBody = {
+    workspace_id: fixture.workspaceId,
+    status: "completed",
+    cost_usd: estimatedCostUsd,
+  };
+  const terminal = await heartbeat(fixture, runId, terminalBody);
+  assertAllowedHeartbeat(terminal);
+  assert.equal(
+    reservation(terminal.body).observed_cost_usd,
+    estimatedCostUsd,
+  );
+  assert.equal(
+    reservation(terminal.body).settled_cost_usd,
+    estimatedCostUsd,
+  );
+  assert.equal(
+    publicNumber(record(terminal.body.run, "run").cost_usd, "run.cost_usd"),
+    1_000_000_000_000,
+  );
+  assert.notEqual(
+    String(
+      publicNumber(record(terminal.body.run, "run").cost_usd, "run.cost_usd"),
+    ),
+    estimatedCostUsd,
+  );
+  assert.equal(
+    record(terminal.body.run, "run").cost_usd_exact,
+    estimatedCostUsd,
+  );
+  boundarySnapshot = await snapshot(client, fixture.workspaceId, runId);
+  assert.equal(boundarySnapshot.observed_cost_usd, estimatedCostUsd);
+  assert.equal(boundarySnapshot.settled_cost_usd, estimatedCostUsd);
+  assert.equal(boundarySnapshot.run_cost_usd, estimatedCostUsd);
+
+  failureStage = "numeric_boundary_terminal_replay";
+  const replay = await heartbeat(fixture, runId, terminalBody);
+  assertAllowedHeartbeat(replay);
+  assert.equal(replay.body.outcome, "unchanged");
+  assert.equal(
+    reservation(replay.body).settled_cost_usd,
+    estimatedCostUsd,
+  );
+  assert.deepEqual(
+    await snapshot(client, fixture.workspaceId, runId),
+    boundarySnapshot,
+  );
 }
 
 async function assertConcurrentSingleWinner(client: Client) {
@@ -856,6 +978,9 @@ async function expireReservationForContract(
       [workspaceId, runId],
     );
     await client.query(
+      "SET CONSTRAINTS run_cost_reservations_billable_ledger_v10 IMMEDIATE",
+    );
+    await client.query(
       `ALTER TABLE run_cost_reservations
       ENABLE TRIGGER run_cost_reservations_guard_v10`,
     );
@@ -972,10 +1097,7 @@ function restoreEnvironment(
 
 async function runContract() {
   assert.ok(baseDsn, "AGENTOPS_POSTGRES_DSN is required");
-  const admin = new Client({
-    connectionString: baseDsn,
-    application_name: `${applicationName}-admin`,
-  });
+  assertExactProjectionRejectsNumber();
   const originalEnvironment = {
     AGENTOPS_POSTGRES_DSN: process.env.AGENTOPS_POSTGRES_DSN,
     AGENTOPS_POSTGRES_SSL: process.env.AGENTOPS_POSTGRES_SSL,
@@ -985,32 +1107,29 @@ async function runContract() {
       process.env.AGENTOPS_POSTGRES_APPLICATION_NAME,
     AGENTOPS_POSTGRES_POOL_MAX: process.env.AGENTOPS_POSTGRES_POOL_MAX,
   };
-  let schemaCreated = false;
-  await admin.connect();
+  const roleFixture = await createPostgresRoleBoundaryFixture(
+    baseDsn,
+    "run_cost_authority",
+  );
+  let restoreRuntimeEnvironment: () => void = () => undefined;
   try {
     failureStage = "postgres_16";
-    const version = await admin.query<{ server_version_num: string }>(
+    const version = await roleFixture.owner.query<{
+      server_version_num: string;
+    }>(
       "SHOW server_version_num",
     );
     const serverVersion = Number(version.rows[0]?.server_version_num || 0);
     assert.ok(serverVersion >= 160000 && serverVersion < 170000);
 
-    failureStage = "schema_create";
-    await admin.query(`CREATE SCHEMA ${quotedIdentifier(schema)}`);
-    schemaCreated = true;
-    const connectionString = scopedDsn();
-    process.env.AGENTOPS_POSTGRES_DSN = connectionString;
+    const connectionString = roleFixture.ownerDsn;
+    restoreRuntimeEnvironment = roleFixture.activateRuntimeEnvironment();
     process.env.AGENTOPS_POSTGRES_SSL = "0";
-    process.env.AGENTOPS_DEPLOYMENT_MODE = "production";
-    process.env.AGENTOPS_CONTROL_PLANE_MODE = "postgres";
     process.env.AGENTOPS_POSTGRES_APPLICATION_NAME = applicationName;
     process.env.AGENTOPS_POSTGRES_POOL_MAX = "12";
 
     failureStage = "schema_migrate";
-    const migration = await runPostgresSchemaCommand(
-      "migrate",
-      { connectionString },
-    );
+    const migration = roleFixture.migration;
     assert.equal(migration.ok, true);
     assert.equal(migration.schema_fingerprint_verified, true);
 
@@ -1026,6 +1145,8 @@ async function runContract() {
       await assertInvalidStarts(client);
       failureStage = "precision_replay_terminal";
       await assertPrecisionReplayAndTerminal(client);
+      failureStage = "numeric_boundary_authority";
+      await assertNumericBoundaryAuthority(client);
       failureStage = "concurrent_single_winner";
       await assertConcurrentSingleWinner(client);
       failureStage = "expired_recovery";
@@ -1042,6 +1163,12 @@ async function runContract() {
         server_owned_start_fields_rejected: true,
         reserved_cost_starts_at_zero: true,
         exact_numeric_18_6: true,
+        numeric_18_6_upper_boundary: true,
+        micro_dollar_write_precision: true,
+        legacy_numeric_run_projection_compatible: true,
+        exact_run_projection_available: true,
+        exact_projection_rejects_javascript_number: true,
+        reservation_is_exact_public_authority: true,
         exact_start_replay: true,
         replay_binding_conflict: true,
         concurrent_start_single_winner: true,
@@ -1072,17 +1199,17 @@ async function runContract() {
     }
   } finally {
     await closeControlPlanePoolForTests().catch(() => undefined);
+    restoreRuntimeEnvironment();
     restoreEnvironment(originalEnvironment);
-    if (schemaCreated) {
-      await admin.query(
-        `DROP SCHEMA IF EXISTS ${quotedIdentifier(schema)} CASCADE`,
-      ).catch(() => undefined);
-    }
-    await admin.end().catch(() => undefined);
+    await roleFixture.cleanup();
   }
 }
 
 await runContract().catch((error: unknown) => {
+  const errorMessage = String((error as { message?: unknown })?.message || "");
+  const databaseErrorSymbol = /^[a-z][a-z0-9_]{2,80}$/.test(errorMessage)
+    ? errorMessage
+    : null;
   const errorCode = error instanceof ControlPlaneHttpError
     ? error.code
     : error instanceof SchemaReadinessError
@@ -1095,6 +1222,7 @@ await runContract().catch((error: unknown) => {
     ok: false,
     error_code: errorCode,
     failure_stage: failureStage,
+    database_error_symbol: databaseErrorSymbol,
     credentials_omitted: true,
     raw_prompt_response_omitted: true,
     dsn_omitted: true,

@@ -7,25 +7,15 @@ import { Client } from "pg";
 
 import {
   POSTGRES_MIGRATION_MANIFEST,
-  runPostgresSchemaCommand,
   SCHEMA_CONTRACT,
 } from "../src/server/controlPlane/schemaReadiness";
+import {
+  createPostgresRoleBoundaryFixture,
+} from "./postgres-role-boundary-test-helper";
 
 const baseDsn = String(process.env.AGENTOPS_POSTGRES_DSN || "").trim();
-const schema = `agentops_evidence_${randomBytes(6).toString("hex")}`;
 const token = `contract_token_${randomBytes(24).toString("hex")}`;
 const tokenHash = createHash("sha256").update(token, "utf8").digest("hex");
-
-function quotedIdentifier(value: string) {
-  assert.match(value, /^[a-z][a-z0-9_]+$/);
-  return `"${value}"`;
-}
-
-function scopedDsn() {
-  const parsed = new URL(baseDsn);
-  parsed.searchParams.set("options", `-csearch_path=${schema}`);
-  return parsed.toString();
-}
 
 function headers(workspaceId = "ws_evidence", agentId = "agt_evidence") {
   return {
@@ -188,21 +178,18 @@ async function count(client: Client, table: string) {
 
 async function runContract() {
   assert.ok(baseDsn);
-  const admin = new Client({ connectionString: baseDsn });
-  await admin.connect();
+  const roleFixture = await createPostgresRoleBoundaryFixture(
+    baseDsn,
+    "evidence_support",
+  );
+  const restoreRuntimeEnvironment =
+    roleFixture.activateRuntimeEnvironment();
   try {
-    await admin.query(`CREATE SCHEMA ${quotedIdentifier(schema)}`);
-    const connectionString = scopedDsn();
-    const migration = await runPostgresSchemaCommand(
-      "migrate",
-      { connectionString },
-    );
+    const connectionString = roleFixture.ownerDsn;
+    const migration = roleFixture.migration;
     assert.equal(migration.schema_contract, SCHEMA_CONTRACT);
     assert.equal(migration.applied_count, POSTGRES_MIGRATION_MANIFEST.length);
 
-    process.env.AGENTOPS_POSTGRES_DSN = connectionString;
-    process.env.AGENTOPS_DEPLOYMENT_MODE = "production";
-    process.env.AGENTOPS_CONTROL_PLANE_MODE = "postgres";
     const [
       knowledgeIndexRoute,
       knowledgePacketRoute,
@@ -480,8 +467,8 @@ async function runContract() {
       await dbModule.closeControlPlanePoolForTests();
     }
   } finally {
-    await admin.query(`DROP SCHEMA IF EXISTS ${quotedIdentifier(schema)} CASCADE`);
-    await admin.end();
+    restoreRuntimeEnvironment();
+    await roleFixture.cleanup();
   }
 }
 

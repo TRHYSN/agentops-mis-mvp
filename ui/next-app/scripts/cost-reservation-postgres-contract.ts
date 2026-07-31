@@ -11,6 +11,9 @@ import {
 
 const baseDsn = String(process.env.AGENTOPS_POSTGRES_DSN || "").trim();
 const migrationFilename = "20260731_cost_reservations_v10.sql";
+const baseMigrationCount = POSTGRES_MIGRATION_MANIFEST.findIndex(
+  (definition) => definition.filename === migrationFilename,
+);
 const migrationUrl = new URL(
   `../../../migrations/postgres/${migrationFilename}`,
   import.meta.url,
@@ -53,7 +56,7 @@ async function expectDatabaseError(
 
 async function applyBaseMigrations(client: Client) {
   for (const definition of POSTGRES_MIGRATION_MANIFEST) {
-    if (definition.filename === migrationFilename) continue;
+    if (definition.filename === migrationFilename) break;
     const url = new URL(
       `../../../migrations/postgres/${definition.filename}`,
       import.meta.url,
@@ -403,6 +406,37 @@ async function seedHistoricalFixtures(client: Client) {
     WHERE run_id='run_cost_historical'`,
   )).rows[0].cost;
 
+  await seedRun(
+    client,
+    "ws_cost_historical_utc_boundary",
+    "run_cost_historical_utc_boundary",
+    {
+      status: "completed",
+      startedAt: "2026-02-01T00:30:00+14:00",
+      costUsd: "0.500000",
+    },
+  );
+  await seedRun(
+    client,
+    "ws_cost_historical_naive_utc",
+    "run_cost_historical_naive_utc",
+    {
+      status: "completed",
+      startedAt: "2026-02-01 00:30:00",
+      costUsd: "0.250000",
+    },
+  );
+  await seedRun(
+    client,
+    "ws_cost_historical_second_offset",
+    "run_cost_historical_second_offset",
+    {
+      status: "completed",
+      startedAt: "2026-03-01T00:00:00+00:00:30",
+      costUsd: "0.125000",
+    },
+  );
+
   const managementGraph = await seedAgentTask(
     client,
     "ws_cost_management_history",
@@ -600,6 +634,36 @@ async function assertHistoricalBackfill(
     Number(historical.rows[0].estimated_cost_usd)
       >= Number(projectedBefore),
   );
+
+  const utcBoundary = await client.query<{ billing_month_utc: string }>(
+    `SELECT to_char(
+      reservation.billing_month_utc,
+      'YYYY-MM-DD'
+    ) AS billing_month_utc
+    FROM run_cost_reservations reservation
+    WHERE reservation.run_id='run_cost_historical_utc_boundary'`,
+  );
+  assert.equal(utcBoundary.rows[0]?.billing_month_utc, "2026-01-01");
+
+  const naiveUtc = await client.query<{ billing_month_utc: string }>(
+    `SELECT to_char(
+      reservation.billing_month_utc,
+      'YYYY-MM-DD'
+    ) AS billing_month_utc
+    FROM run_cost_reservations reservation
+    WHERE reservation.run_id='run_cost_historical_naive_utc'`,
+  );
+  assert.equal(naiveUtc.rows[0]?.billing_month_utc, "2026-02-01");
+
+  const secondOffset = await client.query<{ billing_month_utc: string }>(
+    `SELECT to_char(
+      reservation.billing_month_utc,
+      'YYYY-MM-DD'
+    ) AS billing_month_utc
+    FROM run_cost_reservations reservation
+    WHERE reservation.run_id='run_cost_historical_second_offset'`,
+  );
+  assert.equal(secondOffset.rows[0]?.billing_month_utc, "2026-02-01");
 
   const management = await client.query<{
     billing_class: string;
@@ -880,7 +944,7 @@ async function assertPreciseHeartbeatAndSettlement(client: Client) {
     "10.123456",
   );
   assert.equal(settled.state, "settled");
-  assert.equal(settled.observed_cost_usd, "1.000002");
+  assert.equal(settled.observed_cost_usd, "10.123456");
   assert.equal(settled.settled_cost_usd, "10.123456");
   const projection = await client.query<{ cost_usd: string }>(
     "SELECT cost_usd::text FROM runs WHERE run_id=$1",
@@ -1126,6 +1190,31 @@ async function assertTerminalSettlementGate(client: Client) {
   await reserve(client, workspaceId, runId, "2.000000");
   await seedRun(client, workspaceId, runId);
   await heartbeat(client, workspaceId, runId, "1.234567");
+  await expectDatabaseError(
+    settle(client, workspaceId, runId, "1.234567"),
+    "active_run_cost_reservation_state_invalid",
+  );
+  const runningReservation = await client.query<{ state: string }>(
+    `SELECT state
+    FROM run_cost_reservations
+    WHERE workspace_id=$1 AND run_id=$2`,
+    [workspaceId, runId],
+  );
+  assert.equal(runningReservation.rows[0]?.state, "reserved");
+
+  const waitingWorkspaceId = "ws_cost_terminal_waiting";
+  const waitingRunId = "run_cost_terminal_waiting";
+  await entitlement(client, waitingWorkspaceId);
+  await reserve(client, waitingWorkspaceId, waitingRunId, "2.000000");
+  await seedRun(client, waitingWorkspaceId, waitingRunId, {
+    status: "waiting_approval",
+    approvalRequired: 1,
+  });
+  await expectDatabaseError(
+    settle(client, waitingWorkspaceId, waitingRunId, "0.000000"),
+    "active_run_cost_reservation_state_invalid",
+  );
+
   await client.query("BEGIN");
   await client.query(
     `UPDATE runs
@@ -1180,8 +1269,41 @@ async function run() {
       failureStage = "historical_fixtures";
       const historical = await seedHistoricalFixtures(fixture);
       const migration = await readFile(migrationUrl, "utf8");
+      failureStage = "active_run_upgrade_preflight";
+      const activeUpgrade = await seedRun(
+        fixture,
+        "ws_cost_active_upgrade",
+        "run_cost_active_upgrade",
+      );
+      await expectDatabaseError(
+        applyCostMigration(fixture, migration),
+        "cost_authority_active_runs_must_be_drained",
+      );
+      const preflightRollback = await fixture.query<{ present: boolean }>(
+        `SELECT EXISTS(
+          SELECT 1
+          FROM information_schema.columns
+          WHERE table_schema=current_schema()
+            AND table_name='runs'
+            AND column_name='billing_class'
+        ) AS present`,
+      );
+      assert.equal(preflightRollback.rows[0]?.present, false);
+      await fixture.query(
+        "DELETE FROM runs WHERE run_id='run_cost_active_upgrade'",
+      );
+      await fixture.query(
+        "DELETE FROM tasks WHERE task_id=$1",
+        [activeUpgrade.taskId],
+      );
+      await fixture.query(
+        "DELETE FROM agents WHERE agent_id=$1",
+        [activeUpgrade.agentId],
+      );
       failureStage = "cost_migration_first_apply";
+      await fixture.query("SET TIME ZONE 'Pacific/Kiritimati'");
       await applyCostMigration(fixture, migration);
+      await fixture.query("SET TIME ZONE 'UTC'");
       failureStage = "cost_migration_reapply";
       await applyCostMigration(fixture, migration);
 
@@ -1212,10 +1334,14 @@ async function run() {
       const output = JSON.stringify({
         contract: "agentops_cost_reservation_postgres_contract_v10",
         ok: true,
-        base_schema_contract: SCHEMA_CONTRACT,
-        base_migration_count: POSTGRES_MIGRATION_MANIFEST.length,
+        target_schema_contract: SCHEMA_CONTRACT,
+        base_migration_count: baseMigrationCount,
         migration_reapply_idempotent: true,
         historical_execution_backfilled: true,
+        historical_utc_month_boundary: true,
+        historical_second_offset_utc_boundary: true,
+        historical_naive_timestamp_utc_deterministic: true,
+        active_run_upgrade_fail_closed: true,
         nonbillable_management_strict: true,
         billable_run_bypass_closed: true,
         authoritative_cost_numeric_18_6: true,
@@ -1227,6 +1353,8 @@ async function run() {
         release_reason_machine_bounded: true,
         released_terminal_state_bound: true,
         terminal_settlement_gate: true,
+        active_run_standalone_settlement_rejected: true,
+        settlement_and_terminal_update_atomic: true,
         cost_function_public_execute_revoked: true,
         concurrent_single_winner: true,
         concurrent_budget_single_winner: true,

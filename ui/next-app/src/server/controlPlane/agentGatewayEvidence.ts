@@ -8,6 +8,7 @@ import {
 } from "./agentPlanContract";
 import { authenticateAgentGateway, enforceWorkspaceBinding } from "./auth";
 import { boundedJsonObject } from "./boundedJson";
+import { costUsdExact } from "./costProjection";
 import { withPostgresTransaction } from "./db";
 import { ControlPlaneHttpError } from "./http";
 import { appendAudit, appendRuntimeEvent, newLedgerId, pythonFloat, stableHash } from "./ledger";
@@ -60,7 +61,7 @@ type RunRow = {
   input_tokens: number;
   output_tokens: number;
   reasoning_tokens: number;
-  cost_usd: number | string;
+  cost_usd: string;
   error_type: string | null;
   error_message: string | null;
   trace_id: string | null;
@@ -227,7 +228,11 @@ function taskSnapshot(row: TaskRow) {
 }
 
 function runSnapshot(row: RunRow) {
-  return { ...row, cost_usd: pythonFloat(Number(row.cost_usd)) };
+  return {
+    ...row,
+    cost_usd: pythonFloat(Number(row.cost_usd)),
+    cost_usd_exact: costUsdExact(row.cost_usd),
+  };
 }
 
 function evaluationSnapshot(row: EvaluationRow) {
