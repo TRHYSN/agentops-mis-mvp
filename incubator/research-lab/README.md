@@ -1,4 +1,4 @@
-# AgentOps Research Lab — Standalone v0.4.0
+# AgentOps Research Lab — Standalone v0.4.1
 
 A path-isolated, local-first prototype for **asynchronous parallel experiments, remote SSH execution, frozen provenance, and scientific-integrity gates**.
 
@@ -87,6 +87,24 @@ The confirmed sync supports only a local HTTP AgentOps MIS Host and publishes a
 bounded evidence bundle: protocol/Trial identities, scalar metrics, hashes,
 deviation summaries and the Claim Gate. State paths, logs, artifact bodies,
 credentials and raw model output are omitted.
+
+## BWFormer Fusion v2 smoke
+
+AgentOps MIS includes a bounded adapter for the manifest-packaged Fusion v2
+overlay. Generate its machine-local spec from the repository root:
+
+```bash
+python3 scripts/prepare_bwformer_research_lab_smoke.py \
+  --project-root /path/to/BWformer1-fusion-v2 \
+  --python /path/to/bwformer-cpu/bin/python \
+  --output /path/outside/git/bwformer-smoke.json
+```
+
+The adapter verifies the overlay manifest, runs its config dry-run and
+synthetic CPU component smoke, and emits only scalar metrics, actual conditions
+and a small hash summary. It neither reads Building3D nor runs the full CUDA
+model. Large checkpoints must remain in the training repository; place only a
+small checkpoint manifest under `artifacts_dir()`.
 
 ## Provenance example
 

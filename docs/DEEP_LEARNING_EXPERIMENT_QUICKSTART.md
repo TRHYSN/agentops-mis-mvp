@@ -22,13 +22,32 @@ following bounded outputs; do not send data samples or model bodies to MIS.
 
 ```python
 from research_lab.runtime import artifacts_dir, log_metric, record_actuals
+import hashlib
+import json
+
+def file_sha256(path):
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 for epoch in range(num_epochs):
     # Normal training code remains unchanged.
     log_metric("validation_accuracy", float(validation_accuracy), step=epoch)
 
-checkpoint_path = artifacts_dir() / "best-checkpoint.pt"
-save_checkpoint(checkpoint_path)
+checkpoint_path = normal_training_output_dir / "best-checkpoint.pt"
+save_checkpoint(checkpoint_path)  # The model body stays on the training machine.
+checkpoint_manifest = {
+    "logical_name": "best-checkpoint.pt",
+    "size_bytes": checkpoint_path.stat().st_size,
+    "sha256": file_sha256(checkpoint_path),
+    "selection_rule": "best_validation_accuracy",
+}
+(artifacts_dir() / "checkpoint-manifest.json").write_text(
+    json.dumps(checkpoint_manifest, sort_keys=True),
+    encoding="utf-8",
+)
 record_actuals(
     initialization_mode="from_checkpoint",
     training_scope="declared_ablation",
@@ -40,7 +59,10 @@ record_actuals(
 ```
 
 Research Lab hashes files written under `artifacts_dir()`. The MIS evidence
-bundle contains the relative name, byte size and SHA-256 only.
+bundle contains the relative name, byte size and SHA-256 only. Keep large
+checkpoints in the normal training output directory: the v1 MIS ingest contract
+accepts metadata artifacts up to 50 MiB, so `artifacts_dir()` should contain a
+small checkpoint manifest and bounded summaries rather than model bodies.
 
 ## 3. Freeze an experiment JSON
 
@@ -105,3 +127,25 @@ For the current BWFormer work, begin with one bounded smoke or ablation protocol
 OOM profiling, baseline repair and geometry ablations should be separate
 Experiments. Do not mix exploratory parameter search with a confirmatory Claim
 Gate.
+
+For the manifest-verified Fusion v2 overlay, prepare a machine-local smoke spec
+without committing absolute paths:
+
+```bash
+python3 scripts/prepare_bwformer_research_lab_smoke.py \
+  --project-root /path/to/BWformer1-fusion-v2 \
+  --python /path/to/bwformer-cpu/bin/python \
+  --output "$RESEARCH_STATE/bwformer-fusion-smoke.json"
+
+agentops experiment validate \
+  --spec "$RESEARCH_STATE/bwformer-fusion-smoke.json"
+agentops experiment run \
+  --spec "$RESEARCH_STATE/bwformer-fusion-smoke.json" \
+  --state-dir "$RESEARCH_STATE/bwformer" \
+  --confirm-run
+```
+
+This adapter verifies every file declared by `MANIFEST.json`, executes only the
+Fusion config dry-run and synthetic CPU component smoke, and records bounded
+metrics plus a summary hash. It does not open Building3D, start CUDA, or claim
+model-quality evidence.
