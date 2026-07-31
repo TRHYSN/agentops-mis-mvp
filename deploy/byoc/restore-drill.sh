@@ -259,21 +259,59 @@ docker compose --env-file "$env_file" -f "$compose_file" exec -T postgres \
     lease_key=7157544864185932631
     lease_ready=$(mktemp)
     lease_pid=
+    lease_acquired=false
     restore_pid=
+    restore_input_open=true
+    exec 3<&0
+    wait_for_lease_release() {
+      [ "$lease_acquired" = true ] || return 0
+      attempt=0
+      while [ "$attempt" -lt 100 ]; do
+        released=$(
+          psql \
+            --username "$POSTGRES_USER" \
+            --dbname postgres \
+            --no-psqlrc \
+            --set ON_ERROR_STOP=1 \
+            --tuples-only \
+            --no-align \
+            --command "SELECT CASE WHEN pg_try_advisory_lock($lease_key) THEN pg_advisory_unlock($lease_key) ELSE false END" \
+            2>/dev/null || :
+        )
+        if [ "$released" = t ]; then
+          lease_acquired=false
+          return 0
+        fi
+        attempt=$((attempt + 1))
+        sleep 0.1
+      done
+      printf "%s\n" restore_database_lease_release_failed >&2
+      return 1
+    }
     cleanup_lease() {
+      cleanup_status=0
       if [ -n "$restore_pid" ]; then
         kill "$restore_pid" 2>/dev/null || :
         wait "$restore_pid" 2>/dev/null || :
         restore_pid=
+      fi
+      if [ "$restore_input_open" = true ]; then
+        exec 3<&-
+        restore_input_open=false
       fi
       if [ -n "$lease_pid" ]; then
         kill "$lease_pid" 2>/dev/null || :
         wait "$lease_pid" 2>/dev/null || :
         lease_pid=
       fi
+      wait_for_lease_release || cleanup_status=1
       rm -f "$lease_ready"
+      return "$cleanup_status"
     }
-    trap cleanup_lease 0 1 2 15
+    trap cleanup_lease 0
+    trap "exit 129" 1
+    trap "exit 130" 2
+    trap "exit 143" 15
     psql \
       --username "$POSTGRES_USER" \
       --dbname postgres \
@@ -297,7 +335,8 @@ SQL
       fi
       sleep 0.1
     done
-    pg_restore --username "$POSTGRES_USER" --dbname "$1" --no-owner --no-privileges --exit-on-error &
+    lease_acquired=true
+    pg_restore --username "$POSTGRES_USER" --dbname "$1" --no-owner --no-privileges --exit-on-error <&3 &
     restore_pid=$!
     restore_status=0
     wait "$restore_pid" || restore_status=$?
@@ -306,31 +345,6 @@ SQL
       exit "$restore_status"
     fi
     cleanup_lease
-    lease_released=false
-    attempt=0
-    while [ "$attempt" -lt 100 ]; do
-      released=$(
-        psql \
-          --username "$POSTGRES_USER" \
-          --dbname postgres \
-          --no-psqlrc \
-          --set ON_ERROR_STOP=1 \
-          --tuples-only \
-          --no-align \
-          --command "SELECT CASE WHEN pg_try_advisory_lock($lease_key) THEN pg_advisory_unlock($lease_key) ELSE false END" \
-          2>/dev/null || :
-      )
-      if [ "$released" = t ]; then
-        lease_released=true
-        break
-      fi
-      attempt=$((attempt + 1))
-      sleep 0.1
-    done
-    if [ "$lease_released" != true ]; then
-      printf "%s\n" restore_database_lease_release_failed >&2
-      exit 1
-    fi
     trap - 0 1 2 15
   ' sh "$restore_database" \
   < "$backup"

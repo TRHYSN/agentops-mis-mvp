@@ -204,6 +204,9 @@ assert.match(restore, /pg_advisory_lock\(7157544864185932631\)/);
 assert.match(restore, /(?:guardian|lease)_pid/);
 assert.match(restore, /restore_pid/);
 assert.match(restore, /kill "\$restore_pid"/);
+assert.match(restore, /exec 3<&0/);
+assert.match(restore, /pg_restore[\s\S]*<&3 &/);
+assert.match(restore, /wait_for_lease_release/);
 assert.ok(
   restore.indexOf('kill "$restore_pid"')
     < restore.indexOf('kill "$lease_pid"'),
@@ -266,6 +269,8 @@ console.log(JSON.stringify({
   runtime_secret_database_identity_probe_packaged: true,
   restore_database_lease_guardian_packaged: true,
   restore_process_stops_before_lease_release: true,
+  restore_input_fd_preserved_for_supervision: true,
+  restore_failure_waits_for_lease_release: true,
   stale_lock_database_lease_probe_packaged: true,
   external_dba_ddl_trust_boundary_documented: true,
   lifecycle_child_process_leases_packaged: true,
