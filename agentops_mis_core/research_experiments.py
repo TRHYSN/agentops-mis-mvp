@@ -15,7 +15,7 @@ import math
 import os
 import re
 import sqlite3
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any, Callable, Iterable
 from urllib.parse import urlsplit
@@ -838,7 +838,7 @@ def ingest_research_evidence(
     """Idempotently map one bounded multi-Trial experiment into the MIS ledger."""
     bundle = normalize_evidence_bundle(raw)
     ensure_research_schema(conn)
-    timestamp = now or datetime.now(UTC).isoformat()
+    timestamp = now or datetime.now(timezone.utc).isoformat()
     workspace_id = bundle["workspace_id"]
     experiment = bundle["experiment"]
     experiment_id = experiment["experiment_id"]
@@ -1564,7 +1564,7 @@ def parse_metric_records(path: Path, *, limit: int = 5000) -> list[dict[str, Any
                 "value": float(value),
                 "step": step,
                 "split": split,
-                "recorded_at": str(raw.get("recorded_at") or datetime.now(UTC).isoformat())[:80],
+                "recorded_at": str(raw.get("recorded_at") or datetime.now(timezone.utc).isoformat())[:80],
             })
     if not records:
         raise ResearchExperimentError("training produced no metrics")
@@ -1642,7 +1642,7 @@ def log_metric(name: str, value: float, *, step: int | None = None, split: str =
         "value": float(value),
         "step": step,
         "split": split,
-        "recorded_at": datetime.now(UTC).isoformat(),
+        "recorded_at": datetime.now(timezone.utc).isoformat(),
     }
     _safe_scalar_tree(record, "metric")
     path = _required_runtime_path("AGENTOPS_RESEARCH_METRICS_PATH")
@@ -1655,7 +1655,7 @@ def log_metric(name: str, value: float, *, step: int | None = None, split: str =
 def record_actuals(**values: Any) -> Path:
     """Write the runtime condition snapshot without exposing it to the server."""
     payload = dict(values)
-    payload.setdefault("recorded_at", datetime.now(UTC).isoformat())
+    payload.setdefault("recorded_at", datetime.now(timezone.utc).isoformat())
     payload.setdefault("protocol_hash", os.environ.get("AGENTOPS_RESEARCH_PROTOCOL_HASH"))
     payload.setdefault("provenance_hash", os.environ.get("AGENTOPS_RESEARCH_PROVENANCE_HASH"))
     payload.setdefault("experiment_id", os.environ.get("AGENTOPS_RESEARCH_EXPERIMENT_ID"))
