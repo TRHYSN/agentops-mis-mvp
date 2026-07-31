@@ -26,6 +26,10 @@ async function run() {
       "../../../.github/workflows/byoc-compose-acceptance.yml",
       import.meta.url,
     ),
+    new URL(
+      "../../../.github/workflows/byoc-cross-schema-v9-v11-acceptance.yml",
+      import.meta.url,
+    ),
   ];
   const workflows = await Promise.all(
     workflowUrls.map(async (url) => ({
@@ -35,6 +39,10 @@ async function run() {
   );
   const byocDockerfile = await readFile(
     new URL("../../../deploy/byoc/Dockerfile", import.meta.url),
+    "utf8",
+  );
+  const historicalByocDockerfile = await readFile(
+    new URL("../../../deploy/byoc/historical-v9.Dockerfile", import.meta.url),
     "utf8",
   );
   let actionReferenceCount = 0;
@@ -142,6 +150,41 @@ async function run() {
     byoc,
     /does not validate image upgrade or rollback across (?:schema|Schema) versions/,
   );
+  const crossSchema = workflows.find((workflow) =>
+    workflow.path.endsWith(
+      "/byoc-cross-schema-v9-v11-acceptance.yml",
+    ))?.source || "";
+  assert.match(crossSchema, /^\s+workflow_dispatch:\s*$/m);
+  assert.match(crossSchema, /^\s+pull_request:\s*$/m);
+  assert.match(crossSchema, /persist-credentials:\s+false/g);
+  assert.match(
+    crossSchema,
+    /f55def1233403a503a39d9af92371a71770c23f7/,
+  );
+  assert.match(
+    crossSchema,
+    /test "\$\(git rev-parse HEAD\)" = "\$\{GITHUB_SHA\}"/,
+  );
+  assert.match(crossSchema, /timeout-minutes:\s+60/);
+  assert(crossSchema.includes(REGISTRY_IMAGE));
+  assert.match(crossSchema, /historical-v9\.Dockerfile/);
+  assert.match(crossSchema, /deploy\/byoc\/Dockerfile/);
+  assert.match(crossSchema, /cross-schema-v9-v11-acceptance\.sh/);
+  assert.match(crossSchema, /backup_restore_authoritative == true/);
+  assert.match(crossSchema, /down_migration_performed == false/);
+  assert.doesNotMatch(crossSchema, /\bpython(?:3)?\s+/i);
+  assert.doesNotMatch(crossSchema, /\bsqlite3?\s+/i);
+  assert(historicalByocDockerfile.includes(
+    "FROM node:22-bookworm-slim@sha256:",
+  ));
+  assert.match(
+    historicalByocDockerfile,
+    /LABEL org\.opencontainers\.image\.revision=/,
+  );
+  assert.match(
+    historicalByocDockerfile,
+    /io\.agentops\.byoc\.schema-contract="agentops_commercial_postgres_v9"/,
+  );
   const buildIdentityOffset = byocDockerfile.indexOf(
     "ARG AGENTOPS_BUILD_IDENTITY=",
   );
@@ -184,7 +227,8 @@ async function run() {
     real_byoc_same_schema_lifecycle_in_ci: true,
     retained_postgres_volume_verified: true,
     rollback_data_authority_verified: true,
-    cross_schema_upgrade_gate_open: true,
+    real_byoc_cross_schema_upgrade_gate_in_ci: true,
+    historical_byoc_image_inputs_pinned: true,
     byoc_upgrade_rollback_claimed: false,
     credentials_omitted: true,
   }));
