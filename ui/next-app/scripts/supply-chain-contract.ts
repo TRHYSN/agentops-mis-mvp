@@ -122,6 +122,9 @@ async function run() {
   assert.match(byoc, /retained-data-lifecycle\.mjs plan/);
   assert.match(byoc, /retained-data-lifecycle\.mjs apply/);
   assert.match(byoc, /retained-data-lifecycle\.mjs rollback/);
+  assert.match(byoc, /docker-content-digest/i);
+  assert.match(byoc, /BYOC image publication failed/);
+  assert.doesNotMatch(byoc, /RepoDigests/);
   assert.match(byoc, /from_schema_contract == \.to_schema_contract/);
   assert.match(byoc, /authority_database_bound == true/);
   assert.match(byoc, /backup_restore_authoritative == true/);
@@ -148,6 +151,7 @@ async function run() {
     byoc_exact_caller_commit_verified: true,
     postgres_image_digest_pinned: true,
     registry_image_digest_pinned: true,
+    registry_manifest_digest_resolved: true,
     workflow_permissions_read_only: true,
     locked_install: true,
     production_prune_ignores_scripts: true,
