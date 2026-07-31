@@ -170,7 +170,14 @@ async function run() {
   assert.match(byoc, /authority_retained:[^]*post_apply_probe_removed:/);
   assert.match(byoc, /source_image_restored:[^]*volume_identity_retained:/);
   assert.match(byoc, /cluster_identity_retained:[^]*final_health_verified:/);
-  assert.match(byoc, /final_schema_readiness_verified/);
+  assert.match(
+    byoc,
+    /\$final_health_verified\s+and \$final_schema_readiness_verified/,
+  );
+  assert.match(
+    byoc,
+    /jq -e '\.ok == true' "\$\{postcondition_receipt\}"/,
+  );
   assert.match(
     byoc,
     /node-secret-entrypoint\.mjs[\s\S]*--postgres-runtime[\s\S]*check:postgres-schema/,
@@ -181,6 +188,11 @@ async function run() {
   );
   assert.match(byoc, /image_identifiers_omitted: true/);
   assert.match(byoc, /database_identifiers_omitted: true/);
+  assert.match(
+    byoc,
+    /agentops-byoc-lifecycle-final-schema-readiness\.json/,
+  );
+  assert.match(byoc, /agentops-byoc-lifecycle-postconditions\.json/);
   assert.match(byoc, /volume_identity_before/);
   assert.match(byoc, /cluster_identifier_before/);
   assert.match(byoc, /down --volumes --remove-orphans/);

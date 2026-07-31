@@ -781,6 +781,8 @@ jobs:
             "${RUNNER_TEMP}/agentops-byoc-lifecycle-apply.json" \
             "${RUNNER_TEMP}/agentops-byoc-lifecycle-status.json" \
             "${RUNNER_TEMP}/agentops-byoc-lifecycle-rollback.json" \
-            "${RUNNER_TEMP}/agentops-byoc-lifecycle-final-health.json" ||
+            "${RUNNER_TEMP}/agentops-byoc-lifecycle-final-health.json" \
+            "${RUNNER_TEMP}/agentops-byoc-lifecycle-final-schema-readiness.json" \
+            "${RUNNER_TEMP}/agentops-byoc-lifecycle-postconditions.json" ||
             cleanup_status=$?
           exit "${cleanup_status}"
