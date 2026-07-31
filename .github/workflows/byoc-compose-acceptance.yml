@@ -255,6 +255,21 @@ jobs:
               --env-file "${AGENTOPS_BYOC_ENV_FILE}" \
               -f "${AGENTOPS_BYOC_COMPOSE_FILE}" \
               ps --all || true
+
+            diagnostics="$(
+              docker compose \
+                --env-file "${AGENTOPS_BYOC_ENV_FILE}" \
+                -f "${AGENTOPS_BYOC_COMPOSE_FILE}" \
+                logs --no-color --tail 200 control-plane 2>/dev/null |
+                grep -Eo \
+                  'byoc_secret_preflight_failed:[a-z0-9_]+|"error_code":"[a-z0-9_]+"' |
+                sort -u || true
+            )"
+            if [[ -n "${diagnostics}" ]]; then
+              printf '%s\n' "${diagnostics}"
+            else
+              echo "No allowlisted control-plane error code was emitted."
+            fi
           fi
 
       - name: Remove containers, volumes, image, and ephemeral secrets

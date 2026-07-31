@@ -46,10 +46,20 @@ def main() -> int:
         "lane_6": "Lane 6: Enrollment And Entitlements",
         "lane_7": "Lane 7: Deployment And Promotion",
         "real_runtime_gate": "explicitly confirmed Hermes and OpenClaw provider calls",
-        "next_slice": "finish Lane 1 startup readiness and Lane 3 customer",
     }
     for label, marker in required_markers.items():
         require(marker in text, f"missing breakdown marker {label}: {marker}", failures)
+    normalized_text = " ".join(text.split())
+    require(
+        "final same-SHA dual-runtime acceptance and exact-head CI" in normalized_text
+        and (
+            "Lane 7 clean-customer image installation, retained-data "
+            "upgrade/rollback, and an external restore drill before promotion"
+        )
+        in normalized_text,
+        "missing breakdown marker next_slice: final runtime, CI, and Lane 7 gates",
+        failures,
+    )
 
     forbidden_claims = [
         "merge PR #22 directly",
