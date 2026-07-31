@@ -37,5 +37,7 @@ claims, introduce Postgres requirements, or merge PR #22.
   plan, receipt recording and rerun bundle preview remain separate
   generator-smoke guarded packets.
 - Strict promotion remains false until the exact source commit passes
-  current-head CI, the final real Hermes/OpenClaw acceptance, clean-customer
-  installation, retained-data upgrade/rollback, and the external restore gate.
+  current-head CI and the final real Hermes/OpenClaw acceptance, and until the
+  packaged real clean-install, isolated-restore, same-Schema lifecycle, and
+  cross-Schema v9-to-v11 workflows pass for that exact candidate before merge
+  promotion. This handoff status is not hosted-service or billing readiness.

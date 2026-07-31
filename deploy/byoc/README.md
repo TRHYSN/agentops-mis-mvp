@@ -415,13 +415,24 @@ superuser participate in its lock protocol. Never run
 
 The lifecycle contracts use an offline injected Docker driver to exercise the
 state machine, failure windows, and packaging. They are offline behavior and
-packaging evidence only. The reusable GitHub workflow separately runs a real
-Docker/Compose clean install and same-Schema image lifecycle with immutable
-digests, retained PostgreSQL volume and cluster identity, pre-backup authority,
-post-apply data, and backup-authoritative rollback. It does not prove a forward
-upgrade across Schema versions; that release gate remains open.
+packaging evidence only. The reusable
+`.github/workflows/byoc-compose-acceptance.yml` workflow separately packages a
+real Docker/Compose clean install, committed backup, isolated restore, and
+same-Schema image lifecycle. It binds immutable image digests, retains the
+PostgreSQL volume and cluster identity, preserves pre-backup authority, writes
+post-apply data, and verifies backup-authoritative rollback.
 
-The repository contracts exercise these fail-closed paths without a Docker
-daemon. They are packaging and offline behavior evidence only; a real
-clean-customer Docker/Compose installation and restore drill remain required
-before BYOC promotion.
+The independent
+`.github/workflows/byoc-cross-schema-v9-v11-acceptance.yml` workflow builds its
+audited fixed historical v9 ancestor as a Node 22 image and builds the exact
+current workflow HEAD as the v11 target image. On the same PostgreSQL volume
+and cluster it applies exactly three manifest migrations, writes a v11-only
+probe, restores the committed pre-upgrade backup as rollback authority, and
+restarts the historical image. It does not run a down migration or claim that
+the forward-migrated database can be opened by the historical image.
+
+These real workflows are packaged release gates. Successful execution evidence
+belongs to the exact source commit and GitHub workflow run being promoted; this
+README intentionally records no run ID or source SHA. Final BYOC promotion
+still requires green exact-head workflow results and merge promotion for that
+same candidate.

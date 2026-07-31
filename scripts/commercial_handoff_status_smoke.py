@@ -17,6 +17,9 @@ INDEX = ROOT / "docs" / "COMMERCIAL_EVIDENCE_PACKET_INDEX.md"
 BREAKDOWN = ROOT / "docs" / "COMMERCIAL_MIGRATION_CLEAN_ROOM_BREAKDOWN.md"
 RELEASE_PACKET = ROOT / "docs" / "RELEASE_EVIDENCE_PACKET.md"
 CI_WORKFLOW = ROOT / ".github" / "workflows" / "ci.yml"
+BYOC_COMPOSE_WORKFLOW = ROOT / ".github" / "workflows" / "byoc-compose-acceptance.yml"
+BYOC_CROSS_SCHEMA_WORKFLOW = ROOT / ".github" / "workflows" / "byoc-cross-schema-v9-v11-acceptance.yml"
+BYOC_README = ROOT / "deploy" / "byoc" / "README.md"
 INDEX_ACCEPTANCE = ROOT / "docs" / "COMMERCIAL_EVIDENCE_PACKET_INDEX_ACCEPTANCE.md"
 CURRENT_ACCEPTANCE = ROOT / "docs" / "COMMERCIAL_CURRENT_EVIDENCE_STATUS_ACCEPTANCE.md"
 HANDOFF_ACCEPTANCE = ROOT / "docs" / "COMMERCIAL_HANDOFF_STATUS_ACCEPTANCE.md"
@@ -26,6 +29,9 @@ SOURCE_DOCS = [
     BREAKDOWN,
     RELEASE_PACKET,
     CI_WORKFLOW,
+    BYOC_COMPOSE_WORKFLOW,
+    BYOC_CROSS_SCHEMA_WORKFLOW,
+    BYOC_README,
     INDEX_ACCEPTANCE,
     CURRENT_ACCEPTANCE,
     HANDOFF_ACCEPTANCE,
@@ -152,6 +158,9 @@ def validate_sources(texts: dict[Path, str], failures: list[str]) -> None:
     breakdown_text = texts.get(BREAKDOWN, "")
     release_text = texts.get(RELEASE_PACKET, "")
     ci_text = texts.get(CI_WORKFLOW, "")
+    byoc_compose_text = texts.get(BYOC_COMPOSE_WORKFLOW, "")
+    byoc_cross_schema_text = texts.get(BYOC_CROSS_SCHEMA_WORKFLOW, "")
+    byoc_readme_text = texts.get(BYOC_README, "")
     handoff_text = texts.get(HANDOFF_ACCEPTANCE, "")
 
     require("Commercial Handoff Status" in index_text, "index missing Commercial Handoff Status row", failures)
@@ -168,17 +177,38 @@ def validate_sources(texts: dict[Path, str], failures: list[str]) -> None:
             failures,
         )
     require("Do not merge PR #22 directly." in breakdown_text, "PR #22 direct-merge block missing", failures)
-    normalized_breakdown = " ".join(breakdown_text.split())
-    require(
-        "final same-SHA dual-runtime acceptance and exact-head CI" in normalized_breakdown
-        and (
-            "Lane 7 clean-customer image installation, retained-data "
-            "upgrade/rollback, and an external restore drill before promotion"
-        )
-        in normalized_breakdown,
-        "recommended current migration slices missing",
-        failures,
-    )
+    for marker in (
+        "Clean install, restore drill, and same-schema image lifecycle",
+        "Run isolated restore and role-boundary drill",
+        "Run real same-schema retained-data lifecycle",
+        "backup_restore_authoritative",
+    ):
+        require(marker in byoc_compose_text, f"BYOC Compose workflow missing contract marker: {marker}", failures)
+    for marker in (
+        "AGENTOPS_HISTORICAL_V9_REVISION",
+        "git merge-base --is-ancestor",
+        "historical-v9.Dockerfile",
+        "grep -E '^v22\\.'",
+        "${GITHUB_SHA}",
+        ".forward_migrations_applied == 3",
+        ".v11_data_probe_written == true",
+        ".backup_restore_authoritative == true",
+        ".down_migration_performed == false",
+        ".old_image_restored == true",
+        ".postgres_volume_preserved == true",
+        ".postgres_cluster_identity_preserved == true",
+    ):
+        require(marker in byoc_cross_schema_text, f"BYOC cross-schema workflow missing contract marker: {marker}", failures)
+    for marker in (
+        ".github/workflows/byoc-compose-acceptance.yml",
+        ".github/workflows/byoc-cross-schema-v9-v11-acceptance.yml",
+        "exactly three manifest migrations",
+        "v11-only",
+        "backup authority",
+        "does not run a down migration",
+        "same candidate",
+    ):
+        require(marker in byoc_readme_text, f"BYOC README missing current promotion boundary: {marker}", failures)
 
     for packet, status in PACKET_STATUS.items():
         require(packet in index_text, f"missing packet row: {packet}", failures)
@@ -190,7 +220,7 @@ def validate_sources(texts: dict[Path, str], failures: list[str]) -> None:
     secret_hits = [pattern.pattern for pattern in SECRET_PATTERNS if pattern.search(joined)]
     require(not secret_hits, f"secret-like marker found in handoff sources: {secret_hits}", failures)
 
-    generated_docs = [INDEX, HANDOFF_ACCEPTANCE]
+    generated_docs = [INDEX, HANDOFF_ACCEPTANCE, BYOC_README]
     hardcoded = [path.name for path in generated_docs if has_hardcoded_sha(texts.get(path, ""))]
     require(not hardcoded, f"hard-coded SHA found in commercial handoff docs: {hardcoded}", failures)
 
@@ -242,8 +272,8 @@ def lane_status() -> list[dict[str, str]]:
         {
             "lane": "Lane 7",
             "name": "Deployment And Promotion",
-            "status": "in_progress",
-            "evidence": "BYOC packaging, backup, and isolated restore contracts exist; exact-head CI, clean installation, retained-data upgrade/rollback, and final promotion remain open.",
+            "status": "implementation_complete_exact_head_promotion_pending",
+            "evidence": "Real clean-install, isolated-restore, same-schema lifecycle, and cross-schema v9-to-v11 workflows are packaged; final exact-head CI, same-SHA runtime acceptance, and merge promotion remain pending.",
         },
     ]
 
