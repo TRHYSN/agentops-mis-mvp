@@ -188,11 +188,19 @@ async function run() {
   );
   assert.match(byoc, /image_identifiers_omitted: true/);
   assert.match(byoc, /database_identifiers_omitted: true/);
+  const cleanupReceiptBlock =
+    byoc.match(
+      /rm -f -- \\\n([\s\S]*?)\|\|\s*\n\s*cleanup_status=\$\?/,
+    )?.[1] || "";
+  assert.notEqual(cleanupReceiptBlock, "");
   assert.match(
-    byoc,
+    cleanupReceiptBlock,
     /agentops-byoc-lifecycle-final-schema-readiness\.json/,
   );
-  assert.match(byoc, /agentops-byoc-lifecycle-postconditions\.json/);
+  assert.match(
+    cleanupReceiptBlock,
+    /agentops-byoc-lifecycle-postconditions\.json/,
+  );
   assert.match(byoc, /volume_identity_before/);
   assert.match(byoc, /cluster_identifier_before/);
   assert.match(byoc, /down --volumes --remove-orphans/);
