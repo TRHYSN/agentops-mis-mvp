@@ -122,11 +122,32 @@ actions remain human/operator actions, not agent-scoped automatic decisions.
 ```http
 GET /api/workers/adapter-readiness
 GET /api/workers/status
+GET /api/agent-gateway/host-workers/status
+GET /api/agent-gateway/host-workers/fleet
+GET /api/agent-gateway/host-workers/adapter-readiness
+GET /api/agent-gateway/host-runtime-connectors
+GET /api/agent-gateway/host-workers/stuck-tasks
 ```
 
+Private Host machine reads require the Host API key. Agent enrollment and
+short-lived Agent Session tokens cannot inspect Host-wide worker or connector
+topology. `host-runtime-connectors` is read-only, performs no runtime refresh,
+and omits raw base URLs, binary paths, trust notes, and last-error text.
+
+Human Session reads of the Operator action plan, loop audit, handoff, and
+command center use the current ledger/readiness snapshot without running live
+Hermes/OpenClaw start checks. Machine-authenticated CLI/API calls retain the
+full supervision view. This keeps browser navigation responsive and prevents a
+page load from becoming an implicit runtime probe.
+
 `GET /api/workers/adapter-readiness` is a read-only route-selection endpoint
-for operators and external agents. It does not pull tasks, execute models, or
-write ledger rows. Each adapter entry includes:
+for the browser operator console and uses Human Session authentication in
+Private Host mode. The `host-workers/*` mirrors are for the packaged Host CLI
+and require the Host machine credential. Agent-bound enrollment/Session tokens
+cannot read Host-wide Worker telemetry; they continue to use scoped task/run
+and evidence routes. These reads do not pull tasks, execute models, write ledger
+rows, or update rejected bound-credential usage timestamps. Each adapter entry
+includes:
 
 - `readiness`
 - `trust_status`
@@ -174,6 +195,8 @@ GET  /api/knowledge/search?q=approval&limit=10&refresh=true
 POST /api/knowledge/index
 GET  /api/agent-gateway/knowledge/search?q=approval&limit=10
 POST /api/agent-gateway/knowledge/index
+GET  /api/knowledge/context-packet?task_id=<task_id>&adapter=hermes
+GET  /api/agent-gateway/knowledge/context-packet?task_id=<task_id>&adapter=hermes
 ```
 
 The local indexer reads Markdown from the repo root, `docs/`, and `knowledge/`.
@@ -208,6 +231,17 @@ index refresh uses `POST /api/agent-gateway/knowledge/index` and requires
 `knowledge:write`. Bound Agent Gateway tokens can see only `global` knowledge
 plus documents whose `workspace_id` matches the token workspace; workspace header
 or query spoofing returns `403`.
+
+The evidence packet and context packet have different jobs. The existing
+`knowledge/evidence-packet` proves retrieval quality and provenance while
+omitting all excerpts. `knowledge/context-packet` adds a bounded transient
+model-input layer: at most eight redacted knowledge summaries, at most five
+human-approved canonical Memory summaries, and at most 6000 combined
+characters. It never scans conversation JSONL, logs, attachments, env files or
+raw customer folders. Its response binds every summary to a document/chunk or
+approved `memory_id` and a summary hash. Workers may place those summaries in a
+single model call, but Tool Call, Evaluation and Audit evidence records only
+the packet hash, source IDs, block hashes/counts and omission proof.
 
 ## Commander Repo Map
 
@@ -774,9 +808,36 @@ queues the same workflow as a `workflow_jobs` row and returns immediately with a
 outlive a short browser or CLI request. Job records store status, request hash,
 safe summaries, result ids, and safe result JSON; they must not store raw
 prompts, raw responses, credentials, tokens, or private transcripts.
+
+`/customer-worker-task/submit` accepts an optional `idempotency_key` with a
+maximum length of 512 characters. The Host uses its hash plus workspace and
+workflow identity to derive a non-revealing job id; the raw key is removed
+before background execution and is never stored or returned. Repeating the
+same key and request returns the existing queued/running/completed job without
+starting a second Worker. Reusing the key with a different request fails with
+`409 idempotency_conflict`. Clients that lose the submit response must retry
+with the same key rather than issuing an unkeyed request. The request hash
+excludes transport-only `base_url` fields. A same-key replay can launch a
+durable `queued` reservation that was persisted before its background thread
+started. Every launch must first acquire a short SQLite compare-and-swap lease
+on that queued row; an in-process registry supplements the durable claim so
+concurrent requests cannot start two threads for the same job. A failed thread
+start releases its claim, while an abandoned queued lease can be reclaimed
+after its bounded expiry.
+
+This is not a provider-side exactly-once guarantee. A Host crash after a job is
+already `running` may leave it for explicit stuck-job review/recovery; MIS does
+not silently replay an opaque live Runtime call after restart.
+
 `GET /api/workflows/jobs` is a read-only queue view with optional `status` and
 `workflow_type` filters. It returns the current job rows, status/type summaries,
 active/stuck counts, and copyable `agentops workflow ...` next actions.
+Authenticated human submit requests are bound to the Session workspace;
+attempting to select another workspace returns `403`. Human reads of the job
+list, stuck list and `GET /api/workflows/jobs/:job_id` are scoped to the Session
+workspace and return no cross-workspace job metadata.
+Human `mark-failed` and recovery preview/apply operations use the same Session
+workspace boundary and return `404` for another workspace's job id.
 
 `tpl_local_coding_project` is the local coding project template exposed through
 `GET /api/workflows/customer-task-templates` and executable through
@@ -894,6 +955,40 @@ AGNESFALLBACK_PROFILE=agnesfallback
 ```
 
 For local acceptance on machines where the Hermes gateway already exposes the Agnesfallback model through `127.0.0.1:8642`, `AGNESFALLBACK_GATEWAY_URL` may point at the same gateway URL. The connector still sends only the fixed probe prompt and stores hashes/summaries, not full prompts or raw responses.
+
+## Private Host Acceptance Receipts
+
+```http
+POST /api/host/acceptance-receipts
+GET  /api/host/acceptance-receipts/:id
+GET  /api/host/acceptance-receipts/:id/download
+```
+
+These endpoints are available only in `private_host` deployment mode and
+require an authenticated human Owner Session. The POST route additionally
+requires valid Origin and CSRF evidence. Agent Gateway machine tokens cannot
+substitute for the human Session.
+
+POST accepts exactly one field:
+
+```json
+{"run_id": "run_gw_example"}
+```
+
+Generation fails closed unless the run is completed and has a passing
+evaluation, an associated approved task/run artifact, and a verified plan
+evidence manifest. The Host builds an idempotent bounded receipt, computes its
+canonical payload SHA-256, writes the authority payload to the dedicated
+`private_host_acceptance_receipts` table, creates only a non-sensitive Artifact
+summary, and audits generation and download.
+
+The receipt contains IDs, counts, release identity, evaluation result,
+`artifact_metadata_sha256`, omission flags, and `payload_sha256`. The artifact
+hash covers bounded ledger metadata only; `artifact_file_content_omitted:true`
+prevents it from being represented as a source-file hash. Receipt payloads omit
+filesystem paths, URL queries, tokens, raw prompts, raw responses, and database
+row contents. Non-Owner users may see the generic Artifact metadata but cannot
+read or download the authority payload.
 
 ## Integrations / Notion
 

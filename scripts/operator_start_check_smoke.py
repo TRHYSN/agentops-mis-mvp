@@ -22,7 +22,11 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 CLI = ROOT / "scripts" / "agentops"
-from agentops_mis_core.operator_start_check import compact_runtime_current_code_gate, operator_agent_loop_packet
+from agentops_mis_core.operator_start_check import (
+    compact_runtime_current_code_gate,
+    operator_agent_loop_packet,
+    operator_start_check_local_readiness_gate,
+)
 SECRET_PATTERNS = [
     re.compile(r"Authorization:", re.IGNORECASE),
     re.compile(r"Bearer\s+[A-Za-z0-9._~+/=-]+"),
@@ -289,9 +293,17 @@ def validate(payload: dict, adapter: str) -> None:
     managed_service_receipt = str(managed_execution_commands.get("service_control_receipt") or "")
     managed_service_readback = str(managed_execution_commands.get("service_control_readback") or "")
     managed_service_load = str(managed_execution_commands.get("service_control_load_confirm") or "")
+    top_service_step = next((step for step in local_run_path.get("steps") or [] if isinstance(step, dict) and step.get("step_id") == "preview_worker_service_control"), {})
+    canonical_service_source = f"local_readiness.service_control_preview.{adapter}"
+    canonical_service_signature = str(top_service_step.get("action_signature") or "")
     require(f"--adapter {adapter}" in managed_service_check, f"managed service-check command adapter mismatch: {managed_execution_path}")
     require(f"--adapter {adapter}" in managed_service_receipt, f"managed service receipt command adapter mismatch: {managed_execution_path}")
     require(f"--adapter {adapter}" in managed_service_readback, f"managed service readback command adapter mismatch: {managed_execution_path}")
+    require(bool(canonical_service_signature), f"canonical service-control signature missing: {top_service_step}")
+    require(f"--action-id {canonical_service_source}" in managed_service_receipt, f"managed service receipt action id diverged: {managed_execution_path}")
+    require(f"--action-signature {canonical_service_signature}" in managed_service_receipt, f"managed service receipt signature diverged: {managed_execution_path}")
+    require(f"--source {canonical_service_source}" in managed_service_receipt, f"managed service receipt source diverged: {managed_execution_path}")
+    require(f"--source {canonical_service_source}.control_readback" in managed_service_readback, f"managed service readback source diverged: {managed_execution_path}")
     require(f"--adapter {adapter}" in managed_service_load and "--confirm-control" in managed_service_load, f"managed service load-confirm command missing: {managed_execution_path}")
     require(managed_dispatch.startswith(("agentops workflow run-task", "agentops workflow customer-worker-task")), f"managed dispatch command missing: {managed_execution_path}")
     require(managed_service_readback.startswith("agentops operator record-control-readback"), f"managed control-readback command missing: {managed_execution_path}")
@@ -334,6 +346,15 @@ def validate(payload: dict, adapter: str) -> None:
 
 
 def main() -> int:
+    cold_start_gate = operator_start_check_local_readiness_gate({
+        "operation": "local_readiness",
+        "status": "blocked",
+        "live_execution_performed": False,
+        "safety": {"server_executes_shell": False},
+    })
+    require(cold_start_gate.get("status") == "attention" and cold_start_gate.get("cold_start_capable") is True, f"cold-start local readiness should remain advisory: {cold_start_gate}")
+    malformed_gate = operator_start_check_local_readiness_gate({"status": "blocked"})
+    require(malformed_gate.get("status") == "blocked" and malformed_gate.get("ok") is False, f"malformed local readiness should stay blocked: {malformed_gate}")
     parser = argparse.ArgumentParser(description="Verify operator start-check CLI aggregate.")
     parser.add_argument("--base-url", default=os.environ.get("AGENTOPS_BASE_URL", "http://127.0.0.1:8787"))
     parser.add_argument("--adapter", choices=["mock", "hermes", "openclaw"], action="append", default=None)

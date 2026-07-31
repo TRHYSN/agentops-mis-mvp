@@ -1,5 +1,10 @@
 # AgentOps MIS Current Handoff
 
+> Historical handoff notice: this document records the 2026-06-22 continuation
+> point. The current branch, commit, runtime evidence, CI truth, uncommitted
+> work, and next action are in
+> [`CURRENT_CONTEXT_SNAPSHOT.md`](./CURRENT_CONTEXT_SNAPSHOT.md).
+
 > Handoff date: 2026-06-22
 > Repository: `geogejoy107-jpg/agentops-mis-mvp`
 > Development line: `codex/agent-gateway-kb-demo`

@@ -182,6 +182,31 @@ The Agent Gateway route requires `knowledge:read`. Packet reads are non-mutating
 they do not refresh the index, pull tasks, start runs, write tool calls, or call
 Hermes/OpenClaw.
 
+### `agentops knowledge context-packet`
+
+Returns the bounded project context that an Agent can actually use, rather than
+only proof that retrieval happened. It combines redacted summaries from the
+versioned Knowledge Index with canonical text from human-approved Memory rows.
+Full transcripts, raw document bodies, prompts, responses, source refs and
+credentials remain excluded.
+
+```bash
+agentops knowledge context-packet \
+  --task-id <task_id> \
+  --adapter hermes \
+  --limit 5 \
+  --memory-limit 3 \
+  --max-chars 4000
+```
+
+`agentops-worker` requests this packet first. New-context servers make bounded
+context consumption a Worker quality gate. For compatibility, a Worker can
+still read the older evidence-only endpoint from an older Host, but it labels
+that path as legacy evidence and cannot claim that the model consumed project
+explanations. Context summaries are transient model input; persisted
+Tool/Evaluation/Audit rows contain only IDs, hashes, counts and
+`context_body_not_persisted:true`.
+
 ### `agentops agent register`
 
 Registers or updates an AI digital employee identity.
@@ -1025,11 +1050,10 @@ Emits a structured audit event for important state transitions.
 
 ```bash
 agentops audit emit \
-  --actor-type agent \
-  --actor-id agt_kb_researcher \
   --action connector.plan_created \
-  --entity-type task \
-  --entity-id tsk_kb_setup
+  --entity-type tasks \
+  --entity-id tsk_kb_setup \
+  --task-id tsk_kb_setup
 ```
 
 Maps to `audit_logs`.
@@ -1335,6 +1359,14 @@ It is read-only and does not print raw tokens. The response also includes
 This makes the CLI/API layer usable by external workers and automation scripts,
 not only by a human browsing the admin UI.
 
+In Private Host mode this command maps to
+`GET /api/agent-gateway/host-workers/status`. It requires the Host machine
+credential (`global_api_key`; `local_dev_no_token` remains available only in
+loopback developer mode). A bound Agent enrollment or Session token receives
+`403 host_machine_credential_required`, because the response includes
+Host-wide daemon, process, enrollment, and adapter telemetry. The browser keeps
+using `/api/workers/status` with a Human Session.
+
 ### `agentops runtime connectors`
 
 Returns the complete runtime connector trust registry and capability manifest
@@ -1362,6 +1394,13 @@ token/prompt/response omission fields. Capability manifests must declare:
 - trust policy
 - secrets
 - runtime/tool-event ingestion
+
+In Private Host mode the CLI uses
+`GET /api/agent-gateway/host-runtime-connectors`. The route requires the Host
+machine credential, does not refresh or execute a runtime, and omits raw base
+URLs, binary paths, trust notes, and last-error text. The browser continues to
+use `GET /api/runtime-connectors` with a Human Session. Bound Agent enrollment
+and Session tokens cannot read this Host-wide registry.
 
 Use this command when an operator or remote agent needs to understand what a
 runtime is allowed to do before choosing a route or requesting approval.
@@ -1428,6 +1467,12 @@ behavior from memory. The v1.5 defaults are `--use-session --session-ttl-sec
 adapter failures may retry according to `adapter_retry`; non-retryable safety
 gates such as missing `--confirm-run` must not retry.
 
+In Private Host mode the packaged Host CLI maps this command to
+`GET /api/agent-gateway/host-workers/adapter-readiness`. It follows the same
+Host-machine-only rule as `agentops worker status`. Remote Agent tokens should
+consume their scoped task/run/evidence contract rather than Host filesystem,
+daemon, or runtime prerequisite telemetry.
+
 ### `agentops worker preflight`
 
 Runs read-only Gateway and adapter readiness checks from the main operator CLI.
@@ -1485,7 +1530,11 @@ Lists running worker tasks that exceeded the local recovery threshold. This is a
 agentops worker stuck --threshold-sec 900 --limit 25
 ```
 
-Maps to `GET /api/workers/stuck-tasks`.
+In Private Host mode this maps to
+`GET /api/agent-gateway/host-workers/stuck-tasks`. The browser operator view
+remains `/api/workers/stuck-tasks` behind Human Session. The CLI route is
+Host-machine-only because stuck-task recovery is an installation-wide operator
+view, not an Agent-scoped task feed.
 
 ### `agentops worker release`
 
@@ -1539,6 +1588,17 @@ Maps to `POST /api/agent-gateway/session/revoke` and writes runtime/audit eviden
 The public response reports safe `session_refs` only and includes
 `session_id_omitted:true`.
 
+### Worker-owned graceful Session release
+
+`agentops-worker` calls `POST /api/agent-gateway/session/revoke-self` after a
+normally bounded run publishes its final `disabled` heartbeat. The route does
+not accept a caller-selected Session ID: only the currently authenticated
+short-lived Session can revoke itself. Enrollment tokens, local/global machine
+credentials and anonymous requests cannot use this route. The response exposes
+only a stable `session_ref` plus omission flags and writes runtime/audit
+evidence. This is an internal Worker lifecycle action, not a Human operator CLI
+command.
+
 ## API Endpoint Proposal
 
 All endpoints are under the existing local API server.
@@ -1547,6 +1607,11 @@ All endpoints are under the existing local API server.
 GET  /api/agent-gateway/enrollments
 GET  /api/agent-gateway/sessions
 GET  /api/agent-gateway/status
+GET  /api/agent-gateway/host-workers/status
+GET  /api/agent-gateway/host-workers/fleet
+GET  /api/agent-gateway/host-workers/adapter-readiness
+GET  /api/agent-gateway/host-runtime-connectors
+GET  /api/agent-gateway/host-workers/stuck-tasks
 POST /api/agent-gateway/enrollment/create
 POST /api/agent-gateway/enrollment/request
 POST /api/agent-gateway/enrollment/issue-approved
@@ -1554,6 +1619,7 @@ POST /api/agent-gateway/enrollment/revoke
 POST /api/agent-gateway/enrollment/rotate
 POST /api/agent-gateway/session/create
 POST /api/agent-gateway/session/revoke
+POST /api/agent-gateway/session/revoke-self
 POST /api/agent-gateway/register
 POST /api/agent-gateway/heartbeat
 GET  /api/agent-gateway/tasks
@@ -2415,6 +2481,9 @@ Writes:
 ### `POST /api/agent-gateway/audit`
 
 Emits a direct audit event for state transitions that do not fit another endpoint.
+Known ledger entities derive their workspace/task/run authority from the stored
+object. Custom entity types must include an authorized `task_id` or `run_id`;
+the Gateway rejects unbound or cross-workspace audit writes.
 
 Writes:
 
@@ -2499,6 +2568,7 @@ Current implementation:
 - Session-token auth rechecks the parent enrollment on every request. If the parent token is revoked, expired, missing, or no longer matches the session binding, the session fails closed.
 - `GET /api/agent-gateway/sessions` lists session metadata with safe refs only; it omits `session_hash`, raw token values, raw session ids, and raw parent token ids.
 - `POST /api/agent-gateway/session/revoke` revokes one session or all active sessions for an agent.
+- `POST /api/agent-gateway/session/revoke-self` lets only the currently authenticated active Session release itself without accepting a caller-selected Session ID.
 - Revoking an enrollment token also revokes active child sessions.
 - `GET /api/agent-gateway/enrollments` reports heartbeat freshness with safe `token_ref` values and omits raw token ids.
 - Revoked tokens report `heartbeat_state=revoked`, not `fresh` or `stale`.
@@ -2512,6 +2582,11 @@ Current endpoint scope map:
 | `POST /api/agent-gateway/session/create` | valid enrollment token or local API key |
 | `GET /api/agent-gateway/sessions` | admin/local authority |
 | `POST /api/agent-gateway/session/revoke` | admin/local authority |
+| `POST /api/agent-gateway/session/revoke-self` | current active short-lived Session; exact self only |
+| `GET /api/agent-gateway/host-workers/status` | Host machine credential only; `tasks:read` contract |
+| `GET /api/agent-gateway/host-workers/fleet` | Host machine credential only; `tasks:read` contract |
+| `GET /api/agent-gateway/host-workers/adapter-readiness` | Host machine credential only; `tasks:read` contract |
+| `GET /api/agent-gateway/host-workers/stuck-tasks` | Host machine credential only; `tasks:read` contract |
 | `POST /api/agent-gateway/register` | `agents:write` |
 | `POST /api/agent-gateway/heartbeat` | `agents:heartbeat` |
 | `POST /api/agent-gateway/tasks` | `tasks:create` |
@@ -2530,6 +2605,7 @@ Current endpoint scope map:
 | `POST /api/agent-gateway/artifacts` | `artifacts:write` |
 | `GET /api/agent-gateway/knowledge/search` | `knowledge:read` |
 | `GET /api/agent-gateway/knowledge/evidence-packet` | `knowledge:read` |
+| `GET /api/agent-gateway/knowledge/context-packet` | `knowledge:read` |
 | `GET /api/agent-gateway/knowledge/retrieval-evidence-packet` | `knowledge:read` |
 | `POST /api/agent-gateway/knowledge/index` | `knowledge:write` |
 | `GET /api/agent-gateway/agent-plans` | `agent_plans:read` |

@@ -82,12 +82,15 @@ def http_json(base_url: str, path: str) -> tuple[int, dict]:
         return exc.code, body
 
 
-def http_post_json(base_url: str, path: str, payload: dict) -> tuple[int, dict]:
+def http_post_json(base_url: str, path: str, payload: dict, token: str | None = None) -> tuple[int, dict]:
     data = json.dumps(payload).encode("utf-8")
+    headers = {"Accept": "application/json", "Content-Type": "application/json"}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
     req = urllib.request.Request(
         base_url.rstrip("/") + path,
         data=data,
-        headers={"Accept": "application/json", "Content-Type": "application/json"},
+        headers=headers,
         method="POST",
     )
     try:
@@ -118,6 +121,108 @@ def run_cli(base_url: str) -> subprocess.CompletedProcess[str]:
 def leaked_secret(text: str) -> bool:
     markers = ["AGENTOPS_API_KEY", "Authorization:", "Bearer ", "agtok_", "agtsess_", "sk-", "ntn_"]
     return any(marker in text for marker in markers)
+
+
+def seed_local_stack_service_workers(base_url: str) -> dict[str, str]:
+    expected: dict[str, str] = {}
+    for adapter in ("hermes", "openclaw"):
+        agent_id = f"agt_worker_local_stack_{adapter}"
+        expected_status = "error" if adapter == "hermes" else "idle"
+        register_status, register_payload = http_post_json(base_url, "/api/agent-gateway/register", {
+            "workspace_id": "local-demo",
+            "agent_id": agent_id,
+            "name": f"Local Stack {adapter.title()} Worker",
+            "role": f"{adapter.title()} Worker",
+            "runtime_type": adapter,
+            "status": expected_status,
+        })
+        require(register_status in {200, 201}, f"{adapter} local-stack worker registration failed: {register_payload}")
+        require((register_payload.get("agent") or {}).get("status") == expected_status, f"{adapter} fixture status mismatch: {register_payload}")
+        expected[adapter] = agent_id
+    return expected
+
+
+def seed_fresh_daemon_service_workers(base_url: str) -> dict[str, str]:
+    service_scopes = [
+        "agents:write",
+        "agents:heartbeat",
+        "agent_plans:read",
+        "agent_plans:write",
+        "plan_evidence:read",
+        "plan_evidence:write",
+        "knowledge:read",
+        "knowledge:write",
+        "tasks:read",
+        "tasks:claim",
+        "runs:write",
+        "runtime_events:write",
+        "toolcalls:write",
+        "artifacts:write",
+        "memories:propose",
+        "evaluations:submit",
+        "audit:write",
+    ]
+    expected: dict[str, str] = {}
+    for adapter in ("hermes", "openclaw"):
+        agent_id = f"agt_worker_daemon_{adapter}"
+        status, enrollment = http_post_json(base_url, "/api/agent-gateway/enrollment/create", {
+            "workspace_id": "local-demo",
+            "agent_id": agent_id,
+            "name": f"Daemon {adapter.title()} Worker",
+            "runtime_type": adapter,
+            "scopes": service_scopes,
+            "ttl_days": 1,
+            "heartbeat_timeout_sec": 90,
+        })
+        require(status == 201 and enrollment.get("token"), f"{adapter} daemon enrollment failed: {status}")
+        status, session = http_post_json(
+            base_url,
+            "/api/agent-gateway/session/create",
+            {"ttl_sec": 900, "scopes": service_scopes},
+            token=enrollment["token"],
+        )
+        require(status == 201 and session.get("session_token"), f"{adapter} daemon session failed: {status}")
+        status, heartbeat = http_post_json(
+            base_url,
+            "/api/agent-gateway/heartbeat",
+            {"status": "idle", "summary": "Fresh daemon identity precedence fixture."},
+            token=session["session_token"],
+        )
+        require(
+            status == 200 and heartbeat.get("session_observation_recorded") is True,
+            f"{adapter} daemon heartbeat observation failed: {status}",
+        )
+        expected[adapter] = agent_id
+    return expected
+
+
+def validate_start_check_service_identity(base_url: str, expected: dict[str, str]) -> None:
+    for adapter, expected_agent_id in expected.items():
+        status, payload = http_json(base_url, f"/api/operator/start-check?adapter={adapter}&limit=4")
+        require(status == 200, f"{adapter} start-check failed: {status} {payload}")
+        local_run_path = payload.get("local_run_path") or {}
+        local_service = local_run_path.get("service_managed_loop") or {}
+        admission = payload.get("local_loop_admission_packet") or {}
+        deployment = admission.get("local_deployment") or {}
+        admission_service = deployment.get("service_managed_loop") or {}
+        managed_commands = (deployment.get("managed_execution_path") or {}).get("commands") or {}
+        require(local_service.get("agent_id") == expected_agent_id, f"{adapter} compact start-check lost service identity: {local_service}")
+        require(admission_service.get("agent_id") == expected_agent_id, f"{adapter} admission packet lost service identity: {admission_service}")
+        require(f"--agent-id {expected_agent_id}" in str(managed_commands.get("service_check") or ""), f"{adapter} managed service-check targets wrong identity: {managed_commands}")
+        require(f"--agent-id {expected_agent_id}" in str(managed_commands.get("service_control_load_confirm") or ""), f"{adapter} managed service load targets wrong identity: {managed_commands}")
+        bootstrap_status, bootstrap = http_json(base_url, f"/api/operator/loop-bootstrap?adapter={adapter}&limit=4")
+        require(bootstrap_status == 200, f"{adapter} loop-bootstrap failed: {bootstrap_status} {bootstrap}")
+        bootstrap_item = next((item for item in (bootstrap.get("items") or []) if item.get("adapter") == adapter), {})
+        bootstrap_commands = bootstrap_item.get("commands") or {}
+        for command_name in ("service_check", "service_install_preview", "service_install_confirm", "service_control_load_confirm"):
+            command = str(bootstrap_commands.get(command_name) or "")
+            require(f"--agent-id {expected_agent_id}" in command, f"{adapter} loop-bootstrap {command_name} targets wrong identity: {command}")
+            other_agent_id = (
+                f"agt_worker_local_stack_{adapter}"
+                if expected_agent_id == f"agt_worker_daemon_{adapter}"
+                else f"agt_worker_daemon_{adapter}"
+            )
+            require(f"--agent-id {other_agent_id}" not in command, f"{adapter} loop-bootstrap retained another service identity: {command}")
 
 
 def require(condition: bool, message: str) -> None:
@@ -258,7 +363,11 @@ def validate(payload: dict) -> None:
     for adapter_name in ["hermes", "openclaw"]:
         scoped_loop = service_managed_loops.get(adapter_name) or {}
         scoped_commands = scoped_loop.get("commands") or {}
+        service_agent_id = scoped_loop.get("agent_id")
         require(scoped_loop.get("adapter") == adapter_name, f"{adapter_name} service-managed loop adapter mismatch: {scoped_loop}")
+        require(service_agent_id in {f"agt_worker_daemon_{adapter_name}", f"agt_worker_local_stack_{adapter_name}"}, f"{adapter_name} service identity is not canonical: {scoped_loop}")
+        require(f"--agent-id {service_agent_id}" in str(scoped_commands.get("service_check") or ""), f"{adapter_name} service-check identity mismatch: {scoped_loop}")
+        require(f"--agent-id {service_agent_id}" in str(scoped_commands.get("service_control_restart_confirm") or ""), f"{adapter_name} restart identity mismatch: {scoped_loop}")
         require(f"--adapter {adapter_name}" in str(scoped_commands.get("service_check") or ""), f"{adapter_name} service-check command mismatch: {scoped_loop}")
         require(f"--adapter {adapter_name}" in str(scoped_commands.get("record_control_readback") or ""), f"{adapter_name} readback command mismatch: {scoped_loop}")
         require(f"--adapter {adapter_name}" in str(scoped_commands.get("service_control_load_confirm") or ""), f"{adapter_name} load confirm command mismatch: {scoped_loop}")
@@ -291,6 +400,23 @@ def exercise_service_control_receipt_readback(base_url: str, payload: dict) -> d
         "status": "verified",
         "result_summary": "Worker service-control preview inspected and service-check reviewed.",
     }
+    expected_signature = str(receipt_body.get("action_signature") or "")
+    require(expected_signature, f"service-control receipt signature missing: {service_step}")
+    wrong_signature = f"{expected_signature[:-1]}{'0' if expected_signature[-1] != '0' else '1'}"
+    stale_status, stale_payload = http_post_json(base_url, "/api/operator/action-receipts", {
+        **receipt_body,
+        "action_signature": wrong_signature,
+        "result_summary": "Stale signature fixture; must not satisfy the current action.",
+    })
+    require(stale_status == 201, f"stale-signature receipt record failed: {stale_status} {stale_payload}")
+    status_code, stale_readiness = http_json(base_url, "/api/local/readiness")
+    require(status_code == 200, f"local readiness reread after stale signature failed: {status_code} {stale_readiness}")
+    stale_step = next((step for step in (stale_readiness.get("local_run_path") or []) if step.get("step_id") == "preview_worker_service_control"), {})
+    stale_state = stale_step.get("receipt_state") or {}
+    require(stale_state.get("match") == "stale", f"same-command wrong-signature receipt was accepted as current: {stale_step}")
+    require(stale_state.get("current") is False, f"stale signature receipt reported current: {stale_step}")
+    require(stale_state.get("verified") is False, f"stale signature receipt reported verified: {stale_step}")
+
     receipt_status, receipt_payload = http_post_json(base_url, "/api/operator/action-receipts", receipt_body)
     require(receipt_status == 201, f"service-control receipt record failed: {receipt_status} {receipt_payload}")
     receipt = receipt_payload.get("receipt") or {}
@@ -404,11 +530,18 @@ def exercise_service_control_receipt_readback(base_url: str, payload: dict) -> d
     return reread_payload
 
 
-def run_checks(base_url: str, *, exercise_writeback: bool = False) -> int:
+def run_checks(base_url: str, *, exercise_writeback: bool = False, expected_service_agents: dict[str, str] | None = None) -> int:
     try:
         status_code, api_payload = http_json(base_url, "/api/local/readiness")
         require(status_code == 200, f"local readiness API failed: {status_code} {api_payload}")
         validate(api_payload)
+        for adapter, expected_agent_id in (expected_service_agents or {}).items():
+            scoped_loop = (api_payload.get("service_managed_loops") or {}).get(adapter) or {}
+            require(scoped_loop.get("agent_id") == expected_agent_id, f"{adapter} did not select fresh service identity: {scoped_loop}")
+            require(scoped_loop.get("agent_identity_source") == "fresh_service_worker", f"{adapter} identity source mismatch: {scoped_loop}")
+            require(scoped_loop.get("agent_registered") is True, f"{adapter} registered identity proof missing: {scoped_loop}")
+        if expected_service_agents:
+            validate_start_check_service_identity(base_url, expected_service_agents)
         receipt_readback_exercised = False
         if exercise_writeback:
             api_payload = exercise_service_control_receipt_readback(base_url, api_payload)
@@ -450,7 +583,14 @@ def main() -> int:
             proc = start_isolated_server(tmp_path / "agentops_mis.db", port, tmp_path / "server.log")
             try:
                 wait_for_server(base_url)
-                return run_checks(base_url, exercise_writeback=True)
+                registered_service_agents = seed_local_stack_service_workers(base_url)
+                validate_start_check_service_identity(base_url, registered_service_agents)
+                expected_service_agents = seed_fresh_daemon_service_workers(base_url)
+                return run_checks(
+                    base_url,
+                    exercise_writeback=True,
+                    expected_service_agents=expected_service_agents,
+                )
             finally:
                 stop_isolated_server(proc)
     return run_checks(args.base_url)

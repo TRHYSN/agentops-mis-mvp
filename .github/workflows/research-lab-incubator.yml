@@ -4,6 +4,8 @@ on:
   pull_request:
     paths:
       - "incubator/research-lab/**"
+      - "scripts/bwformer_research_lab_adapter_smoke.py"
+      - "scripts/prepare_bwformer_research_lab_smoke.py"
       - ".github/workflows/research-lab-incubator.yml"
   push:
     branches:
@@ -11,6 +13,8 @@ on:
       - "codex/osbi-v1-1-mainline"
     paths:
       - "incubator/research-lab/**"
+      - "scripts/bwformer_research_lab_adapter_smoke.py"
+      - "scripts/prepare_bwformer_research_lab_smoke.py"
       - ".github/workflows/research-lab-incubator.yml"
 
 permissions:
@@ -38,3 +42,5 @@ jobs:
         run: python -m compileall -q research_lab examples tests
       - name: Run protocol, provenance, and CLI contracts
         run: python -m unittest discover -s tests -p 'test_*.py' -v
+      - name: Run BWFormer adapter fixture contract
+        run: python ../../scripts/bwformer_research_lab_adapter_smoke.py

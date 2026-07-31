@@ -15,6 +15,182 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  worker-python-compatibility:
+    name: Runtime compatibility (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version:
+          - "3.10"
+          - "3.11"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Compile runtime compatibility surface
+        run: |
+          set -euo pipefail
+          python3 -m py_compile \
+            server.py \
+            agentops_mis_cli/relay_activation.py \
+            agentops_mis_cli/relay_activation_controller.py \
+            agentops_mis_cli/relay_activation_evidence.py \
+            agentops_mis_cli/relay_activation_journal.py \
+            agentops_mis_cli/relay_activation_preview.py \
+            agentops_mis_cli/relay_activation_recovery_controller.py \
+            agentops_mis_cli/relay_activation_recovery_executor.py \
+            agentops_mis_cli/relay_activation_recovery_preview.py \
+            agentops_mis_cli/relay_activation_scan.py \
+            agentops_mis_cli/relay_admin.py \
+            agentops_mis_cli/relay_daemon.py \
+            agentops_mis_cli/relay_systemd_read.py \
+            agentops_mis_cli/host.py \
+            agentops_mis_cli/host_log.py \
+            agentops_mis_cli/runtime_lock.py \
+            agentops_mis_cli/worker.py \
+            agentops_mis_core/worker_fleet.py \
+            scripts/run_local_stack.py \
+            scripts/relay_activation_controller_smoke.py \
+            scripts/relay_activation_evidence_smoke.py \
+            scripts/relay_activation_journal_smoke.py \
+            scripts/relay_activation_namespace_install_smoke.py \
+            scripts/relay_activation_production_store_smoke.py \
+            scripts/relay_activation_recovery_controller_smoke.py \
+            scripts/relay_activation_recovery_decision_smoke.py \
+            scripts/relay_activation_recovery_executor_smoke.py \
+            scripts/relay_activation_recovery_preview_smoke.py \
+            scripts/relay_activation_recovery_snapshot_smoke.py \
+            scripts/relay_activation_plan_smoke.py \
+            scripts/relay_activation_preview_smoke.py \
+            scripts/relay_activation_scan_smoke.py \
+            scripts/relay_linux_production_install_acceptance.py \
+            scripts/relay_linux_production_systemd_acceptance.py \
+            scripts/relay_linux_systemd_recovery_acceptance.py \
+            scripts/relay_systemd_mutation_smoke.py \
+            scripts/relay_config_parser_smoke.py \
+            scripts/relay_offline_status_smoke.py \
+            scripts/private_host_runtime_lock_smoke.py \
+            scripts/private_host_log_rotation_smoke.py \
+            scripts/worker_service_heartbeat_cadence_smoke.py \
+            scripts/worker_intake_heartbeat_fleet_smoke.py
+
+      - name: Run runtime compatibility smokes
+        run: |
+          set -euo pipefail
+          timeout 120s python3 scripts/private_host_runtime_lock_smoke.py
+          timeout 120s python3 scripts/relay_activation_controller_smoke.py
+          timeout 120s python3 scripts/relay_activation_evidence_smoke.py
+          timeout 120s python3 scripts/relay_activation_journal_smoke.py
+          timeout 120s python3 scripts/relay_activation_namespace_install_smoke.py
+          timeout 120s python3 scripts/relay_activation_production_store_smoke.py
+          timeout 120s python3 scripts/relay_activation_recovery_controller_smoke.py
+          timeout 120s python3 scripts/relay_activation_recovery_decision_smoke.py
+          timeout 120s python3 scripts/relay_activation_recovery_executor_smoke.py
+          timeout 120s python3 scripts/relay_activation_recovery_preview_smoke.py
+          timeout 120s python3 scripts/relay_activation_recovery_snapshot_smoke.py
+          timeout 120s python3 scripts/relay_activation_plan_smoke.py
+          timeout 120s python3 scripts/relay_activation_preview_smoke.py
+          timeout 120s python3 scripts/relay_activation_scan_smoke.py
+          timeout 120s python3 scripts/relay_systemd_mutation_smoke.py
+          timeout 120s python3 scripts/relay_config_parser_smoke.py
+          timeout 120s python3 scripts/relay_offline_status_smoke.py
+          timeout 120s python3 scripts/private_host_log_rotation_smoke.py
+          timeout 120s python3 scripts/worker_service_heartbeat_cadence_smoke.py
+          timeout 120s python3 scripts/worker_intake_heartbeat_fleet_smoke.py
+
+  relay-linux-systemd:
+    name: Relay recovery on real Linux systemd
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.11"
+
+      - name: Run disposable systemd recovery acceptance
+        run: |
+          set -euo pipefail
+          python_bin="$(command -v python3)"
+          sudo env \
+            AGENTOPS_RELAY_LINUX_SYSTEMD_ACCEPTANCE=1 \
+            PYTHONDONTWRITEBYTECODE=1 \
+            "$python_bin" \
+            scripts/relay_linux_systemd_recovery_acceptance.py
+
+  relay-linux-production-install:
+    name: Relay production install and systemd recovery on real Linux
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.11"
+
+      - name: Build exact release bundle without root
+        id: bundle
+        run: |
+          set -euo pipefail
+          output_dir="$RUNNER_TEMP/agentops-relay-production-acceptance"
+          result_file="$RUNNER_TEMP/agentops-relay-production-result.json"
+          install -d -m 0700 "$output_dir"
+          python3 scripts/build_relay_release.py \
+            --output-dir "$output_dir" > "$result_file"
+          bundle_name="$(
+            python3 -c \
+              'import json,sys; print(json.load(open(sys.argv[1]))["bundle"])' \
+              "$result_file"
+          )"
+          bundle_sha256="$(
+            python3 -c \
+              'import json,sys; print(json.load(open(sys.argv[1]))["bundle_sha256"])' \
+              "$result_file"
+          )"
+          printf 'bundle=%s/%s\n' "$output_dir" "$bundle_name" \
+            >> "$GITHUB_OUTPUT"
+          printf 'bundle_sha256=%s\n' "$bundle_sha256" \
+            >> "$GITHUB_OUTPUT"
+
+      - name: Run disposable production install acceptance
+        run: |
+          set -euo pipefail
+          python_bin="$(command -v python3)"
+          sudo env \
+            AGENTOPS_RELAY_LINUX_PRODUCTION_ACCEPTANCE=1 \
+            AGENTOPS_RELAY_LINUX_PRODUCTION_HARDEN_INSTALL_PARENTS=1 \
+            AGENTOPS_RELAY_LINUX_PRODUCTION_BUNDLE="${{ steps.bundle.outputs.bundle }}" \
+            AGENTOPS_RELAY_LINUX_PRODUCTION_BUNDLE_SHA256="${{ steps.bundle.outputs.bundle_sha256 }}" \
+            PYTHONDONTWRITEBYTECODE=1 \
+            "$python_bin" \
+            scripts/relay_linux_production_install_acceptance.py
+
+      - name: Run production journal and systemd acceptance
+        run: |
+          set -euo pipefail
+          python_bin="$(command -v python3)"
+          sudo env \
+            AGENTOPS_RELAY_LINUX_PRODUCTION_SYSTEMD_ACCEPTANCE=1 \
+            AGENTOPS_RELAY_LINUX_PRODUCTION_HARDEN_INSTALL_PARENTS=1 \
+            AGENTOPS_RELAY_LINUX_PRODUCTION_BUNDLE="${{ steps.bundle.outputs.bundle }}" \
+            AGENTOPS_RELAY_LINUX_PRODUCTION_BUNDLE_SHA256="${{ steps.bundle.outputs.bundle_sha256 }}" \
+            PYTHONDONTWRITEBYTECODE=1 \
+            "$python_bin" \
+            scripts/relay_linux_production_systemd_acceptance.py
+
   backend-deterministic:
     name: Backend deterministic smokes
     runs-on: ubuntu-latest
@@ -54,10 +230,97 @@ jobs:
           set -euo pipefail
           timeout 120s python3 scripts/redaction_policy_smoke.py
           timeout 120s python3 scripts/sqlite_pragmas_smoke.py
+          timeout 120s python3 scripts/sqlite_connection_lifecycle_smoke.py
           timeout 120s python3 scripts/sqlite_reliability_smoke.py
           timeout 120s python3 scripts/sqlite_concurrency_smoke.py
+          timeout 120s python3 scripts/audit_chain_concurrency_smoke.py
+          timeout 120s python3 scripts/task_requester_validation_smoke.py
           timeout 120s python3 scripts/migration_rollback_smoke.py
+          timeout 120s python3 scripts/workspace_agent_membership_migration_smoke.py
+          timeout 120s python3 scripts/agent_plan_approval_subject_migration_smoke.py
+          timeout 120s python3 scripts/memory_workspace_authority_migration_smoke.py
           timeout 120s python3 scripts/run_local_stack_smoke.py
+          timeout 120s python3 scripts/worker_service_output_resilience_smoke.py
+          timeout 120s python3 scripts/local_readiness_smoke.py --isolated-fixture
+          timeout 120s python3 scripts/private_host_runtime_lock_smoke.py
+          timeout 120s python3 scripts/worker_process_identity_smoke.py
+          timeout 120s python3 scripts/production_ui_host_smoke.py
+          timeout 120s python3 scripts/human_browser_auth_smoke.py
+          timeout 120s python3 scripts/human_password_recovery_smoke.py
+          timeout 120s python3 scripts/human_session_management_smoke.py
+          timeout 120s python3 scripts/human_console_pairing_smoke.py
+          timeout 120s python3 scripts/human_console_pairing_ui_smoke.py
+          timeout 120s python3 scripts/bounded_json_request_smoke.py
+          timeout 120s python3 scripts/human_auth_throttle_smoke.py
+          timeout 120s python3 scripts/private_host_forwarded_header_policy_smoke.py
+          timeout 120s python3 scripts/private_host_owner_browser_handoff_smoke.py
+          timeout 120s python3 scripts/private_host_auth_workspace_ui_smoke.py
+          timeout 120s python3 scripts/private_host_service_worker_presence_smoke.py
+          timeout 120s python3 scripts/private_host_worker_machine_read_smoke.py
+          timeout 120s python3 scripts/private_host_worker_ownership_smoke.py
+          timeout 120s python3 scripts/private_host_acceptance_client_smoke.py
+          timeout 120s python3 scripts/private_host_lifecycle_smoke.py
+          timeout 120s python3 scripts/private_host_doctor_actions_smoke.py
+          timeout 120s python3 scripts/private_host_background_service_smoke.py
+          timeout 120s python3 scripts/private_host_owner_bootstrap_cli_smoke.py
+          timeout 120s python3 scripts/host_cli_credential_binding_smoke.py
+          timeout 120s python3 scripts/private_host_storage_preflight_smoke.py
+          timeout 120s python3 scripts/private_host_backup_restore_smoke.py
+          timeout 120s python3 scripts/private_host_backup_prune_smoke.py
+          timeout 120s python3 scripts/private_host_log_rotation_smoke.py
+          timeout 120s python3 scripts/private_host_restart_persistence_smoke.py
+          timeout 120s python3 scripts/private_host_console_disconnect_smoke.py
+          timeout 120s python3 scripts/private_host_artifact_download_smoke.py
+          timeout 120s python3 scripts/private_host_acceptance_receipt_smoke.py
+          timeout 120s python3 scripts/private_host_audit_memory_ui_smoke.py
+          timeout 120s python3 scripts/private_host_second_device_ui_smoke.py
+          timeout 120s python3 scripts/browser_only_remote_console_spec_smoke.py
+          timeout 120s python3 scripts/local_l4_relay_transport_smoke.py
+          timeout 120s python3 scripts/private_host_relay_tls_smoke.py
+          timeout 120s python3 scripts/local_fake_relay_tunnel_smoke.py
+          timeout 120s python3 scripts/relay_tunnel_single_owner_smoke.py
+          timeout 120s python3 scripts/relay_persistent_epoch_smoke.py
+          timeout 120s python3 scripts/relay_tls_authenticated_tunnel_smoke.py
+          timeout 120s python3 scripts/relay_registration_publication_race_smoke.py
+          timeout 120s python3 scripts/relay_sni_router_smoke.py
+          timeout 120s python3 scripts/relay_daemon_smoke.py
+          timeout 120s python3 scripts/relay_config_parser_smoke.py
+          timeout 120s python3 scripts/relay_deploy_contract_smoke.py
+          timeout 120s python3 scripts/relay_release_bundle_smoke.py
+          timeout 120s python3 scripts/relay_offline_install_smoke.py
+          timeout 120s python3 scripts/relay_offline_status_smoke.py
+          timeout 120s python3 scripts/relay_activation_controller_smoke.py
+          timeout 120s python3 scripts/relay_activation_evidence_smoke.py
+          timeout 120s python3 scripts/relay_activation_journal_smoke.py
+          timeout 120s python3 scripts/relay_activation_namespace_install_smoke.py
+          timeout 120s python3 scripts/relay_activation_production_store_smoke.py
+          timeout 120s python3 scripts/relay_activation_recovery_controller_smoke.py
+          timeout 120s python3 scripts/relay_activation_recovery_decision_smoke.py
+          timeout 120s python3 scripts/relay_activation_recovery_executor_smoke.py
+          timeout 120s python3 scripts/relay_activation_recovery_preview_smoke.py
+          timeout 120s python3 scripts/relay_activation_recovery_snapshot_smoke.py
+          timeout 120s python3 scripts/relay_activation_plan_smoke.py
+          timeout 120s python3 scripts/relay_activation_preview_smoke.py
+          timeout 120s python3 scripts/relay_activation_scan_smoke.py
+          timeout 120s python3 scripts/relay_systemd_mutation_smoke.py
+          timeout 120s python3 scripts/local_relay_host_e2e_smoke.py
+          timeout 120s python3 scripts/relay_host_tls_proxy_smoke.py
+          timeout 120s python3 scripts/relay_connector_service_smoke.py
+          timeout 120s python3 scripts/private_host_relay_config_smoke.py
+          timeout 120s python3 scripts/private_host_relay_lifecycle_smoke.py
+          timeout 120s python3 scripts/private_host_relay_control_core_smoke.py
+          timeout 120s python3 scripts/private_host_relay_cli_control_smoke.py
+          timeout 120s python3 scripts/private_host_relay_owner_control_smoke.py
+          timeout 120s python3 scripts/private_host_relay_owner_control_ui_smoke.py
+          timeout 120s python3 scripts/private_host_post_response_action_smoke.py
+          timeout 120s python3 scripts/private_host_managed_restart_supervisor_smoke.py
+          timeout 120s python3 scripts/private_host_relay_restart_receipt_smoke.py
+          timeout 120s python3 scripts/private_host_relay_restart_recovery_smoke.py
+          timeout 120s python3 scripts/private_host_restart_start_reconciliation_smoke.py
+          timeout 120s python3 scripts/private_host_restart_audit_retention_smoke.py
+          timeout 120s python3 scripts/private_host_relay_managed_restart_rollback_smoke.py
+          timeout 120s python3 scripts/local_relay_connector_supervisor_smoke.py
+          timeout 120s python3 scripts/private_host_rc_status_smoke.py
           timeout 120s python3 scripts/release_branch_control_smoke.py
           timeout 120s python3 scripts/release_freeze_protocol_smoke.py
           timeout 120s python3 scripts/github_ci_evidence_smoke.py
@@ -111,6 +374,7 @@ jobs:
           timeout 120s python3 scripts/live_worker_loop_demo_slice_smoke.py
           timeout 120s python3 scripts/pixel_office_template_foundation_smoke.py
           timeout 120s python3 scripts/external_connector_runtime_inventory_smoke.py
+          timeout 120s python3 scripts/codex_plugin_contract_smoke.py
           timeout 120s python3 scripts/secret_scan_smoke.py
           timeout 120s python3 scripts/license_provenance_smoke.py
           timeout 120s python3 scripts/public_claims_release_gate_smoke.py
@@ -122,6 +386,7 @@ jobs:
           timeout 120s python3 scripts/knowledge_retrieval_quality_smoke.py
           timeout 120s python3 scripts/worker_knowledge_evidence_consumption_smoke.py
           timeout 120s python3 scripts/worker_intake_auto_plan_smoke.py
+          timeout 120s python3 scripts/worker_loop_supervision_soft_gate_smoke.py
           timeout 120s python3 scripts/worker_prompt_profile_smoke.py
           timeout 120s python3 scripts/worker_customer_delivery_approval_opt_in_smoke.py
           timeout 120s python3 scripts/work_delivery_graph_readback_smoke.py
@@ -161,7 +426,9 @@ jobs:
           timeout 120s python3 scripts/operator_live_product_readiness_smoke.py
           timeout 120s python3 scripts/live_worker_loop_demo_slice_smoke.py
           timeout 120s python3 scripts/agentops_worker_service_check_smoke.py
+          timeout 120s python3 scripts/agentops_worker_service_install_smoke.py
           timeout 120s python3 scripts/agentops_worker_service_control_smoke.py
+          timeout 120s python3 scripts/agentops_worker_local_config_smoke.py
           timeout 120s python3 scripts/local_runtime_identity_smoke.py
           timeout 120s python3 scripts/agentops_cli_connection_hint_smoke.py
           timeout 120s python3 scripts/worker_log_rotation_smoke.py
@@ -211,6 +478,9 @@ jobs:
           python3 scripts/runtime_capability_manifest_smoke.py --base-url "$AGENTOPS_BASE_URL"
           python3 scripts/runtime_connector_trust_smoke.py --base-url "$AGENTOPS_BASE_URL"
           python3 scripts/worker_adapter_readiness_smoke.py --base-url "$AGENTOPS_BASE_URL"
+          python3 scripts/worker_daemon_resilience_smoke.py --base-url "$AGENTOPS_BASE_URL"
+          python3 scripts/agent_gateway_session_smoke.py --base-url "$AGENTOPS_BASE_URL"
+          python3 scripts/worker_session_refresh_smoke.py --base-url "$AGENTOPS_BASE_URL"
           python3 scripts/enrollment_launch_steps_smoke.py --base-url "$AGENTOPS_BASE_URL"
           python3 scripts/remote_launch_packet_worker_smoke.py --base-url "$AGENTOPS_BASE_URL"
           python3 scripts/codex_worker_adapter_smoke.py
@@ -273,6 +543,13 @@ jobs:
           npm run test:api-transport-contract
           npm run test:api-transport-build-contract
           npm run build
+
+      - name: Private Host bundle smoke
+        run: |
+          set -euo pipefail
+          python3 scripts/private_host_macos_launcher_smoke.py
+          python3 scripts/private_host_bundle_smoke.py
+          python3 scripts/private_host_release_consumer_smoke.py
 
   commercial-next-boundary:
     name: Commercial Next production boundary

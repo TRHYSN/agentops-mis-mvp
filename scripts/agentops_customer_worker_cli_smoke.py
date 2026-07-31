@@ -5,6 +5,7 @@ from __future__ import annotations
 import datetime as dt
 import json
 import os
+import re
 import subprocess
 from pathlib import Path
 from urllib.error import HTTPError, URLError
@@ -59,7 +60,15 @@ def require(condition: bool, message: str) -> None:
 
 
 def secret_leaked(text: str) -> bool:
-    return any(marker in text for marker in ["Authorization:", "Bearer ", "agtok_", "agtsess_", "sk-", "ntn_"])
+    patterns = (
+        re.compile(r"Authorization:", re.IGNORECASE),
+        re.compile(r"\bBearer\s+[A-Za-z0-9._~+/=-]{12,}\b", re.IGNORECASE),
+        re.compile(r"\bagtok_[A-Za-z0-9_-]{16,}\b"),
+        re.compile(r"\bagtsess_[A-Za-z0-9_-]{16,}\b"),
+        re.compile(r"\bsk-[A-Za-z0-9_-]{20,}\b", re.IGNORECASE),
+        re.compile(r"\bntn_[A-Za-z0-9_-]{8,}\b", re.IGNORECASE),
+    )
+    return any(pattern.search(text) for pattern in patterns)
 
 
 def stamp() -> str:

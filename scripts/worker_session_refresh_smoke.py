@@ -141,6 +141,7 @@ def smoke(base_url: str, stamp: str) -> dict:
                 "tasks:read",
                 "tasks:claim",
                 "runs:write",
+                "runtime_events:write",
                 "toolcalls:write",
                 "artifacts:write",
                 "memories:propose",
@@ -163,6 +164,10 @@ def smoke(base_url: str, stamp: str) -> dict:
 
         worker = run_worker(base_url, agent_id, token)
         require(worker.get("processed") == 2, f"worker did not process both tasks: {worker}")
+        require((worker.get("terminal_heartbeat") or {}).get("sent") is True,
+                f"worker did not publish a graceful terminal heartbeat: {worker}")
+        require((worker.get("session_cleanup") or {}).get("revoked") is True,
+                f"worker did not revoke its final short-lived session: {worker}")
         sessions = worker.get("sessions") or []
         session_ids = [item.get("session_id") for item in sessions if item.get("session_id")]
         require(len(set(session_ids)) >= 2, f"worker did not refresh session in loop: {worker}")
@@ -187,6 +192,10 @@ def smoke(base_url: str, stamp: str) -> dict:
         require(all(item.get("parent_token_ref") for item in listed_sessions), f"session listing missing parent token refs: {sessions_payload}")
         require(not any(session_id in serialized for session_id in session_ids), f"session listing leaked raw refreshed session ids: {sessions_payload}")
         require(token_id not in serialized, f"session listing leaked raw parent token id: {sessions_payload}")
+        listed_by_ref = {item.get("session_ref"): item for item in listed_sessions}
+        final_session_ref = safe_ref("session_ref", session_ids[-1])
+        require((listed_by_ref.get(final_session_ref) or {}).get("session_state") == "revoked",
+                f"worker final session stayed active after graceful exit: {sessions_payload}")
 
         return {
             "agent_id": agent_id,
@@ -195,6 +204,7 @@ def smoke(base_url: str, stamp: str) -> dict:
             "token_ref": safe_ref("token_ref", token_id),
             "session_refs": sorted(expected_session_refs),
             "session_refresh_count": worker.get("state", {}).get("session_refresh_count"),
+            "session_cleanup_revoked": (worker.get("session_cleanup") or {}).get("revoked"),
             "knowledge_indexed": knowledge_index.get("indexed"),
             "token_omitted": True,
         }

@@ -1,0 +1,355 @@
+# Relay Linux Systemd Recovery Acceptance
+
+## Scope
+
+This acceptance runs the private one-step recovery executor against a real
+systemd manager and the real bound `systemctl` executable on a disposable
+GitHub-hosted Ubuntu VM.
+
+It installs one temporary `agentops-mis-relay.service` whose only process is
+`/usr/bin/sleep`. It performs no network operation and runs no Relay daemon.
+The workflow job is `Relay recovery on real Linux systemd` in
+`.github/workflows/ci.yml`.
+
+The same job now includes four real process-death gates. The first is at the
+confirmed `daemon_reload` boundary. The second is after durable
+`enable_requested` intent and the stable pre-mutation scan, but before
+`systemctl enable` starts. The third is after durable `start_requested`
+intent and the stable pre-mutation scan, but before `systemctl start` begins.
+The fourth is after the rollback receipt has been durably published but
+before the terminal revision is published. None
+simulates an exception: the parent starts an independent child, waits for a
+fixed pipe marker, confirms that the child is still alive, sends `SIGKILL`,
+and starts a new process to reopen and recover the same durable fixture
+journal.
+
+## Safety Guard
+
+The script refuses to run unless:
+
+- `AGENTOPS_RELAY_LINUX_SYSTEMD_ACCEPTANCE=1` is explicit;
+- the platform is Linux with `/run/systemd/system`;
+- effective UID is root; and
+- both the target unit and enablement link were absent before the test.
+
+The unit is created with `O_EXCL` and contains a fixed no-network payload. The
+cleanup path verifies that the unit bytes remain test-owned before it stops,
+disables, unlinks, reloads systemd, and clears failed state. Cleanup runs after
+both success and failure. A pre-existing or replaced unit is never deleted.
+
+## Real Execution Contract
+
+The smoke binds the real root-owned `systemctl` file identity, reads live state
+through `read_systemd_show`, and invokes the production
+`_run_bound_systemd_mutation` adapter from the confirmed recovery executor.
+The parser accepts either an empty invocation ID or the strict retained
+32-hex invocation ID that systemd may report after a previously active unit
+returns to `inactive`. It also accepts `ExecMainStatus=15`, which the fixed
+unit's successful default `SIGTERM` stop may retain, but only while the unit is
+inactive, its `Result` is `success`, and its `MainPID` is zero.
+Active units still require `ExecMainStatus=0`; failed results remain invalid.
+
+It exercises:
+
+1. durable `daemon_reload_requested` intent publication;
+2. one real confirmed daemon reload in an independent child;
+3. `SIGKILL` after the production mutation adapter has returned, but before
+   the executor can obtain or publish the post-mutation observation;
+4. an intent-only journal checkpoint after process death;
+5. a new process reopening the same journal and receiving exactly
+   `resume + record_observation`;
+6. strict target-mutation marker count `1` before and after recovery;
+7. a next recovery decision of `run_step + enable`, never another
+   `daemon_reload`;
+8. a second real process death after durable `enable_requested` revision 4
+   and the stable pre-mutation scan, while the production lifecycle lock is
+   held and before the enable mutation starts;
+9. fresh-process lock reacquisition, intent reuse, exactly one real enable
+   mutation, and exactly one observed revision 5;
+10. a third real process death after durable `start_requested` revision 6
+    and the stable pre-mutation scan, while the production lifecycle lock is
+    held and before the start mutation begins;
+11. fresh-process lock reacquisition, intent reuse, exactly one real start
+    mutation, and exactly one observed revision 7;
+12. forward verification without a mutation;
+13. confirmed rollback stop and disable;
+14. exact restored-state rollback verification;
+15. rollback receipt and terminal revision; and
+16. idempotent `service_state_rolled_back` completion.
+
+Every executor invocation still advances only one confirmed decision. The next
+step requires a new stable preview and decision hash.
+
+The mutation marker is an acceptance-only sidecar in the temporary directory.
+It counts only the confirmed transaction's target `daemon_reload`; setup and
+cleanup reloads are outside that marker. The pipe marker is emitted by the
+first post-mutation scanner call, so receiving it proves that the production
+mutation adapter returned while observation publication remains unreachable.
+
+The enable-intent gate uses a separate bounded mutation sidecar. The parent
+creates and syncs the empty `0600` sidecar before any production journal
+session opens, so recording the later mutation cannot change the bound
+production-root directory identity. The execution child then opens the
+production-shaped journal through the lifecycle-lock opener. The one-shot
+mutation runner validates exact operation `enable`, emits
+`enable_intent_persisted`, and blocks without invoking systemd. Reaching that
+boundary proves the executor already published and reloaded revision 4
+`enable_requested` and completed its stable pre-mutation scan. The parent
+proves the child is alive, the lifecycle lock is busy, systemd remains
+disabled and inactive, and the validated sidecar is still empty before
+sending `SIGKILL`.
+
+A fresh recovery process reacquires the lifecycle lock, previews exactly
+`resume + run_step + enable + resume_ready`, reuses the existing intent,
+requires the prepared sidecar to still exist and remain empty immediately
+before entering the real mutation, and matches its stable identity to the
+parent-prepared inode. The recovery child keeps one validated append descriptor
+open across the bound `systemctl enable` call and writes the mutation marker
+through that same descriptor rather than reopening the path. A missing or
+substituted sidecar fails closed before systemd mutation; an empty sidecar is
+not treated as a missing one. Recovery appends exactly one observed revision 5
+with `owns_enable=true` and `owns_start=false`, then reopens the locked journal,
+verifies systemd is enabled and inactive, and previews
+`resume + run_step + start + resume_ready`. The separate enable mutation
+sidecar must remain exactly one.
+
+The start-intent gate uses a third bounded mutation sidecar with the same
+precreation and root-binding protection. It starts only from observed
+revision 5 with systemd enabled and inactive. Its execution child opens the
+production-shaped journal while holding the lifecycle lock. The one-shot
+runner accepts only operation `start`, emits `start_intent_persisted`, and
+blocks before invoking systemd. Reaching the marker proves revision 6
+`start_requested` is durable and the stable pre-mutation scan completed.
+Before `SIGKILL`, the parent proves the child remains alive, the lifecycle
+lock is busy, systemd is still enabled and inactive, and the strict sidecar
+still records zero start mutations.
+
+The start sidecar reader names its only relaxed state `allow_empty`: it still
+requires the marker to exist as the same strict regular `0600` file. A missing
+marker is never interpreted as mutation count zero. Immediately before the
+first process starts, preparation returns a SHA-256 projection of the marker's
+device, inode, type, mode, owner, group, and link count. The parent passes that
+identity to both start children, and every empty/final count must match it.
+
+The gate also performs one bounded negative recovery before the successful
+one. After the recovery child has reopened revision 6, reused its
+`start_requested` intent, and reached the mutation runner, the acceptance-only
+injection redirects only the final marker open to a fixed sibling path that
+was proved absent and is never created. The canonical prepared marker remains
+untouched and identity-bound. The runner must stop at
+`start_intent_recover_child_mutation_preflight`; systemd must remain enabled
+and inactive, the journal must remain unchanged at revision 6, and the
+canonical marker must retain the parent-prepared identity. The final bounded
+result records `missing_marker_rejected_before_mutation=true`.
+
+The fresh recovery process reacquires the lock, previews exactly
+`resume + run_step + start + resume_ready`, reuses the same intent, and opens
+the identity-bound empty marker once with `O_APPEND`. It holds that validated
+descriptor across the real bound `systemctl start` and appends through the
+same descriptor without reopening the path. The final path and descriptor
+must still resolve to the prepared identity. Recovery performs exactly one
+start and appends exactly one observed revision 7 with `owns_enable=true` and
+`owns_start=true`. It then reopens the journal, verifies systemd is enabled
+and active, and previews the existing production `verify` step. The bounded
+result also records `mutation_marker_identity_bound=true`,
+`next_step=verify`, and `next_recovery_step=verify`; this fixture uses
+`/usr/bin/sleep`, so the gate does not execute or claim a real Relay protocol
+or network handshake.
+
+The rollback receipt gate begins only after an observed `verify` revision
+records `rollback_verified`, with both ownership flags false. The temporary
+journal uses the exact production namespace shape and lifecycle-lock opener.
+Its checkpoint wrapper delegates to the locked production journal session.
+Only after its real `publish_receipt()` method returns does the wrapper emit
+`rollback_receipt_published` through the anonymous pipe and block. Therefore
+the receipt file publication, file sync, hard-link publication, parent
+directory sync, temporary-file unlink, and final directory sync have
+completed, while the controller's `_load_after` call and terminal revision
+publication remain unreachable.
+
+Before `SIGKILL`, the parent proves that the live checkpoint child still owns
+the nonblocking lifecycle lock. After `SIGKILL`, it reacquires and validates
+that same lock, proves that exactly one canonical receipt exists, and confirms
+that the latest revision is still the observed rollback verification. A new
+recovery process then:
+
+1. reacquires the lifecycle lock and reopens the descriptor-bound journal
+   namespace;
+2. previews exactly
+   `terminalize + publish_terminal_revision + terminal + receipt_ready`;
+3. recomputes a decision hash for that recovered state;
+4. appends exactly one terminal revision without rewriting the receipt or
+   invoking a systemd mutation;
+5. reopens the journal again and previews exactly
+   `complete + none + terminal + journal_complete`; and
+6. confirms that completion performs zero writes and leaves systemd inactive
+   and disabled.
+
+This gate does not use a timing sleep. Receipt content, paths, and raw systemd
+output are never projected into the acceptance result.
+
+## Verification
+
+The Linux-only command is:
+
+```bash
+sudo env \
+  AGENTOPS_RELAY_LINUX_SYSTEMD_ACCEPTANCE=1 \
+  PYTHONDONTWRITEBYTECODE=1 \
+  python3 scripts/relay_linux_systemd_recovery_acceptance.py
+```
+
+Do not run it on a host where `agentops-mis-relay.service` already exists.
+
+Expected bounded result:
+
+```json
+{
+  "cleanup_ok": true,
+  "final_state": "service_state_rolled_back",
+  "forward_steps": [
+    "daemon_reload",
+    "enable",
+    "start",
+    "verify"
+  ],
+  "journal_scope": "temporary_fixture",
+  "linux_systemd": true,
+  "network_used": false,
+  "ok": true,
+  "operation": "relay_linux_systemd_recovery_acceptance",
+  "enable_intent_process_death": {
+    "checkpoint": "after_enable_intent_before_mutation",
+    "checkpoint_latest_revision": 4,
+    "child_exit_signal": "SIGKILL",
+    "intent_reused": true,
+    "journal_reopened": true,
+    "latest_revision": 5,
+    "lifecycle_lock_held_at_checkpoint": true,
+    "lifecycle_lock_reacquired": true,
+    "missing_marker_rejected_before_mutation": true,
+    "mutation_marker_identity_bound": true,
+    "mutation_count_after_recovery": 1,
+    "mutation_count_before_recovery": 0,
+    "mutation_replayed": false,
+    "next_step": "start",
+    "ok": true,
+    "owns_enable": true,
+    "owns_start": false,
+    "recovery_action": "resume",
+    "recovery_operation": "run_step",
+    "recovery_revision_write_count": 1,
+    "recovery_step": "enable",
+    "systemd_state": "enabled_inactive"
+  },
+  "start_intent_process_death": {
+    "checkpoint": "after_start_intent_before_mutation",
+    "checkpoint_latest_revision": 6,
+    "child_exit_signal": "SIGKILL",
+    "intent_reused": true,
+    "journal_reopened": true,
+    "latest_revision": 7,
+    "lifecycle_lock_held_at_checkpoint": true,
+    "lifecycle_lock_reacquired": true,
+    "missing_marker_rejected_before_mutation": true,
+    "mutation_marker_identity_bound": true,
+    "mutation_count_after_recovery": 1,
+    "mutation_count_before_recovery": 0,
+    "mutation_replayed": false,
+    "next_recovery_step": "verify",
+    "next_step": "verify",
+    "ok": true,
+    "owns_enable": true,
+    "owns_start": true,
+    "recovery_action": "resume",
+    "recovery_operation": "run_step",
+    "recovery_revision_write_count": 1,
+    "recovery_step": "start",
+    "systemd_state": "enabled_active"
+  },
+  "process_death": {
+    "checkpoint": "after_daemon_reload_before_observation",
+    "child_exit_signal": "SIGKILL",
+    "journal_reopened": true,
+    "latest_revision": 3,
+    "mutation_count": 1,
+    "mutation_replayed": false,
+    "next_step": "enable",
+    "observation_operation": "record_observation",
+    "ok": true
+  },
+  "receipt_process_death": {
+    "checkpoint": "after_rollback_receipt_before_terminal",
+    "child_exit_signal": "SIGKILL",
+    "completion_write_count": 0,
+    "decision_recomputed": true,
+    "final_state": "service_state_rolled_back",
+    "journal_reopened": true,
+    "lifecycle_lock_held_at_checkpoint": true,
+    "lifecycle_lock_reacquired": true,
+    "ok": true,
+    "receipt_count": 1,
+    "receipt_rewritten": false,
+    "receipt_sha256_unchanged": true,
+    "systemd_mutation_performed": false,
+    "terminal_revision_appended": true,
+    "terminal_write_count": 1
+  },
+  "rollback_steps": [
+    "rollback_stop",
+    "rollback_disable",
+    "verify"
+  ],
+  "stage": "complete",
+  "systemctl_bound": true
+}
+```
+
+`initial_reload_required` records whether the VM reported a stale unit after
+the intentional unit-file change. The setup still performs one real bound
+daemon reload even if that flag is false.
+
+macOS cannot execute this gate because it has no system-wide systemd manager.
+Local macOS verification is limited to compilation and the deterministic
+recovery executor/controller smokes. The process-death claim is CI-only until
+the existing Ubuntu job reports this exact source revision green.
+
+## Truth Boundary
+
+This is real systemd mutation and observation evidence, but it is not yet the
+full production installation acceptance:
+
+- the immutable journal remains in a temporary production-shaped namespace;
+  the receipt gate uses the production lifecycle-lock opener, but this is not
+  an installed-tree journal;
+- non-systemd prerequisite identities use bounded synthetic fixtures;
+- the production installed-tree scanner is not run against a provisioned
+  service account, Relay binary, configuration, TLS material, or route key;
+- process interruption is proven only for the forward `daemon_reload`
+  mutation-returned/observation-not-published window, the forward
+  `enable_requested`-persisted/mutation-not-started window, the forward
+  `start_requested`-persisted/mutation-not-started window, and the rollback
+  receipt-published/terminal-not-published window;
+- it does not prove an in-flight `systemctl enable`, the
+  enable-mutation-returned/observation-not-published ambiguity, an in-flight
+  `systemctl start`, the start-mutation-returned/observation-not-published
+  ambiguity, an arbitrary concurrent sidecar replacement after the final
+  pre-mutation check, a real Relay handshake, other steps, partial
+  journal/receipt publication, or installed-tree interruption; and
+- no CLI, API, browser caller, public Relay, DNS, or physical second-device
+  acceptance is enabled by this slice.
+
+Both enable and start sidecar identity plus held-descriptor checks cover
+ordinary crash recovery and non-concurrent path loss or substitution. They do
+not claim atomicity against a concurrently hostile root process that can
+mutate the temporary acceptance directory while the privileged systemd call
+is already in flight.
+
+The separate production installation, scanner, and journal-opener baseline is
+recorded in `RELAY_LINUX_PRODUCTION_INSTALL_ACCEPTANCE.md`, and
+`RELAY_LINUX_PRODUCTION_SYSTEMD_ACCEPTANCE.md` combines both baselines with the
+packaged Relay process and controller-store reopen boundaries. Actual process
+death at the remaining in-flight mutation, post-mutation observation, other
+step, partial publication, and ownership-ambiguous windows remains open.
+These four gates are not sufficient to expose the guarded operator CLI or
+claim public/operator readiness.

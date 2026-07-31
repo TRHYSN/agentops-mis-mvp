@@ -17,4 +17,6 @@ dependencies = []
 
 [project.scripts]
 agentops = "agentops_mis_cli.cli:main"
+agentops-relay = "agentops_mis_cli.relay_daemon:main"
+agentops-relayctl = "agentops_mis_cli.relay_admin:main"
 agentops-worker = "agentops_mis_cli.worker:main"

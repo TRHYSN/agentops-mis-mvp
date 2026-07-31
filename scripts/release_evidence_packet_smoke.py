@@ -66,6 +66,66 @@ TEST_COMMANDS = [
         "ci_step": "Offline safety smokes",
     },
     {
+        "id": "private_host_owner_browser_handoff",
+        "command": "python3 scripts/private_host_owner_browser_handoff_smoke.py",
+        "summary": "Setup-code-authorized Owner pairing handed to the local browser through scrubbed fragment state without argv/output/audit disclosure.",
+        "ci_step": "Offline safety smokes",
+    },
+    {
+        "id": "private_host_auth_workspace_ui",
+        "command": "python3 scripts/private_host_auth_workspace_ui_smoke.py",
+        "summary": "Locked AppShell authentication UI, bilingual administrator setup/login/recovery, theme controls and initialization-authority browser handoff projection.",
+        "ci_step": "Offline safety smokes",
+    },
+    {
+        "id": "human_password_recovery",
+        "command": "python3 scripts/human_password_recovery_smoke.py",
+        "summary": "Desktop-authority plus loopback-gated one-time password recovery, old-session revocation, replay rejection and credential/audit omission against an isolated database.",
+        "ci_step": "Offline safety smokes",
+    },
+    {
+        "id": "private_host_service_worker_presence",
+        "command": "python3 scripts/private_host_service_worker_presence_smoke.py",
+        "summary": "Independent service Workers contribute heartbeat-confirmed execution capacity without claiming Host process verification or executing a Runtime.",
+        "ci_step": "Offline safety smokes",
+    },
+    {
+        "id": "human_session_management",
+        "command": "python3 scripts/human_session_management_smoke.py",
+        "summary": "Owner-only browser Session list/revoke, current-Session preservation, role/CSRF/account isolation, safe references, audit omission and existing Workspace account UI.",
+        "ci_step": "Offline safety smokes",
+    },
+    {
+        "id": "private_host_worker_machine_read",
+        "command": "python3 scripts/private_host_worker_machine_read_smoke.py",
+        "summary": "Private Host keeps browser Worker routes behind Human Session while Host CLI read commands use a separate machine-only Gateway path; bound Agent tokens/sessions fail closed and reads do not mutate ledger or usage state.",
+        "ci_step": "Offline safety smokes",
+    },
+    {
+        "id": "private_host_worker_ownership",
+        "command": "python3 scripts/private_host_worker_ownership_smoke.py",
+        "summary": "Private Host refuses duplicate same-adapter local Workers, preserves explicit external Worker ownership through --no-workers, and never terminates an existing process automatically.",
+        "ci_step": "Offline safety smokes",
+    },
+    {
+        "id": "private_host_rc_status",
+        "command": "python3 scripts/private_host_rc_status_smoke.py",
+        "summary": "Current public Private Host prerelease provenance stays aligned while Owner, physical second-device, current-package Runtime and another-Mac gates remain explicitly open.",
+        "ci_step": "Offline safety smokes",
+    },
+    {
+        "id": "private_host_background_service",
+        "command": "python3 scripts/private_host_background_service_smoke.py",
+        "summary": "Preview-first host-only macOS LaunchAgent install/check/control/remove lifecycle with explicit confirmation, exact ownership and no Worker or credential material.",
+        "ci_step": "Offline safety smokes",
+    },
+    {
+        "id": "private_host_macos_launcher",
+        "command": "python3 scripts/private_host_macos_launcher_smoke.py",
+        "summary": "Managed user-level macOS launcher installs in a clean HOME, pins the validated Python runtime, initializes once, starts with no live workers, opens the existing Workspace, and uninstalls without deleting Host data.",
+        "ci_step": "Private Host bundle smoke",
+    },
+    {
         "id": "release_evidence_packet",
         "command": "python3 scripts/release_evidence_packet_smoke.py",
         "summary": "Runtime RC SHA, CI link/status, canonical test list and release-packet boundaries.",
@@ -394,6 +454,12 @@ TEST_COMMANDS = [
         "ci_step": "Offline safety smokes",
     },
     {
+        "id": "memory_workspace_authority_migration",
+        "command": "python3 scripts/memory_workspace_authority_migration_smoke.py",
+        "summary": "Legacy task-bound memories inherit task workspace authority exactly once while taskless legacy rows remain conservatively local-demo.",
+        "ci_step": "Offline safety smokes",
+    },
+    {
         "id": "approval_semantics_boundary",
         "command": "python3 scripts/approval_semantics_boundary_smoke.py",
         "summary": "Approval semantics keep role separation and do not collapse generic ledger approval into exact prepared-action execution claims.",
@@ -414,7 +480,7 @@ TEST_COMMANDS = [
     {
         "id": "worker_knowledge_evidence_consumption",
         "command": "python3 scripts/worker_knowledge_evidence_consumption_smoke.py",
-        "summary": "Agent worker consumes compact Knowledge Retrieval Evidence before adapter execution and records only packet/query hashes, retrieval ids, paths, source hashes and metrics in MIS evidence.",
+        "summary": "Agent worker consumes compact versioned Knowledge and same-workspace approved project/org Memory before adapter execution while candidate and cross-workspace Memory remain excluded; MIS records bounded hashes, identifiers and metrics only.",
         "ci_step": "Offline safety smokes",
     },
     {

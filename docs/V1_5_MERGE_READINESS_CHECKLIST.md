@@ -367,7 +367,7 @@ python3 scripts/agent_gateway_review_queue_smoke.py
 - [x] Use an appropriate local synchronous mode.
 - [x] Keep the verified write path short in the SQLite reliability smoke.
 - [x] Audit every long-running workflow path for model/network/subprocess calls held inside a write transaction.
-- [x] Each request/worker path opens its own connection through `server.db()` in the current local architecture.
+- [x] Each server request/background path owns a `server.db_session()` that preserves transaction semantics and closes its SQLite connection on normal and exceptional exit.
 - [x] Add a schema migration version table.
 
 Recommended local settings:
@@ -387,12 +387,14 @@ Concurrency acceptance:
 heartbeat + knowledge search + queue + approval: pass
 long subprocess held-write-transaction audit: pass via scripts/sqlite_long_transaction_audit_smoke.py
 locked/busy failures: zero
+1,000 concurrent dashboard reads: pass; macOS process FDs 41 -> 41 and idle SQLite handles 0 -> 0
 ```
 
 Required checks:
 
 ```bash
 python3 scripts/sqlite_pragmas_smoke.py
+python3 scripts/sqlite_connection_lifecycle_smoke.py
 python3 scripts/sqlite_reliability_smoke.py
 python3 scripts/sqlite_concurrency_smoke.py
 python3 scripts/sqlite_long_transaction_audit_smoke.py
@@ -547,6 +549,7 @@ live runtime suite
 ### Worker
 
 - [x] Mock one-shot and daemon pass. Guarded by `scripts/agentops_customer_worker_cli_smoke.py` and `scripts/agentops_worker_daemon_cli_smoke.py`.
+- [x] API-started local daemon start/restart targets the trusted configured base URL or canonical request origin instead of assuming port 8787. Guarded by `scripts/worker_daemon_resilience_smoke.py` and `docs/WORKER_DAEMON_REQUEST_ORIGIN_ACCEPTANCE.md` on an isolated non-default port.
 - [x] Retry/backoff pass. Guarded by `scripts/worker_adapter_retry_smoke.py`.
 - [x] Session refresh passes. Guarded by `scripts/worker_session_refresh_smoke.py` against an isolated server with `--no-enforce-intake` for the session-specific contract.
 - [x] Stuck recovery passes. Guarded by `scripts/worker_stuck_recovery_smoke.py`.

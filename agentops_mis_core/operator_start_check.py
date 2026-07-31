@@ -13,6 +13,13 @@ def _safe_text(value: Any, limit: int = 500) -> str:
     return text[:limit]
 
 
+def _local_service_agent_id(service_managed_loop: dict[str, Any], adapter: str) -> str:
+    daemon_id = f"agt_worker_daemon_{adapter}"
+    local_stack_id = f"agt_worker_local_stack_{adapter}"
+    candidate = str(service_managed_loop.get("agent_id") or "")
+    return candidate if candidate in {daemon_id, local_stack_id} else daemon_id
+
+
 def operator_start_check_gate(
     gate_id: str,
     *,
@@ -491,7 +498,7 @@ def compact_start_check_local_run_path(local: dict[str, Any], *, adapter: str | 
         service_managed_loop = service_managed_loops[requested_adapter]
     if requested_adapter:
         live_adapter = requested_adapter in {"hermes", "openclaw"}
-        service_agent_id = f"agt_worker_daemon_{requested_adapter}"
+        service_agent_id = _local_service_agent_id(service_managed_loop, requested_adapter)
         service_control_command = f"agentops worker service-control --manager launchd --action restart --adapter {requested_adapter} --agent-id {service_agent_id}"
         service_verify_command = f"agentops worker service-check --manager launchd --adapter {requested_adapter} --agent-id {service_agent_id}"
         service_action_signature = hashlib.sha256(
@@ -610,6 +617,7 @@ def compact_start_check_local_run_path(local: dict[str, Any], *, adapter: str | 
         service_managed_loop = {
             **service_managed_loop,
             "adapter": requested_adapter,
+            "agent_id": service_agent_id,
             "manager": service_managed_loop.get("manager") or "launchd",
             "commands": {
                 "service_install_preview": (
@@ -939,6 +947,30 @@ def operator_start_check_acceptance_packet(
     }
 
 
+def operator_start_check_local_readiness_gate(local: dict[str, Any] | None) -> dict[str, Any]:
+    """Keep structural/safety failures hard while allowing an empty-ledger cold start."""
+    local = local if isinstance(local, dict) else {}
+    structurally_safe = (
+        local.get("operation") == "local_readiness"
+        and local.get("live_execution_performed") is False
+        and (local.get("safety") or {}).get("server_executes_shell") is not True
+    )
+    local_status = str(local.get("status") or "unavailable")
+    if not structurally_safe:
+        gate_status = "blocked"
+    elif local_status in {"ready", "attention"}:
+        gate_status = "pass"
+    else:
+        gate_status = "attention"
+    return {
+        "ok": structurally_safe,
+        "status": gate_status,
+        "local_status": local_status,
+        "cold_start_capable": structurally_safe and gate_status == "attention",
+        "token_omitted": True,
+    }
+
+
 def operator_local_loop_admission_packet(
     *,
     status: str,
@@ -995,7 +1027,7 @@ def operator_local_loop_admission_packet(
     service_verify = service_step.get("verify_command") if service_matches_adapter else None
     dispatch_command = dispatch_step.get("command") if dispatch_matches_adapter else None
     dispatch_verify = dispatch_step.get("verify_command") if dispatch_matches_adapter else None
-    service_agent_id = f"agt_worker_daemon_{adapter}"
+    service_agent_id = _local_service_agent_id(service_managed_loop, adapter)
     service_install_confirm_run = " --confirm-run" if live_required else ""
     launchd_service_install_preview = (
         "agentops worker service-install "
@@ -1011,8 +1043,8 @@ def operator_local_loop_admission_packet(
     systemd_service_install_confirm = f"{systemd_service_install_preview} --confirm-install"
     if live_required:
         start_worker_command = start_worker_command or f"agentops worker start --adapter {adapter} --confirm-run --poll-interval 5 --max-tasks 0"
-        service_command = service_command or f"agentops worker service-control --manager launchd --action restart --adapter {adapter} --agent-id agt_worker_daemon_{adapter}"
-        service_verify = service_verify or f"agentops worker service-check --manager launchd --adapter {adapter} --agent-id agt_worker_daemon_{adapter}"
+        service_command = service_command or f"agentops worker service-control --manager launchd --action restart --adapter {adapter} --agent-id {service_agent_id}"
+        service_verify = service_verify or f"agentops worker service-check --manager launchd --adapter {adapter} --agent-id {service_agent_id}"
         dispatch_command = acceptance_commands.get("live_dispatch_template") or (
             "agentops workflow run-task "
             f"--adapter {adapter} "
@@ -1024,8 +1056,8 @@ def operator_local_loop_admission_packet(
         dispatch_verify = dispatch_verify or f"agentops operator live-product-readiness --require-adapter {adapter}"
     else:
         start_worker_command = start_worker_command or f"agentops worker start --adapter {adapter} --poll-interval 5 --max-tasks 0"
-        service_command = service_command or f"agentops worker service-control --manager launchd --action restart --adapter {adapter} --agent-id agt_worker_daemon_{adapter}"
-        service_verify = service_verify or f"agentops worker service-check --manager launchd --adapter {adapter} --agent-id agt_worker_daemon_{adapter}"
+        service_command = service_command or f"agentops worker service-control --manager launchd --action restart --adapter {adapter} --agent-id {service_agent_id}"
+        service_verify = service_verify or f"agentops worker service-check --manager launchd --adapter {adapter} --agent-id {service_agent_id}"
         dispatch_command = dispatch_command or acceptance_commands.get("live_dispatch_template") or (
             "agentops workflow run-task "
             f"--adapter {adapter} "
@@ -1067,16 +1099,18 @@ def operator_local_loop_admission_packet(
         or f"agentops worker service-control --manager launchd --action restart --adapter {adapter} --agent-id {service_agent_id} --confirm-control"
     )
     evidence_report_command = "agentops operator evidence-report --run-id <run_id> --limit 1"
-    service_control_action_signature = hashlib.sha256(
-        f"operator_start_check.service_control_preview:{adapter}:{service_command}:{service_verify}".encode("utf-8")
+    service_control_action_id = f"local_readiness.service_control_preview.{adapter}"
+    service_control_source = str(service_step.get("source") or service_control_action_id)
+    service_control_action_signature = str(service_step.get("action_signature") or "").strip() or hashlib.sha256(
+        f"local_readiness.service_control_preview:{adapter}:{service_command}:{service_verify}".encode("utf-8")
     ).hexdigest()
     service_control_receipt_command = " ".join(shlex.quote(str(part)) for part in [
         "agentops", "operator", "record-action-receipt",
         "--action-command", service_command,
         "--verify-command", service_verify,
-        "--action-id", f"operator_start_check.service_control_preview.{adapter}",
+        "--action-id", service_control_action_id,
         "--action-signature", service_control_action_signature,
-        "--source", f"operator_start_check.service_control_preview.{adapter}",
+        "--source", service_control_source,
         "--status", "verified",
         "--result-summary", f"{adapter} worker service-control preview inspected and service-check reviewed.",
         "--confirm-record",
@@ -1084,7 +1118,7 @@ def operator_local_loop_admission_packet(
     service_control_readback_command = " ".join(shlex.quote(str(part)) for part in [
         "agentops", "operator", "record-control-readback",
         "--receipt-id", str(service_managed_loop.get("receipt_id") or "<receipt_id>"),
-        "--source", f"operator_start_check.service_control_preview.{adapter}.control_readback",
+        "--source", f"{service_control_source}.control_readback",
         "--control-readback-json", json.dumps({
             "before": {
                 "step_id": "preview_worker_service_control",

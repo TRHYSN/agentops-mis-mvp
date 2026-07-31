@@ -46,6 +46,7 @@ def blocked_supervision(
     agent_id: str | None = None,
     plan_quality_attention: bool = False,
     service_closure_attention: bool = False,
+    service_closure_hard: bool = False,
     operational_attention: bool = False,
 ) -> dict:
     record_first = plan_quality_attention or service_closure_attention
@@ -81,7 +82,7 @@ def blocked_supervision(
         "service_managed_loop_ready": False,
         "service_active_loop_ready": False,
         "service_loaded": False,
-        "hard_run_start_gate": False,
+        "hard_run_start_gate": service_closure_hard,
         "server_executes_shell": False,
         "token_omitted": True,
     }
@@ -162,7 +163,7 @@ def blocked_supervision(
                         "step": "record_service_control_receipt" if service_closure_attention else None,
                         "phase": "RECORD" if service_closure_attention else None,
                         "command": recommended_next if service_closure_attention else None,
-                        "hard_run_start_gate": False,
+                        "hard_run_start_gate": service_closure_hard,
                         "server_executes_shell": False,
                         "token_omitted": True,
                     },
@@ -322,9 +323,10 @@ class FakeWorkerClient:
     agent_id = "agt_worker_supervision_smoke"
     api_key = ""
 
-    def __init__(self, *, plan_quality_attention: bool = True, service_closure_attention: bool = False) -> None:
+    def __init__(self, *, plan_quality_attention: bool = True, service_closure_attention: bool = False, service_closure_hard: bool = False) -> None:
         self.plan_quality_attention = plan_quality_attention
         self.service_closure_attention = service_closure_attention
+        self.service_closure_hard = service_closure_hard
         self.posts: list[tuple[str, dict]] = []
         self.gets: list[tuple[str, dict | None]] = []
 
@@ -369,6 +371,7 @@ class FakeWorkerClient:
                 agent_id=self.agent_id,
                 plan_quality_attention=self.plan_quality_attention,
                 service_closure_attention=self.service_closure_attention,
+                service_closure_hard=self.service_closure_hard,
             )
         if path.startswith("/api/agent-gateway/agent-plans/") and path.endswith("/verify"):
             return {"verification": {"pass": True, "token_omitted": True}}
@@ -456,7 +459,11 @@ def verify_worker_service_closure_consumption(failures: list[str]) -> dict:
             raise AssertionError("adapter execution should be blocked by service closure")
 
         worker.execute_adapter_with_retries = fail_if_called
-        client = FakeWorkerClient(plan_quality_attention=False, service_closure_attention=True)
+        client = FakeWorkerClient(
+            plan_quality_attention=False,
+            service_closure_attention=True,
+            service_closure_hard=True,
+        )
         result = worker.process_one_task(client, args)
     finally:
         worker.execute_adapter_with_retries = original_execute
@@ -482,7 +489,7 @@ def verify_worker_service_closure_consumption(failures: list[str]) -> dict:
     require(service_closure.get("phase") == "RECORD", f"worker service closure phase missing: {gate}", failures)
     require("--confirm-record" in str(service_closure.get("command") or ""), f"worker service closure command missing confirm proof: {gate}", failures)
     require(service_closure.get("gate_status") == "attention", f"worker service closure gate status missing: {gate}", failures)
-    require(service_closure.get("hard_run_start_gate") is False, f"worker service closure should remain non-hard gate: {gate}", failures)
+    require(service_closure.get("hard_run_start_gate") is True, f"worker hard service closure gate missing: {gate}", failures)
     require(service_closure.get("server_executes_shell") is False, f"worker service closure shell proof mismatch: {gate}", failures)
     require(any((payload.get("metadata") or {}).get("loop_supervision") for payload in audit_posts), "worker service closure audit missing loop supervision metadata", failures)
     return result

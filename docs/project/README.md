@@ -4,14 +4,16 @@ This directory is the versioned entry point for project continuity. Read it befo
 
 ## Required Reading Order
 
-1. [`PROJECT_STATE.md`](./PROJECT_STATE.md) — current verified facts, milestone, capability baseline, and unknowns.
+1. [`CURRENT_CONTEXT_SNAPSHOT.md`](./CURRENT_CONTEXT_SNAPSHOT.md) — current verified branch, source/install boundary, runtime evidence, CI truth, and next action.
 2. [`DECISIONS.md`](./DECISIONS.md) — accepted cross-cutting decisions and their consequences.
 3. [`BACKLOG.md`](./BACKLOG.md) — prioritized work, status, and acceptance evidence.
-4. [`HANDOFF.md`](./HANDOFF.md) — the latest exact continuation point.
-5. [`PROJECT_OPERATING_RULES.md`](./PROJECT_OPERATING_RULES.md) — authority, state machine, Project Delta, preflight, and review rules.
-6. [`CHATGPT_PROJECT_INSTRUCTIONS.md`](./CHATGPT_PROJECT_INSTRUCTIONS.md) — ready-to-paste Project Instructions for ChatGPT.
-7. [`../../AGENTS.md`](../../AGENTS.md) — repository-wide instructions.
-8. [`../../.agents/skills/project-ledger/SKILL.md`](../../.agents/skills/project-ledger/SKILL.md) — reusable project-ledger workflow.
+4. [`PROJECT_STATE.md`](./PROJECT_STATE.md) — historical governance and v1.5 baseline; current operational fields are superseded by the snapshot.
+5. [`HANDOFF.md`](./HANDOFF.md) — historical 2026-06-22 handoff; use the snapshot for the live continuation point.
+6. [`PROJECT_OPERATING_RULES.md`](./PROJECT_OPERATING_RULES.md) — authority, state machine, Project Delta, preflight, and review rules.
+7. [`CODEX_SESSION_RETENTION_ACCEPTANCE.md`](./CODEX_SESSION_RETENTION_ACCEPTANCE.md) — summarize-then-expire safety boundary for local Codex history.
+8. [`CHATGPT_PROJECT_INSTRUCTIONS.md`](./CHATGPT_PROJECT_INSTRUCTIONS.md) — ready-to-paste Project Instructions for ChatGPT.
+9. [`../../AGENTS.md`](../../AGENTS.md) — repository-wide instructions.
+10. [`../../.agents/skills/project-ledger/SKILL.md`](../../.agents/skills/project-ledger/SKILL.md) — reusable project-ledger workflow.
 
 Then read:
 

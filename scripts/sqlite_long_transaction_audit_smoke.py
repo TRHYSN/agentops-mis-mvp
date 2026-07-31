@@ -17,6 +17,9 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 SERVER_PATH = ROOT / "server.py"
 TRANSACTION_PREFIXES = ("BEGIN", "SAVEPOINT", "START TRANSACTION")
+ALLOWED_TRANSACTION_STATEMENTS = {
+    ("sqlite_atomic_write", "BEGIN IMMEDIATE"),
+}
 
 
 def dotted_name(node: ast.AST) -> str:
@@ -126,8 +129,24 @@ def static_audit() -> dict:
                     "sql_prefix": normalized_sql_prefix(sql),
                 })
 
-    if transaction_statements:
-        failures.append(f"explicit transaction statements found: {transaction_statements}")
+    allowed_transaction_statements = [
+        item
+        for item in transaction_statements
+        if (item["function"], item["sql_prefix"]) in ALLOWED_TRANSACTION_STATEMENTS
+    ]
+    unexpected_transaction_statements = [
+        item
+        for item in transaction_statements
+        if (item["function"], item["sql_prefix"]) not in ALLOWED_TRANSACTION_STATEMENTS
+    ]
+    if unexpected_transaction_statements:
+        failures.append(
+            f"unexpected explicit transaction statements found: {unexpected_transaction_statements}"
+        )
+    if len(allowed_transaction_statements) != 1:
+        failures.append(
+            "sqlite_atomic_write must own exactly one BEGIN IMMEDIATE statement"
+        )
     if not any(item["function"] == "db" and item["isolation_level"] is None for item in sqlite_connects):
         failures.append("server.db() does not create an explicit autocommit SQLite connection")
     if not slow_calls:
@@ -138,7 +157,8 @@ def static_audit() -> dict:
         "sqlite_connects": sqlite_connects,
         "slow_call_count": len(slow_calls),
         "slow_calls": slow_calls,
-        "transaction_statements": transaction_statements,
+        "transaction_statements": unexpected_transaction_statements,
+        "allowed_transaction_statements": allowed_transaction_statements,
         "failures": failures,
     }
 

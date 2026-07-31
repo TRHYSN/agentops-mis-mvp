@@ -13,6 +13,540 @@ import type {
 
 const API_BASE = __AGENTOPS_API_BASE__;
 const HUMAN_SESSION_REQUIRED = __AGENTOPS_HUMAN_SESSION_REQUIRED__;
+const HUMAN_AUTH_CSRF_KEY = "agentops-human-auth-csrf";
+export const HUMAN_AUTH_UNAUTHORIZED_EVENT = "agentops:human-auth-unauthorized";
+const HUMAN_SESSION_UNAUTHORIZED_ERRORS = new Set([
+  "human_auth_required",
+  "human_session_invalid",
+  "human_session_expired",
+]);
+
+export interface HumanAuthUser {
+  account_id?: string;
+  user_id?: string;
+  workspace_id?: string;
+  username: string;
+  display_name?: string;
+  role?: string;
+}
+
+export interface HumanAuthStatus {
+  required: boolean;
+  authenticated: boolean;
+  user?: HumanAuthUser;
+  bootstrap_required: boolean;
+  password_recovery_available?: boolean;
+  password_recovery_local_only?: boolean;
+  csrf_token?: string;
+}
+
+export interface HumanAuthSession {
+  user: HumanAuthUser;
+  csrf_token: string;
+}
+
+export interface HumanPasswordRecoveryStart {
+  operation: "password_recovery_start";
+  recovery_authority: string;
+  expires_at: string;
+  local_host_only: true;
+  single_use: true;
+  recovery_authority_ephemeral: true;
+}
+
+export interface HumanBrowserSession {
+  session_ref: string;
+  status: "active" | "revoked" | "expired";
+  current: boolean;
+  created_at: string;
+  expires_at: string;
+  last_seen_at?: string | null;
+  revoked_at?: string | null;
+}
+
+export interface HumanBrowserSessionsPayload {
+  provider: string;
+  operation: string;
+  sessions: HumanBrowserSession[];
+  current_session_ref: string;
+  active_count: number;
+  session_count: number;
+  session_id_omitted: boolean;
+  session_hash_omitted: boolean;
+  token_omitted: boolean;
+}
+
+export interface HumanBrowserSessionRevokePayload {
+  provider: string;
+  operation: string;
+  status: string;
+  revoked_count: number;
+  revoked_session_refs: string[];
+  current_session_ref: string;
+  current_session_preserved: boolean;
+  session_id_omitted: boolean;
+  session_hash_omitted: boolean;
+  token_omitted: boolean;
+}
+
+export type HostRelayAction = "enable" | "disable";
+export type HostRelayDisplayState =
+  | "disabled"
+  | "enabled"
+  | "prepared"
+  | "pending"
+  | "restart_scheduled"
+  | "manual_restart_required"
+  | "restart_required"
+  | "rolled_back"
+  | "rollback_failed"
+  | "unavailable";
+
+export interface HostRelayStatusPayload {
+  state: HostRelayDisplayState;
+  active_enabled: boolean;
+  control_available: boolean;
+  transition_pending: boolean;
+  restart_required: boolean;
+  restart_pending?: boolean;
+  rollback_armed?: boolean;
+}
+
+export interface HostRelayTransitionPayload extends HostRelayStatusPayload {
+  action: HostRelayAction;
+  transition_ref: string;
+}
+
+export type HumanPairingRole = "operator" | "approver" | "viewer";
+
+export interface HumanPairingInvitation {
+  invitation_ref: string;
+  role: HumanPairingRole;
+  label?: string | null;
+  status: "active" | "redeemed" | "revoked" | "expired" | "locked";
+  created_at: string;
+  expires_at: string;
+  redeemed_at?: string | null;
+  revoked_at?: string | null;
+  attempt_count?: number;
+  max_attempts?: number;
+}
+
+export interface HumanPairingInvitationsPayload {
+  invitations: HumanPairingInvitation[];
+  active_count?: number;
+  invitation_count?: number;
+  secret_omitted?: true;
+  pairing_secret_omitted?: true;
+}
+
+export interface HumanPairingInvitationCreated {
+  invitation_ref: string;
+  pairing_secret: string;
+  secret_omitted?: false;
+  pairing_secret_omitted?: false;
+  pairing_secret_ephemeral?: true;
+  role: HumanPairingRole;
+  label?: string | null;
+  expires_at: string;
+}
+
+export interface HumanPairedDevice {
+  device_ref: string;
+  username?: string;
+  display_name?: string | null;
+  role: HumanPairingRole;
+  label?: string | null;
+  status: "active" | "revoked";
+  paired_at?: string;
+  created_at?: string;
+  last_seen_at?: string | null;
+  revoked_at?: string | null;
+}
+
+export interface HumanPairedDevicesPayload {
+  devices: HumanPairedDevice[];
+  active_count?: number;
+  device_count?: number;
+  device_secret_omitted?: true;
+}
+
+export class HumanAuthRequestError extends Error {
+  readonly code: string;
+
+  constructor(code: string) {
+    super(code);
+    this.name = "HumanAuthRequestError";
+    this.code = code;
+  }
+}
+
+export type PrivateHostAcceptanceCheckId =
+  | "human_session"
+  | "local_readiness"
+  | "tasks_readable"
+  | "evaluations_readable"
+  | "approvals_readable"
+  | "memories_readable"
+  | "audit_readable"
+  | "artifacts_readable"
+  | "marker_task_readable";
+
+export interface PrivateHostAcceptanceCheck {
+  id: PrivateHostAcceptanceCheckId;
+  ok: boolean;
+  count?: number;
+  status?: string;
+  error?: string;
+}
+
+export interface PrivateHostAcceptanceSnapshot {
+  checked_at: string;
+  checks: PrivateHostAcceptanceCheck[];
+  counts: Record<string, number>;
+  related_ids: { marker_task_id?: string };
+  actor: {
+    workspace_id?: string;
+    user_id?: string;
+    role?: string;
+  };
+}
+
+export interface PrivateHostAcceptanceMarker {
+  receipt_id: string;
+  task_id: string;
+  title: string;
+}
+
+export interface PrivateHostAuthorityReceipt {
+  receipt_id: string;
+  host_version: string;
+  git_commit: string;
+  run_id: string;
+  adapter: string;
+  status: "completed";
+  evaluation: {
+    score: number;
+    pass_fail: "pass";
+  };
+  artifact_id: string;
+  plan_manifest_id: string;
+  artifact_metadata_sha256: string;
+  payload_sha256: string;
+}
+
+function readHumanAuthCsrf(): string {
+  if (typeof window === "undefined") return "";
+  return window.sessionStorage.getItem(HUMAN_AUTH_CSRF_KEY) || "";
+}
+
+export function setHumanAuthCsrf(token?: string | null) {
+  if (typeof window === "undefined") return;
+  if (token) {
+    window.sessionStorage.setItem(HUMAN_AUTH_CSRF_KEY, token);
+  } else {
+    window.sessionStorage.removeItem(HUMAN_AUTH_CSRF_KEY);
+  }
+}
+
+function isStateChangingRequest(method?: string): boolean {
+  const normalized = (method || "GET").toUpperCase();
+  return !["GET", "HEAD", "OPTIONS"].includes(normalized);
+}
+
+function humanAuthHeaders(init?: RequestInit): Headers {
+  const headers = new Headers(init?.headers);
+  if (!headers.has("Content-Type") && init?.body !== undefined) {
+    headers.set("Content-Type", "application/json");
+  }
+  if (isStateChangingRequest(init?.method) && !headers.has("X-AgentOps-CSRF")) {
+    const csrfToken = readHumanAuthCsrf();
+    if (csrfToken) headers.set("X-AgentOps-CSRF", csrfToken);
+  }
+  return headers;
+}
+
+async function isHumanSessionUnauthorized(response: Response): Promise<boolean> {
+  if (response.status !== 401) return false;
+  try {
+    const payload = await response.clone().json() as { error?: unknown };
+    return HUMAN_SESSION_UNAUTHORIZED_ERRORS.has(String(payload.error || ""));
+  } catch {
+    return false;
+  }
+}
+
+async function humanAwareFetch(path: string, init?: RequestInit): Promise<Response> {
+  const response = await fetch(`${API_BASE}${path}`, {
+    ...init,
+    credentials: "include",
+    headers: humanAuthHeaders(init),
+  });
+  if (!path.startsWith("/human-auth/") && await isHumanSessionUnauthorized(response)) {
+    setHumanAuthCsrf(null);
+    if (typeof window !== "undefined") {
+      window.dispatchEvent(new CustomEvent(HUMAN_AUTH_UNAUTHORIZED_EVENT));
+    }
+  }
+  return response;
+}
+
+export async function getHumanAuthStatus(): Promise<HumanAuthStatus> {
+  const status = await apiJson<HumanAuthStatus>("/human-auth/status");
+  if (status.csrf_token) setHumanAuthCsrf(status.csrf_token);
+  return status;
+}
+
+export async function loginHuman(input: { username: string; password: string }): Promise<HumanAuthSession> {
+  const session = await apiJson<HumanAuthSession>("/human-auth/login", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+  setHumanAuthCsrf(session.csrf_token);
+  return session;
+}
+
+export async function bootstrapHuman(input: {
+  setup_code: string;
+  username: string;
+  password: string;
+  display_name?: string;
+}): Promise<HumanAuthSession> {
+  const session = await apiJson<HumanAuthSession>("/human-auth/bootstrap", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+  setHumanAuthCsrf(session.csrf_token);
+  return session;
+}
+
+export async function startHumanPasswordRecovery(setupCode: string): Promise<HumanPasswordRecoveryStart> {
+  return apiJson<HumanPasswordRecoveryStart>("/human-auth/password-recovery/start", {
+    method: "POST",
+    body: JSON.stringify({ setup_code: setupCode }),
+  });
+}
+
+export async function completeHumanPasswordRecovery(input: {
+  recovery_authority: string;
+  username: string;
+  password: string;
+}): Promise<HumanAuthSession> {
+  const session = await apiJson<HumanAuthSession>("/human-auth/password-recovery/complete", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+  setHumanAuthCsrf(session.csrf_token);
+  return session;
+}
+
+export async function logoutHuman(): Promise<void> {
+  await apiJson<Record<string, unknown>>("/human-auth/logout", { method: "POST", body: "{}" });
+  setHumanAuthCsrf(null);
+}
+
+export async function loadHumanBrowserSessions(): Promise<HumanBrowserSessionsPayload> {
+  return apiJson<HumanBrowserSessionsPayload>("/human-auth/sessions");
+}
+
+export async function revokeHumanBrowserSession(input: { session_ref: string } | { all_other: true }): Promise<HumanBrowserSessionRevokePayload> {
+  return apiJson<HumanBrowserSessionRevokePayload>("/human-auth/sessions/revoke", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+function hostRelayRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : {};
+}
+
+function hostRelayBoolean(value: unknown): boolean {
+  return value === true || value === 1 || value === "1" || value === "true";
+}
+
+function hostRelayOptionalBoolean(value: unknown): boolean | undefined {
+  if (value === true || value === 1 || value === "1" || value === "true") return true;
+  if (value === false || value === 0 || value === "0" || value === "false") return false;
+  return undefined;
+}
+
+function normalizeHostRelayState(value: unknown): HostRelayStatusPayload {
+  const root = hostRelayRecord(value);
+  const relay = hostRelayRecord(root.relay);
+  const status = hostRelayRecord(root.status);
+  const transition = hostRelayRecord(root.transition);
+  const source = Object.keys(relay).length
+    ? relay
+    : Object.keys(status).length
+      ? status
+      : Object.keys(transition).length
+        ? transition
+        : root;
+  const rawState = String(
+    source.state
+      || source.relay_state
+      || source.lifecycle_state
+      || root.state
+      || root.relay_state
+      || "",
+  ).toLowerCase().replaceAll("-", "_").replaceAll(" ", "_");
+  const activeEnabled = hostRelayBoolean(source.active_enabled ?? source.enabled ?? root.active_enabled ?? root.enabled);
+  const transitionPending = hostRelayBoolean(
+    source.transition_pending ?? source.pending ?? root.transition_pending ?? root.pending,
+  );
+  const restartRequired = hostRelayBoolean(
+    source.restart_required ?? source.requires_restart ?? root.restart_required ?? root.requires_restart,
+  );
+  const restartPending = hostRelayBoolean(
+    source.restart_pending ?? root.restart_pending,
+  );
+  const rollbackArmed = hostRelayBoolean(
+    source.rollback_armed ?? root.rollback_armed,
+  );
+  const controlAvailable = hostRelayOptionalBoolean(
+    source.control_available ?? source.available ?? root.control_available ?? root.available,
+  ) !== false;
+  const configured = hostRelayOptionalBoolean(source.configured ?? root.configured);
+  const explicitlyPrepared = hostRelayBoolean(source.prepared ?? root.prepared) || rawState === "prepared";
+  const explicitlyDisabled = rawState === "disabled" || (!activeEnabled && configured === false);
+
+  let state: HostRelayDisplayState = "unavailable";
+  if (rawState === "restart_scheduled") state = "restart_scheduled";
+  else if (rawState === "manual_restart_required") state = "manual_restart_required";
+  else if (rawState === "rolled_back") state = "rolled_back";
+  else if (rawState === "rollback_failed") state = "rollback_failed";
+  else if (restartRequired || rawState === "restart_required") state = "restart_required";
+  else if (rawState === "enabled") state = "enabled";
+  else if (
+    transitionPending
+    || rawState === "pending"
+    || rawState === "connecting"
+    || rawState === "connected"
+    || rawState === "backoff"
+  ) state = "pending";
+  else if (explicitlyPrepared) state = "prepared";
+  else if (explicitlyDisabled) state = "disabled";
+
+  return {
+    state,
+    active_enabled: activeEnabled,
+    control_available: controlAvailable,
+    transition_pending: transitionPending,
+    restart_required: restartRequired,
+    restart_pending: restartPending,
+    rollback_armed: rollbackArmed,
+  };
+}
+
+function normalizeHostRelayTransition(value: unknown, action: HostRelayAction): HostRelayTransitionPayload {
+  const root = hostRelayRecord(value);
+  const transition = hostRelayRecord(root.transition);
+  const transitionRef = String(
+    transition.transition_ref || transition.ref || root.transition_ref || root.ref || "",
+  );
+  if (!/^[A-Za-z0-9._:-]{1,160}$/.test(transitionRef)) {
+    throw new Error("relay_transition_unavailable");
+  }
+  return {
+    ...normalizeHostRelayState(value),
+    action,
+    transition_ref: transitionRef,
+  };
+}
+
+export async function loadHostRelay(): Promise<HostRelayStatusPayload> {
+  const payload = await apiJson<unknown>("/host/relay");
+  return normalizeHostRelayState(payload);
+}
+
+export async function prepareHostRelayTransition(action: HostRelayAction): Promise<HostRelayTransitionPayload> {
+  const payload = await apiJson<unknown>("/host/relay/transitions", {
+    method: "POST",
+    body: JSON.stringify({ action }),
+  });
+  return normalizeHostRelayTransition(payload, action);
+}
+
+export async function confirmHostRelayTransition(transitionRef: string, action: HostRelayAction): Promise<HostRelayStatusPayload> {
+  if (!/^[A-Za-z0-9._:-]{1,160}$/.test(transitionRef)) {
+    throw new Error("relay_transition_unavailable");
+  }
+  const payload = await apiJson<unknown>(`/host/relay/transitions/${encodeURIComponent(transitionRef)}/confirm`, {
+    method: "POST",
+    body: JSON.stringify({ action }),
+  });
+  return normalizeHostRelayState(payload);
+}
+
+function boundedHumanAuthErrorCode(value: unknown): string {
+  const code = typeof value === "string" ? value : "";
+  return /^[a-z0-9_]{1,64}$/.test(code) ? code : "human_auth_request_failed";
+}
+
+async function safeHumanAuthJson<T>(path: string, init?: RequestInit): Promise<T> {
+  const response = await humanAwareFetch(path, init);
+  if (!response.ok) {
+    let code = "human_auth_request_failed";
+    try {
+      const payload = await response.json() as { error?: unknown };
+      code = boundedHumanAuthErrorCode(payload.error);
+    } catch {
+      // Pairing errors intentionally omit response bodies from the client error.
+    }
+    throw new HumanAuthRequestError(code);
+  }
+  return response.json() as Promise<T>;
+}
+
+export async function loadHumanPairingInvitations(): Promise<HumanPairingInvitationsPayload> {
+  return safeHumanAuthJson<HumanPairingInvitationsPayload>("/human-auth/pairing-invitations");
+}
+
+export async function createHumanPairingInvitation(input: {
+  role: HumanPairingRole;
+  expires_in_seconds: number;
+  label?: string;
+}): Promise<HumanPairingInvitationCreated> {
+  return safeHumanAuthJson<HumanPairingInvitationCreated>("/human-auth/pairing-invitations", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export async function revokeHumanPairingInvitation(invitationRef: string): Promise<Record<string, unknown>> {
+  return safeHumanAuthJson<Record<string, unknown>>(`/human-auth/pairing-invitations/${encodeURIComponent(invitationRef)}/revoke`, {
+    method: "POST",
+    body: "{}",
+  });
+}
+
+export async function loadHumanPairedDevices(): Promise<HumanPairedDevicesPayload> {
+  return safeHumanAuthJson<HumanPairedDevicesPayload>("/human-auth/devices");
+}
+
+export async function revokeHumanPairedDevice(deviceRef: string): Promise<Record<string, unknown>> {
+  return safeHumanAuthJson<Record<string, unknown>>(`/human-auth/devices/${encodeURIComponent(deviceRef)}/revoke`, {
+    method: "POST",
+    body: "{}",
+  });
+}
+
+export async function pairHuman(input: {
+  pairing_secret: string;
+  username: string;
+  password: string;
+  display_name?: string;
+  device_label?: string;
+}): Promise<HumanAuthSession> {
+  const session = await safeHumanAuthJson<HumanAuthSession>("/human-auth/pair", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+  setHumanAuthCsrf(session.csrf_token);
+  return session;
+}
 
 export interface DashboardMetrics {
   agents_total: number;
@@ -607,6 +1141,9 @@ export interface WorkerStatusPayload {
   status: string;
   worker_count: number;
   running_workers: number;
+  active_service_workers: number;
+  stale_service_workers: number;
+  execution_capacity_workers: number;
   recent_completed_runs: number;
   pending_worker_tasks: number;
   stuck_worker_tasks: number;
@@ -619,6 +1156,7 @@ export interface WorkerStatusPayload {
   never_seen_remote_enrollments: number;
   active_remote_sessions: number;
   remote_worker_health: Record<string, unknown>;
+  service_workers: Record<string, unknown>[];
   adapter_readiness?: WorkerAdapterReadinessSummary;
   fleet_health?: WorkerFleetHealth;
   daemons: WorkerDaemonStatus[];
@@ -655,6 +1193,9 @@ export interface WorkerFleetLane {
   workload?: Record<string, unknown>;
   next_action?: string;
   safe_ref?: string | null;
+  management_mode?: string | null;
+  control_allowed?: boolean;
+  process_state_verified?: boolean;
   token_omitted?: boolean;
   session_id_omitted?: boolean;
   token_id_omitted?: boolean;
@@ -670,6 +1211,11 @@ export interface WorkerFleetPayload {
     health_counts: Record<string, number>;
     local_daemon_count: number;
     running_local_daemons: number;
+    active_service_workers: number;
+    stale_service_workers: number;
+    execution_capacity_workers: number;
+    host_managed_workers?: number;
+    api_managed_daemons?: number;
     remote_worker_count: number;
     fresh_remote_enrollments: number;
     stale_remote_enrollments: number;
@@ -694,18 +1240,19 @@ export interface WorkerFleetPayload {
 }
 
 export type WorkerAdapterName = "mock" | "hermes" | "openclaw";
+export type WorkerReadinessAdapterName = WorkerAdapterName | "codex";
 
 export interface WorkerAdapterReadinessSummary {
-  ready_adapters?: WorkerAdapterName[];
-  live_ready_adapters?: WorkerAdapterName[];
-  review_required_adapters?: WorkerAdapterName[];
-  blocked_adapters?: WorkerAdapterName[];
-  unavailable_adapters?: WorkerAdapterName[];
-  recommended_adapter?: WorkerAdapterName;
+  ready_adapters?: WorkerReadinessAdapterName[];
+  live_ready_adapters?: WorkerReadinessAdapterName[];
+  review_required_adapters?: WorkerReadinessAdapterName[];
+  blocked_adapters?: WorkerReadinessAdapterName[];
+  unavailable_adapters?: WorkerReadinessAdapterName[];
+  recommended_adapter?: WorkerReadinessAdapterName;
 }
 
 export interface WorkerAdapterReadinessItem {
-  adapter: WorkerAdapterName;
+  adapter: WorkerReadinessAdapterName;
   ok: boolean;
   readiness: "ready" | "review_required" | "blocked" | "unavailable" | string;
   connector_id?: string | null;
@@ -716,6 +1263,18 @@ export interface WorkerAdapterReadinessItem {
   risk_floor?: string;
   commercial_readiness?: string;
   requires_confirm_run?: boolean;
+  workspace_write_ready?: boolean;
+  client_plugin?: {
+    package_name?: string | null;
+    package_version?: string | null;
+    packaged?: boolean;
+    skill_available?: boolean;
+    marketplace_available?: boolean;
+    mcp_tools_available?: boolean;
+    connection_mode?: string;
+    raw_path_omitted?: boolean;
+    token_omitted?: boolean;
+  };
   target_resource?: string | null;
   checks?: Record<string, unknown>;
   recommended_action?: string;
@@ -746,7 +1305,7 @@ export interface WorkerAdapterReadinessPayload {
   provider: string;
   status: "ready" | "degraded" | "blocked" | string;
   summary: WorkerAdapterReadinessSummary;
-  adapters: Record<WorkerAdapterName, WorkerAdapterReadinessItem>;
+  adapters: Record<WorkerReadinessAdapterName, WorkerAdapterReadinessItem>;
   contract?: string;
   live_execution_performed: boolean;
   token_omitted?: boolean;
@@ -1994,11 +2553,17 @@ export interface OperatorEvidenceReportRun {
     missing_tool_calls?: number;
     packet_hashes?: string[];
     query_hashes?: string[];
+    context_packet_hashes?: string[];
+    context_block_count?: number;
+    approved_memory_ids?: string[];
     retrieval_ids?: string[];
     source_hashes?: string[];
     paths?: string[];
     raw_query_omitted?: boolean;
+    snippet_omitted?: boolean;
     raw_content_omitted?: boolean;
+    context_body_not_persisted?: boolean;
+    raw_transcript_omitted?: boolean;
     raw_prompt_omitted?: boolean;
     raw_response_omitted?: boolean;
     token_omitted?: boolean;
@@ -3310,6 +3875,13 @@ export interface WorkerDaemonStatus {
   poll_interval?: number | null;
   max_tasks?: number | null;
   confirm_run?: boolean;
+  management_mode?: "standalone" | "daemon_api" | "host_stack" | string;
+  control_allowed?: boolean;
+  process_source?: "daemon_metadata" | "worker_state" | "none" | string;
+  process_claim_active?: boolean;
+  host_management_claim_active?: boolean;
+  process_identity_status?: string;
+  process_identity_verified?: boolean;
   log_path?: string;
   state_path?: string;
   worker_status?: string | null;
@@ -3922,15 +4494,7 @@ async function humanMutationJson<T>(
 }
 
 export async function apiJson<T>(path: string, init?: RequestInit): Promise<T> {
-  const { headers: suppliedHeaders, ...options } = init || {};
-  const res = await fetch(`${API_BASE}${path}`, {
-    credentials: "same-origin",
-    ...options,
-    headers: {
-      "Content-Type": "application/json",
-      ...(suppliedHeaders || {}),
-    },
-  });
+  const res = await humanAwareFetch(path, init);
   if (!res.ok) {
     throw new Error(`${res.status} ${res.statusText}: ${await res.text()}`);
   }
@@ -3939,15 +4503,13 @@ export async function apiJson<T>(path: string, init?: RequestInit): Promise<T> {
 
 async function optionalApiJson<T>(path: string, fallback: T): Promise<T> {
   try {
-    const res = await fetch(`${API_BASE}${path}`, {
-      headers: { "Content-Type": "application/json" },
-    });
+    const res = await humanAwareFetch(path);
     if (!res.ok) {
       return fallback;
     }
     return res.json() as Promise<T>;
   } catch (error) {
-    if (import.meta.env.DEV) {
+    if (typeof console !== "undefined") {
       console.warn(`Optional AgentOps endpoint unavailable: ${path}`, error);
     }
     return fallback;
@@ -3955,15 +4517,7 @@ async function optionalApiJson<T>(path: string, fallback: T): Promise<T> {
 }
 
 async function apiJsonWithStatuses<T>(path: string, init: RequestInit | undefined, acceptedStatuses: number[]): Promise<T> {
-  const { headers: suppliedHeaders, ...options } = init || {};
-  const res = await fetch(`${API_BASE}${path}`, {
-    credentials: "same-origin",
-    ...options,
-    headers: {
-      "Content-Type": "application/json",
-      ...(suppliedHeaders || {}),
-    },
-  });
+  const res = await humanAwareFetch(path, init);
   if (!res.ok && !acceptedStatuses.includes(res.status)) {
     throw new Error(`${res.status} ${res.statusText}: ${await res.text()}`);
   }
@@ -4254,6 +4808,206 @@ export async function loadRuns(query = ""): Promise<Run[]> {
 
 export async function loadEvaluations(): Promise<Evaluation[]> {
   return (await apiJson<Record<string, unknown>[]>("/evaluations")).map(normalizeEvaluation);
+}
+
+export interface ResearchExperiment {
+  experiment_id: string;
+  task_id: string | null;
+  name: string;
+  stage: string;
+  status: string;
+  claim_status: string;
+  protocol_hash: string;
+  provenance_hash: string;
+  primary_metric: string;
+  final_metric_value: number | null;
+  trial_count: number;
+  completed_trial_count: number;
+  metric_count: number;
+  artifact_count: number;
+  evaluation_count: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ResearchTrial {
+  trial_id: string;
+  experiment_id: string;
+  run_id: string | null;
+  status: string;
+  params: Record<string, unknown>;
+  primary_metric: string;
+  final_metric_value: number | null;
+  started_at: string | null;
+  ended_at: string | null;
+  created_at: string;
+}
+
+export interface ResearchMetric {
+  metric_id: string;
+  trial_id: string;
+  name: string;
+  value: number;
+  step: number | null;
+  split: string;
+  recorded_at: string;
+}
+
+export interface ResearchArtifact {
+  artifact_id: string;
+  run_id: string | null;
+  artifact_type: string;
+  title: string;
+  summary: string;
+  content_hash: string;
+  created_at: string;
+}
+
+export interface ResearchEvaluation {
+  evaluation_id: string;
+  run_id: string | null;
+  evaluator_type: string;
+  score: number;
+  pass_fail: string;
+  notes: string;
+  created_at: string;
+}
+
+export interface ResearchExperimentDetail {
+  experiment: ResearchExperiment;
+  trials: ResearchTrial[];
+  latest_metrics: ResearchMetric[];
+  artifacts: ResearchArtifact[];
+  evaluations: ResearchEvaluation[];
+}
+
+function researchRecord(value: unknown): Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : {};
+}
+
+function nullableNumber(value: unknown): number | null {
+  if (value === null || value === undefined || value === "") return null;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function normalizeResearchExperiment(row: Record<string, unknown>): ResearchExperiment {
+  const protocol = researchRecord(row.protocol);
+  const claimGate = researchRecord(row.claim_gate);
+  const latestMetric = researchRecord(row.latest_metric);
+  const hasClaimDecision = row.claim_eligible !== undefined && row.claim_eligible !== null;
+  const claimStatus = String(
+    row.claim_status
+      || claimGate.status
+      || (hasClaimDecision && boolValue(row.claim_eligible) ? "eligible" : hasClaimDecision && row.status === "completed" ? "ineligible" : "pending"),
+  );
+  return {
+    experiment_id: String(row.experiment_id || ""),
+    task_id: row.task_id ? String(row.task_id) : null,
+    name: String(row.name || row.title || row.experiment_id || "Untitled experiment"),
+    stage: String(row.stage || "smoke"),
+    status: String(row.status || "planned"),
+    claim_status: claimStatus,
+    protocol_hash: String(row.protocol_hash || protocol.protocol_hash || ""),
+    provenance_hash: String(row.provenance_hash || ""),
+    primary_metric: String(row.primary_metric || protocol.primary_metric || latestMetric.name || ""),
+    final_metric_value: nullableNumber(row.final_metric_value ?? row.primary_metric_value ?? latestMetric.value),
+    trial_count: numberValue(row.trial_count ?? row.trials_count, asArray(row.trials).length),
+    completed_trial_count: numberValue(row.completed_trial_count ?? row.completed_trials, 0),
+    metric_count: numberValue(row.metric_count ?? row.metrics_count, asArray(row.metrics).length),
+    artifact_count: numberValue(row.artifact_count ?? row.artifacts_count, asArray(row.artifacts).length),
+    evaluation_count: numberValue(row.evaluation_count ?? row.evaluations_count, asArray(row.evaluations).length),
+    created_at: String(row.created_at || ""),
+    updated_at: String(row.updated_at || row.completed_at || row.created_at || ""),
+  };
+}
+
+function normalizeResearchTrial(row: Record<string, unknown>): ResearchTrial {
+  const latestMetric = researchRecord(row.latest_metric);
+  return {
+    trial_id: String(row.trial_id || ""),
+    experiment_id: String(row.experiment_id || ""),
+    run_id: row.run_id ? String(row.run_id) : null,
+    status: String(row.status || "queued"),
+    params: researchRecord(row.params),
+    primary_metric: String(row.primary_metric || latestMetric.name || ""),
+    final_metric_value: nullableNumber(row.final_metric_value ?? row.primary_metric_value ?? latestMetric.value),
+    started_at: row.started_at ? String(row.started_at) : null,
+    ended_at: row.ended_at ? String(row.ended_at) : null,
+    created_at: String(row.created_at || ""),
+  };
+}
+
+function normalizeResearchMetric(row: Record<string, unknown>): ResearchMetric {
+  return {
+    metric_id: String(row.metric_id || `${row.trial_id || "trial"}:${row.name || "metric"}:${row.step ?? "latest"}`),
+    trial_id: String(row.trial_id || ""),
+    name: String(row.name || row.metric_name || ""),
+    value: numberValue(row.value, 0),
+    step: nullableNumber(row.step),
+    split: String(row.split || "train"),
+    recorded_at: String(row.recorded_at || row.created_at || ""),
+  };
+}
+
+function normalizeResearchArtifact(row: Record<string, unknown>): ResearchArtifact {
+  return {
+    artifact_id: String(row.artifact_id || ""),
+    run_id: row.run_id ? String(row.run_id) : null,
+    artifact_type: String(row.artifact_type || row.type || "artifact"),
+    title: String(row.title || row.name || row.artifact_id || "Artifact"),
+    summary: String(row.summary || ""),
+    content_hash: String(row.content_hash || row.hash || row.sha256 || ""),
+    created_at: String(row.created_at || ""),
+  };
+}
+
+function normalizeResearchEvaluation(row: Record<string, unknown>): ResearchEvaluation {
+  return {
+    evaluation_id: String(row.evaluation_id || ""),
+    run_id: row.run_id ? String(row.run_id) : null,
+    evaluator_type: String(row.evaluator_type || "research_claim_gate"),
+    score: numberValue(row.score, 0),
+    pass_fail: String(row.pass_fail || (row.pass === true ? "pass" : "fail")),
+    notes: String(row.notes || row.summary || ""),
+    created_at: String(row.created_at || ""),
+  };
+}
+
+export async function loadResearchExperiments(): Promise<ResearchExperiment[]> {
+  const raw = await apiJson<unknown>("/research/experiments");
+  const rows = Array.isArray(raw) ? raw : asArray(researchRecord(raw).experiments);
+  return rows.map((row) => normalizeResearchExperiment(researchRecord(row)));
+}
+
+export async function loadResearchExperiment(id: string): Promise<ResearchExperimentDetail> {
+  const raw = researchRecord(await apiJson<unknown>(`/research/experiments/${encodeURIComponent(id)}`));
+  const experimentRaw = Object.keys(researchRecord(raw.experiment)).length > 0
+    ? researchRecord(raw.experiment)
+    : raw;
+  const trials = asArray(raw.trials).map((row) => normalizeResearchTrial(researchRecord(row)));
+  const latestMetrics = asArray(raw.latest_metrics ?? raw.metrics).map((row) => normalizeResearchMetric(researchRecord(row)));
+  const artifacts = asArray(raw.artifacts).map((row) => normalizeResearchArtifact(researchRecord(row)));
+  const evaluations = asArray(raw.evaluations).map((row) => normalizeResearchEvaluation(researchRecord(row)));
+  const experiment = normalizeResearchExperiment(experimentRaw);
+  return {
+    experiment: {
+      ...experiment,
+      trial_count: experimentRaw.trial_count === undefined && experimentRaw.trials_count === undefined ? trials.length : experiment.trial_count,
+      completed_trial_count: experimentRaw.completed_trial_count === undefined && experimentRaw.completed_trials === undefined
+        ? trials.filter((trial) => trial.status === "completed").length
+        : experiment.completed_trial_count,
+      metric_count: experimentRaw.metric_count === undefined && experimentRaw.metrics_count === undefined ? latestMetrics.length : experiment.metric_count,
+      artifact_count: experimentRaw.artifact_count === undefined && experimentRaw.artifacts_count === undefined ? artifacts.length : experiment.artifact_count,
+      evaluation_count: experimentRaw.evaluation_count === undefined && experimentRaw.evaluations_count === undefined ? evaluations.length : experiment.evaluation_count,
+    },
+    trials,
+    latest_metrics: latestMetrics,
+    artifacts,
+    evaluations,
+  };
 }
 
 export async function loadEvaluationCaseCandidates(input: {
@@ -4845,6 +5599,9 @@ export async function loadWorkerStatus(): Promise<WorkerStatusPayload> {
     status: String(raw.status || "unknown"),
     worker_count: numberValue(raw.worker_count, 0),
     running_workers: numberValue(raw.running_workers, 0),
+    active_service_workers: numberValue(raw.active_service_workers, 0),
+    stale_service_workers: numberValue(raw.stale_service_workers, 0),
+    execution_capacity_workers: numberValue(raw.execution_capacity_workers, 0),
     recent_completed_runs: numberValue(raw.recent_completed_runs, 0),
     pending_worker_tasks: numberValue(raw.pending_worker_tasks, 0),
     stuck_worker_tasks: numberValue(raw.stuck_worker_tasks, 0),
@@ -4857,6 +5614,7 @@ export async function loadWorkerStatus(): Promise<WorkerStatusPayload> {
     never_seen_remote_enrollments: numberValue(raw.never_seen_remote_enrollments, 0),
     active_remote_sessions: numberValue(raw.active_remote_sessions, 0),
     remote_worker_health: normalizeWorkerRemoteHealth(remoteHealthRaw),
+    service_workers: asArray<Record<string, unknown>>(raw.service_workers),
     adapter_readiness: typeof raw.adapter_readiness === "object" && raw.adapter_readiness !== null ? raw.adapter_readiness as WorkerAdapterReadinessSummary : undefined,
     fleet_health: normalizeWorkerFleetHealth(fleetHealthRaw),
     daemons: asArray<Record<string, unknown>>(raw.daemons).map(normalizeWorkerDaemon),
@@ -4913,6 +5671,11 @@ export async function loadWorkerFleet(): Promise<WorkerFleetPayload> {
       health_counts: numberRecord(summaryRaw.health_counts),
       local_daemon_count: numberValue(summaryRaw.local_daemon_count, 0),
       running_local_daemons: numberValue(summaryRaw.running_local_daemons, 0),
+      active_service_workers: numberValue(summaryRaw.active_service_workers, 0),
+      stale_service_workers: numberValue(summaryRaw.stale_service_workers, 0),
+      execution_capacity_workers: numberValue(summaryRaw.execution_capacity_workers, 0),
+      host_managed_workers: numberValue(summaryRaw.host_managed_workers, 0),
+      api_managed_daemons: numberValue(summaryRaw.api_managed_daemons, 0),
       remote_worker_count: numberValue(summaryRaw.remote_worker_count, 0),
       fresh_remote_enrollments: numberValue(summaryRaw.fresh_remote_enrollments, 0),
       stale_remote_enrollments: numberValue(summaryRaw.stale_remote_enrollments, 0),
@@ -4941,6 +5704,9 @@ export async function loadWorkerFleet(): Promise<WorkerFleetPayload> {
       workload: typeof lane.workload === "object" && lane.workload !== null ? lane.workload as Record<string, unknown> : undefined,
       next_action: lane.next_action ? String(lane.next_action) : undefined,
       safe_ref: lane.safe_ref ? String(lane.safe_ref) : null,
+      management_mode: lane.management_mode ? String(lane.management_mode) : null,
+      control_allowed: lane.control_allowed === undefined ? undefined : boolValue(lane.control_allowed),
+      process_state_verified: lane.process_state_verified === undefined ? undefined : boolValue(lane.process_state_verified),
       token_omitted: boolValue(lane.token_omitted),
       session_id_omitted: boolValue(lane.session_id_omitted),
       token_id_omitted: boolValue(lane.token_id_omitted),
@@ -5350,6 +6116,193 @@ export async function loadLocalReadiness(): Promise<LocalReadinessPayload> {
     token_omitted: boolValue(raw.token_omitted),
     live_execution_performed: boolValue(raw.live_execution_performed),
   };
+}
+
+function acceptanceRows(raw: unknown, preferredKey: string): unknown[] {
+  if (Array.isArray(raw)) return raw;
+  if (typeof raw !== "object" || raw === null) throw new Error("response is not a readable list");
+  const record = raw as Record<string, unknown>;
+  if (Array.isArray(record[preferredKey])) return record[preferredKey] as unknown[];
+  if (Array.isArray(record.items)) return record.items as unknown[];
+  throw new Error("response does not contain a readable list");
+}
+
+function acceptanceError(error: unknown): string {
+  return (error instanceof Error ? error.message : String(error)).replace(/\s+/g, " ").slice(0, 160);
+}
+
+export async function loadPrivateHostAcceptanceSnapshot(marker?: {
+  receipt_id: string;
+  task_id?: string;
+}): Promise<PrivateHostAcceptanceSnapshot> {
+  const authPromise = getHumanAuthStatus()
+    .then((status) => ({
+      check: {
+        id: "human_session",
+        ok: Boolean(status.required && status.authenticated),
+        status: status.authenticated ? "authenticated" : "unauthenticated",
+      } as PrivateHostAcceptanceCheck,
+      user: status.user,
+    }))
+    .catch((error) => ({
+      check: { id: "human_session", ok: false, error: acceptanceError(error) } as PrivateHostAcceptanceCheck,
+      user: undefined,
+    }));
+
+  const readinessPromise = apiJson<Record<string, unknown>>("/local/readiness")
+    .then((readiness): PrivateHostAcceptanceCheck => ({
+      id: "local_readiness",
+      ok: true,
+      status: String(readiness.status || (readiness.ok ? "ready" : "attention")),
+    }))
+    .catch((error): PrivateHostAcceptanceCheck => ({ id: "local_readiness", ok: false, error: acceptanceError(error) }));
+
+  const listCheck = async (
+    id: PrivateHostAcceptanceCheckId,
+    path: string,
+    key: string,
+  ): Promise<{ check: PrivateHostAcceptanceCheck; rows: unknown[] }> => {
+    try {
+      const rows = acceptanceRows(await apiJson<unknown>(path), key);
+      return { check: { id, ok: true, count: rows.length, status: "readable" }, rows };
+    } catch (error) {
+      return { check: { id, ok: false, error: acceptanceError(error) }, rows: [] };
+    }
+  };
+
+  const [auth, readiness, tasks, evaluations, approvals, memories, audit, artifacts] = await Promise.all([
+    authPromise,
+    readinessPromise,
+    listCheck("tasks_readable", "/tasks", "tasks"),
+    listCheck("evaluations_readable", "/evaluations", "evaluations"),
+    listCheck("approvals_readable", "/approvals", "approvals"),
+    listCheck("memories_readable", "/memories", "memories"),
+    listCheck("audit_readable", "/audit?limit=150", "audit_logs"),
+    listCheck("artifacts_readable", "/artifacts", "artifacts"),
+  ]);
+
+  const markerRow = marker?.task_id
+    ? tasks.rows.find((row) => {
+        if (typeof row !== "object" || row === null) return false;
+        const task = row as Record<string, unknown>;
+        return String(task.task_id || "") === marker.task_id
+          && String(task.title || "").includes(marker.receipt_id);
+      }) as Record<string, unknown> | undefined
+    : undefined;
+  const markerCheck: PrivateHostAcceptanceCheck = {
+    id: "marker_task_readable",
+    ok: Boolean(markerRow),
+    status: marker?.task_id ? (markerRow ? "readable" : "not_found") : "not_created",
+  };
+
+  const user = auth.user;
+  const checks = [
+    auth.check,
+    readiness,
+    tasks.check,
+    evaluations.check,
+    approvals.check,
+    memories.check,
+    audit.check,
+    artifacts.check,
+    markerCheck,
+  ];
+  return {
+    checked_at: new Date().toISOString(),
+    checks,
+    counts: {
+      tasks: tasks.rows.length,
+      evaluations: evaluations.rows.length,
+      approvals: approvals.rows.length,
+      memories: memories.rows.length,
+      audit: audit.rows.length,
+      artifacts: artifacts.rows.length,
+    },
+    related_ids: markerRow ? { marker_task_id: String(markerRow.task_id || marker?.task_id || "") } : {},
+    actor: {
+      workspace_id: user?.workspace_id,
+      user_id: user?.account_id || user?.user_id,
+      role: user?.role,
+    },
+  };
+}
+
+export async function createPrivateHostAcceptanceMarker(receiptId: string): Promise<PrivateHostAcceptanceMarker> {
+  const title = `Private Host acceptance marker ${receiptId}`;
+  const raw = await apiJson<Record<string, unknown>>("/tasks", {
+    method: "POST",
+    body: JSON.stringify({
+      title,
+      description: "Low-risk browser acceptance marker. No Runtime or external connector is invoked.",
+      acceptance_criteria: "The marker task is readable through the same authenticated human Session.",
+      owner_agent_id: "",
+      collaborator_agent_ids: [],
+      status: "planned",
+      priority: "low",
+      risk_level: "low",
+      budget_limit_usd: 0,
+    }),
+  });
+  return {
+    receipt_id: receiptId,
+    task_id: String(raw.task_id || ""),
+    title: String(raw.title || title),
+  };
+}
+
+function privateHostAuthorityReceipt(raw: unknown): PrivateHostAuthorityReceipt {
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+    throw new Error("Host authority receipt response is invalid");
+  }
+  const record = raw as Record<string, unknown>;
+  const evaluationRaw = record.evaluation;
+  if (typeof evaluationRaw !== "object" || evaluationRaw === null || Array.isArray(evaluationRaw)) {
+    throw new Error("Host authority receipt evaluation is invalid");
+  }
+  const evaluation = evaluationRaw as Record<string, unknown>;
+  const requiredStrings = [
+    "receipt_id", "host_version", "git_commit", "run_id", "adapter", "artifact_id",
+    "plan_manifest_id", "artifact_metadata_sha256", "payload_sha256",
+  ] as const;
+  for (const key of requiredStrings) {
+    if (typeof record[key] !== "string" || !String(record[key]).trim()) {
+      throw new Error(`Host authority receipt field is invalid: ${key}`);
+    }
+  }
+  if (record.status !== "completed" || evaluation.pass_fail !== "pass" || !Number.isFinite(Number(evaluation.score))) {
+    throw new Error("Host authority receipt completion or evaluation gate is invalid");
+  }
+  const artifactHash = String(record.artifact_metadata_sha256);
+  const payloadHash = String(record.payload_sha256);
+  if (!/^[a-f0-9]{64}$/.test(artifactHash) || !/^[a-f0-9]{64}$/.test(payloadHash)) {
+    throw new Error("Host authority receipt integrity hash is invalid");
+  }
+  return {
+    receipt_id: String(record.receipt_id),
+    host_version: String(record.host_version),
+    git_commit: String(record.git_commit),
+    run_id: String(record.run_id),
+    adapter: String(record.adapter),
+    status: "completed",
+    evaluation: { score: Number(evaluation.score), pass_fail: "pass" },
+    artifact_id: String(record.artifact_id),
+    plan_manifest_id: String(record.plan_manifest_id),
+    artifact_metadata_sha256: artifactHash,
+    payload_sha256: payloadHash,
+  };
+}
+
+export async function createPrivateHostAuthorityReceipt(runId: string): Promise<PrivateHostAuthorityReceipt> {
+  const created = privateHostAuthorityReceipt(await apiJson<unknown>("/host/acceptance-receipts", {
+    method: "POST",
+    body: JSON.stringify({ run_id: runId.trim() }),
+  }));
+  return loadPrivateHostAuthorityReceipt(created.receipt_id);
+}
+
+export async function loadPrivateHostAuthorityReceipt(receiptId: string): Promise<PrivateHostAuthorityReceipt> {
+  const raw = await apiJson<unknown>(`/host/acceptance-receipts/${encodeURIComponent(receiptId)}`);
+  return privateHostAuthorityReceipt(raw);
 }
 
 export async function loadIntegrationInbox(options: IntegrationInboxOptions = {}): Promise<IntegrationInboxPayload> {
@@ -6258,8 +7211,14 @@ export async function loadOperatorActionReceipts(limit = 8): Promise<OperatorAct
   };
 }
 
-export async function loadOperatorEvidenceReport(limit = 8): Promise<OperatorEvidenceReportPayload> {
-  const raw = await optionalApiJson<Record<string, unknown>>(`/operator/evidence-report?limit=${encodeURIComponent(String(limit))}`, {
+export async function loadOperatorEvidenceReport(
+  limit = 8,
+  filters: { runId?: string; taskId?: string } = {},
+): Promise<OperatorEvidenceReportPayload> {
+  const query = new URLSearchParams({ limit: String(limit) });
+  if (filters.runId) query.set("run_id", filters.runId);
+  if (filters.taskId) query.set("task_id", filters.taskId);
+  const raw = await optionalApiJson<Record<string, unknown>>(`/operator/evidence-report?${query.toString()}`, {
     provider: "agentops-operator",
     operation: "operator_evidence_report",
     status: "unavailable",
@@ -6347,11 +7306,17 @@ export async function loadOperatorEvidenceReport(limit = 8): Promise<OperatorEvi
         missing_tool_calls: numberValue(workerKnowledgeRaw.missing_tool_calls, 0),
         packet_hashes: asArray<unknown>(workerKnowledgeRaw.packet_hashes).map(String).filter(Boolean),
         query_hashes: asArray<unknown>(workerKnowledgeRaw.query_hashes).map(String).filter(Boolean),
+        context_packet_hashes: asArray<unknown>(workerKnowledgeRaw.context_packet_hashes).map(String).filter(Boolean),
+        context_block_count: numberValue(workerKnowledgeRaw.context_block_count, 0),
+        approved_memory_ids: asArray<unknown>(workerKnowledgeRaw.approved_memory_ids).map(String).filter(Boolean),
         retrieval_ids: asArray<unknown>(workerKnowledgeRaw.retrieval_ids).map(String).filter(Boolean),
         source_hashes: asArray<unknown>(workerKnowledgeRaw.source_hashes).map(String).filter(Boolean),
         paths: asArray<unknown>(workerKnowledgeRaw.paths).map(String).filter(Boolean),
         raw_query_omitted: boolValue(workerKnowledgeRaw.raw_query_omitted),
+        snippet_omitted: boolValue(workerKnowledgeRaw.snippet_omitted),
         raw_content_omitted: boolValue(workerKnowledgeRaw.raw_content_omitted),
+        context_body_not_persisted: boolValue(workerKnowledgeRaw.context_body_not_persisted),
+        raw_transcript_omitted: boolValue(workerKnowledgeRaw.raw_transcript_omitted),
         raw_prompt_omitted: boolValue(workerKnowledgeRaw.raw_prompt_omitted),
         raw_response_omitted: boolValue(workerKnowledgeRaw.raw_response_omitted),
         token_omitted: boolValue(workerKnowledgeRaw.token_omitted),
@@ -8771,7 +9736,7 @@ export async function loadOperatorHealth(limit = 12, loopId = ""): Promise<Opera
 export async function loadWorkerAdapterReadiness(): Promise<WorkerAdapterReadinessPayload> {
   const raw = await apiJson<Record<string, unknown>>("/workers/adapter-readiness");
   const adaptersRaw = typeof raw.adapters === "object" && raw.adapters !== null ? raw.adapters as Record<string, unknown> : {};
-  const normalizeAdapter = (name: WorkerAdapterName): WorkerAdapterReadinessItem => {
+  const normalizeAdapter = (name: WorkerReadinessAdapterName): WorkerAdapterReadinessItem => {
     const item = typeof adaptersRaw[name] === "object" && adaptersRaw[name] !== null ? adaptersRaw[name] as Record<string, unknown> : {};
     const remediationRaw = typeof item.remediation === "object" && item.remediation !== null ? item.remediation as Record<string, unknown> : {};
     const remediationSafetyRaw = typeof remediationRaw.safety === "object" && remediationRaw.safety !== null ? remediationRaw.safety as Record<string, unknown> : {};
@@ -8788,6 +9753,10 @@ export async function loadWorkerAdapterReadiness(): Promise<WorkerAdapterReadine
       risk_floor: item.risk_floor ? String(item.risk_floor) : undefined,
       commercial_readiness: item.commercial_readiness ? String(item.commercial_readiness) : undefined,
       requires_confirm_run: boolValue(item.requires_confirm_run),
+      workspace_write_ready: boolValue(item.workspace_write_ready),
+      client_plugin: typeof item.client_plugin === "object" && item.client_plugin !== null
+        ? item.client_plugin as WorkerAdapterReadinessItem["client_plugin"]
+        : undefined,
       target_resource: item.target_resource ? String(item.target_resource) : null,
       checks: typeof item.checks === "object" && item.checks !== null ? item.checks as Record<string, unknown> : {},
       recommended_action: item.recommended_action ? String(item.recommended_action) : undefined,
@@ -8820,6 +9789,7 @@ export async function loadWorkerAdapterReadiness(): Promise<WorkerAdapterReadine
     summary: typeof raw.summary === "object" && raw.summary !== null ? raw.summary as WorkerAdapterReadinessSummary : {},
     adapters: {
       mock: normalizeAdapter("mock"),
+      codex: normalizeAdapter("codex"),
       hermes: normalizeAdapter("hermes"),
       openclaw: normalizeAdapter("openclaw"),
     },
@@ -8854,6 +9824,13 @@ function normalizeWorkerDaemon(row: Record<string, unknown>): WorkerDaemonStatus
     poll_interval: row.poll_interval ? numberValue(row.poll_interval, 0) : null,
     max_tasks: row.max_tasks === undefined || row.max_tasks === null ? null : numberValue(row.max_tasks, 0),
     confirm_run: boolValue(row.confirm_run),
+    management_mode: row.management_mode ? String(row.management_mode) : undefined,
+    control_allowed: row.control_allowed === undefined ? undefined : boolValue(row.control_allowed),
+    process_source: row.process_source ? String(row.process_source) : undefined,
+    process_claim_active: row.process_claim_active === undefined ? undefined : boolValue(row.process_claim_active),
+    host_management_claim_active: row.host_management_claim_active === undefined ? undefined : boolValue(row.host_management_claim_active),
+    process_identity_status: row.process_identity_status ? String(row.process_identity_status) : undefined,
+    process_identity_verified: row.process_identity_verified === undefined ? undefined : boolValue(row.process_identity_verified),
     log_path: row.log_path ? String(row.log_path) : undefined,
     state_path: row.state_path ? String(row.state_path) : undefined,
     worker_status: row.worker_status ? String(row.worker_status) : null,

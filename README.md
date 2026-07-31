@@ -107,6 +107,201 @@ python3 scripts/run_local_stack.py \
 真实 worker 只有在同时传入 `--confirm-live-workers` 时才会启动。脚本默认不改写
 `~/.agentops/config.json`；只有显式 `--configure-cli` 才保存本地 `8787` 连接。
 
+生产 UI 同源预览不需要运行 Vite 开发服务器。首次构建并启动：
+
+```bash
+python3 scripts/run_local_stack.py --build-ui
+```
+
+构建已经存在时：
+
+```bash
+python3 scripts/run_local_stack.py --production-ui
+```
+
+打开 `http://127.0.0.1:8787/workspace`。该模式由 Python Host 在同一个源上
+提供 React UI 和 `/mis-api` API，并保留安全 mock worker。它目前仍是 loopback
+Host 基础，不是已认证的远程访问模式；不要通过修改绑定地址把它直接暴露到局域网
+或公网。远程零安装操控台的产品边界和后续验收见
+`docs/LOCAL_HOST_REMOTE_CONSOLE_SPEC.md` 与
+`docs/LOCAL_HOST_REMOTE_CONSOLE_DELIVERY_PLAN.md`。
+
+## Private Host Preview
+
+`agentops host` 把同源生产 UI、SQLite 权威账本和 Worker 作为一个受管的
+loopback Host 运行。普通用户只需在主机安装并启动 AgentOps；另一台电脑的
+正式产品路径只需要浏览器，不需要安装 Tailscale、VPN 或开发环境：
+
+```bash
+python3 -m pip install .
+agentops host init
+agentops host start --build-ui
+agentops host status
+agentops host doctor
+```
+
+`host start` 后直接打开状态输出中的本地 Console URL。在这台主机的
+`127.0.0.1` 浏览器里，首次 Owner 初始化和后续登录都在现有 Workspace 前端
+完成。macOS 安装器会调用 `agentops host open-console`，把受保护的设置码作为
+一次性 fragment 交给页面；fragment 不发送到服务器并会在页面启动时立即擦除，
+用户不需要从终端复制。`agentops host bootstrap-owner --confirm` 仅保留为无图形
+环境和恢复入口。
+
+首次 Owner 设置、后续登录和登录后的 `/workspace/account` 现在复用同一套
+Workspace 设置组件；账户入口也位于原有侧栏中。全新浏览器默认使用企业浅色
+主题，用户已经选择的深色控制面或员工 OS 主题不会被覆盖。
+
+Owner 还可以在“账户与访问”创建一次性成员邀请。另一台电脑的普通用户只需
+用系统浏览器打开邀请链接，设置自己的成员账户与设备名称；邀请密钥只保留在
+URL fragment 和页面内存中，页面启动后立即从地址栏擦除。当前这一配对能力已在
+本地 Host 可用；面向互联网的稳定 HTTPS Relay 仍是独立发布门，完成前不能把
+Tailscale 或临时公网隧道描述成默认零安装方案。
+
+Linux Relay 已有确定性离线发布包与 preview-first 首次安装事务。运维入口为
+`agentops-relayctl`，真实写入必须同时提供 `--confirm-install` 和 dry-run 返回的
+精确 `--plan-sha256`。安装后可用只读命令
+`agentops-relayctl --root / status` 区分未安装、安装树有效、需要恢复和无效
+状态；它不读取运行配置正文，也不把安装有效冒充为服务在线。详见
+[`docs/RELAY_RELEASE_BUNDLE_ACCEPTANCE.md`](docs/RELAY_RELEASE_BUNDLE_ACCEPTANCE.md)
+与
+[`docs/RELAY_OFFLINE_INSTALL_ACCEPTANCE.md`](docs/RELAY_OFFLINE_INSTALL_ACCEPTANCE.md)、
+[`docs/RELAY_OFFLINE_STATUS_ACCEPTANCE.md`](docs/RELAY_OFFLINE_STATUS_ACCEPTANCE.md)。
+服务激活的后续安全边界已冻结在
+[`docs/RELAY_SERVICE_ACTIVATION_SPEC.md`](docs/RELAY_SERVICE_ACTIVATION_SPEC.md)，
+其中无副作用的 plan core、共享严格 daemon config parser、只读 FD 锚定主机扫描器，
+只读 systemd adapter + activate preview，以及尚未接入生产写路径的 immutable
+journal core 已分别按
+[`docs/RELAY_ACTIVATION_PLAN_CORE_ACCEPTANCE.md`](docs/RELAY_ACTIVATION_PLAN_CORE_ACCEPTANCE.md)
+、
+[`docs/RELAY_CONFIG_PARSER_ACCEPTANCE.md`](docs/RELAY_CONFIG_PARSER_ACCEPTANCE.md)
+与
+[`docs/RELAY_ACTIVATION_SCANNER_ACCEPTANCE.md`](docs/RELAY_ACTIVATION_SCANNER_ACCEPTANCE.md)
+、
+[`docs/RELAY_ACTIVATION_PREVIEW_ACCEPTANCE.md`](docs/RELAY_ACTIVATION_PREVIEW_ACCEPTANCE.md)
+与
+[`docs/RELAY_ACTIVATION_JOURNAL_ACCEPTANCE.md`](docs/RELAY_ACTIVATION_JOURNAL_ACCEPTANCE.md)
+与
+[`docs/RELAY_ACTIVATION_JOURNAL_STATUS_ACCEPTANCE.md`](docs/RELAY_ACTIVATION_JOURNAL_STATUS_ACCEPTANCE.md)
+与
+[`docs/RELAY_ACTIVATION_NAMESPACE_INSTALL_ACCEPTANCE.md`](docs/RELAY_ACTIVATION_NAMESPACE_INSTALL_ACCEPTANCE.md)
+与
+[`docs/RELAY_ACTIVATION_PRODUCTION_STORE_ACCEPTANCE.md`](docs/RELAY_ACTIVATION_PRODUCTION_STORE_ACCEPTANCE.md)
+与
+[`docs/RELAY_ACTIVATION_EVIDENCE_ACCEPTANCE.md`](docs/RELAY_ACTIVATION_EVIDENCE_ACCEPTANCE.md)
+与
+[`docs/RELAY_ACTIVATION_CONTROLLER_SUCCESS_ACCEPTANCE.md`](docs/RELAY_ACTIVATION_CONTROLLER_SUCCESS_ACCEPTANCE.md)
+与
+[`docs/RELAY_ACTIVATION_RECOVERY_SNAPSHOT_ACCEPTANCE.md`](docs/RELAY_ACTIVATION_RECOVERY_SNAPSHOT_ACCEPTANCE.md)
+与
+[`docs/RELAY_ACTIVATION_RECOVERY_DECISION_ACCEPTANCE.md`](docs/RELAY_ACTIVATION_RECOVERY_DECISION_ACCEPTANCE.md)
+与
+[`docs/RELAY_ACTIVATION_RECOVERY_PREVIEW_ACCEPTANCE.md`](docs/RELAY_ACTIVATION_RECOVERY_PREVIEW_ACCEPTANCE.md)
+与
+[`docs/RELAY_ACTIVATION_RECOVERY_CONTROLLER_ACCEPTANCE.md`](docs/RELAY_ACTIVATION_RECOVERY_CONTROLLER_ACCEPTANCE.md)
+与
+[`docs/RELAY_SYSTEMD_MUTATION_ADAPTER_ACCEPTANCE.md`](docs/RELAY_SYSTEMD_MUTATION_ADAPTER_ACCEPTANCE.md)
+实现。`agentops-relayctl --root / activate` 仍只会读取状态和生成有界 plan；
+只读 status 已能将完整 journal 历史纳入安装树校验，并对未完成、损坏或扫描中
+变化的 journal 返回恢复态；私有 production opener 已绑定 lifecycle lock，并且只会
+打开 confirmed first-install 事务创建的精确 journal 命名空间，不会自行初始化目录。
+安装计划与 transaction marker 已绑定 missing/exact-empty 状态，partial/history/unknown
+状态会进入恢复态。精确 plan 到 journal identity 以及六个执行/回滚步骤的有界证据
+编译器已实现；私有 scanner-bound systemd mutation process adapter 和只处理成功路径
+的 exact-confirmed controller 已完成，能够按 prepared、intent、observed、receipt、
+terminal 顺序闭环。controller 的 production rescan 现在使用同 root、同 lifecycle
+lock 签发的私有 capability，因此写入 prepared 后不会被普通 status 的 recovery 状态
+反向阻断；普通 status/preview 仍保持 fail-closed。受 lifecycle lock 保护的 recovery
+snapshot 能读取精确 chain 并
+识别合法 orphan receipt，纯 recovery decision compiler 也能给出哈希绑定的
+complete/terminalize/resume/inverse/blocked 决策；私有只读 recovery preview 已在同一
+lifecycle lock 内组合精确 snapshot、稳定 scanner/systemd/scanner 观察和决策哈希，
+私有 exact-confirmed recovery controller 也已支持一次 observation/receipt/terminal
+写入或幂等 complete，并已闭环专用 rollback verification、
+`rollback_succeeded` receipt 与 `service_state_rolled_back` terminal；私有 recovery
+executor 也已在同一 lifecycle lock 下组合 production store、locked scanner 与
+scanner-bound mutation adapter，fixture 验收覆盖单步 resume/inverse，但仍没有 CLI
+caller，也尚未在真实 Linux systemd 上执行。partial 自动恢复和真实 Linux systemd
+验收仍未实现。
+这仍不代表公共 Relay、DNS/ACME、服务启动或升级/回滚已经完成。
+
+`host init` 仍生成一次性 Owner 设置码，并把它、机器 API key 与 Admin key
+存到仓库外的 `~/.agentops/host/`，文件权限为 `0600`。`host start` 默认后台
+启动安全 mock worker；真实 Hermes/OpenClaw 仍必须显式指定并确认：
+
+```bash
+agentops host start \
+  --worker hermes \
+  --worker openclaw \
+  --confirm-live-workers
+```
+
+Host 启动前会检查本机是否已经存在同 adapter 的 Worker。若发现 Hermes、
+OpenClaw 或 mock Worker 已由另一套服务管理，启动会在后端端口打开前失败，
+只返回 adapter 和 PID，不读取或输出进程命令。要继续复用这些外部 Worker，
+显式使用 `agentops host start --no-workers`；Host 不会自动杀进程或卸载服务。
+
+停止和检查：
+
+```bash
+agentops host logs
+agentops host restart
+agentops host stop
+```
+
+需要登录后自动恢复 Host 控制面时，可显式安装 macOS 用户级 LaunchAgent。
+安装、加载、卸载和删除都默认只预览；确认安装的服务只运行 Host，固定带
+`--no-workers`，不会自动启动 Hermes/OpenClaw：
+
+```bash
+agentops host service-install
+agentops host service-install --confirm-install
+agentops host service-check
+agentops host stop
+agentops host service-control --action load
+agentops host service-control --action load --confirm-control
+```
+
+移除前先显式 unload，再运行 `agentops host service-remove --confirm-remove`。
+服务文件不保存 API key、Admin key、Owner 设置码或 Runtime 凭据。完整边界见
+`docs/PRIVATE_HOST_BACKGROUND_SERVICE_ACCEPTANCE.md`。
+
+### 高级私网备选
+
+Tailscale 不是普通用户或第二台电脑的安装前提。只有已经使用自管 tailnet、且
+明确选择高级私网模式的管理员，才需要下面的命令：
+
+```bash
+agentops host tailscale-preview
+agentops host tailscale-apply --confirm
+```
+
+`tailscale-preview` 仅输出当前机器的 Serve/撤销命令，不会执行网络变更。
+审查后必须显式运行 `tailscale-apply --confirm` 才会配置 tailnet 内 HTTPS
+Serve，并把对应 HTTPS Origin 写入私有 Host 配置；它不会启用 Funnel 或开放
+公网。撤销使用 `agentops host tailscale-revoke --confirm`。第二台电脑的完整流程见
+`docs/PRIVATE_HOST_OPERATOR_RUNBOOK.md`；正式远程可用声明仍需第二设备、
+trusted Origin、版本化安装资产和真实 Runtime 验收。
+
+构建 unsigned macOS Host developer preview（先完成 UI build）：
+
+```bash
+cd ui/start-building-app && npm ci && npm run build && cd ../..
+python3 scripts/build_private_host_bundle.py \
+  --version 1.0.0-preview \
+  --output-dir build/private-host
+```
+
+输出包含 `.tar.gz`、`.zip` 和 archive SHA-256 JSON。解压后运行
+`sh install.sh`，默认安装到 `~/.local/share/agentops-mis` 并创建
+`~/.local/bin/agentops`，同时在 `~/Applications` 安装可双击的
+`AgentOps MIS.app`。双击入口只负责必要时初始化本地主机、以
+`--no-workers` 安全启动并打开现有浏览器 Workspace；它不是另一套桌面前端，
+也不会自动启用 Hermes/OpenClaw。无图形环境可在安装前设置
+`AGENTOPS_NO_APP_INSTALL=1`。`sh uninstall.sh` 默认不会删除
+`~/.agentops/host` 用户账本/配置；若安装了 Host LaunchAgent，卸载产品前必须
+先 unload 并删除该服务。该预览尚未 Apple 签名或公证，不能当作
+正式 `.pkg/.dmg` 发布。
+
 也可以手动启动 UI：
 
 ```bash
@@ -334,7 +529,7 @@ Workspace isolation smoke 会验证：token 绑定 workspace A 后，只能 pull
 - API 会检查 endpoint scope，例如 `tasks:create`、`tasks:read`、`runs:write`、`audit:write`。
 - `./scripts/agentops demo readiness` 可查看 v1.5 录屏主路径是否齐备：local readiness、安全边界、worker fleet lanes、async inbox、客户任务闭环和 run ledger 证据。它只读，不启动 worker、不写账本、不触发 live runtime。
 - `./scripts/agentops commander plan --goal "..."` 可把一个客户/项目目标预览拆成多条 AI 团队工作包；加 `--confirm-create` 后才写入 planned MIS tasks，并记录 commander runtime/audit evidence。`./scripts/agentops commander packages` 可读回持久化工作包状态、最新 run 和 evidence counts。浏览器入口在 `/workspace/agents` 的 Commander Work Package Planner，详见 `docs/COMMANDER_WORK_PACKAGE_PLANNER.md`。
-- `./scripts/agentops worker status` 可从命令行查看 worker fleet、daemon、pending task 和 stuck task 状态。
+- `./scripts/agentops worker status` 可从命令行查看 worker fleet、daemon、pending task 和 stuck task 状态。Private Host 下它走独立的 Host 机器凭据只读路由；浏览器仍使用 Human Session，远程 Agent token 不能读取整机 Worker 遥测。
 - `./scripts/agentops worker hygiene` 默认只读，会列出 stuck worker tasks 和超过阈值仍 never-seen 的 enrollment；只有加 `--apply --confirm-cleanup` 才释放任务、吊销 stale token，并写入 audit/runtime evidence。
 - `./scripts/agentops local readiness` 可查看单机开源版闭环体检：Agent Gateway、worker route、memory/knowledge、approval、task->run->tool/eval/audit/artifact 证据、runbook 是否齐备。它只读，不启动 worker、不拉任务、不触发 Hermes/OpenClaw live runtime。返回里的 `local_run_path` 会给出可复制的启动、预检、worker、service-control 预览、派活和验收命令；这些命令只展示给操作者复制执行，server 不会代替用户执行 shell。
 - `./scripts/agentops worker preflight --adapter mock|hermes|openclaw` 可从主 CLI 执行只读 Gateway/adapter 预检，不拉任务、不写账本、不触发 live runtime。
@@ -463,6 +658,7 @@ Hermes/OpenClaw 真实执行仍必须显式加 `--confirm-run`。
 ```bash
 python3 scripts/local_open_source_experiment_base_smoke.py
 ./scripts/agentops knowledge evidence-packet "open source experiment base" --limit 5
+./scripts/agentops knowledge context-packet --task-id <task_id> --adapter hermes --limit 5 --memory-limit 3
 ./scripts/agentops eval propose-case --source-type manual --title "Local experiment regression" --expectation "Experiment learnings must become reviewable MIS evidence before product adoption."
 ```
 
@@ -471,6 +667,40 @@ python3 scripts/local_open_source_experiment_base_smoke.py
 ## v1.5 Local Agent Worker Loop
 
 `agentops-worker` 是可安装的 worker daemon 命令。它通过 Agent Gateway API 拉取普通 MIS 任务，认领后调用 adapter，并把 run/tool/eval/artifact/audit、`agent_plan` 和 `plan_evidence_manifest` 写回 MIS。`scripts/agent_worker.py` 仍保留为 repo-local 兼容 wrapper，供本地 UI/smoke 继续使用。
+
+### Codex 作为受治理 AI 员工
+
+`/admin/connectors/codex` 是连接器清单中的 Codex 双向连接与证据页。旧的
+`/admin/codex` 会兼容跳转到这里。它读取
+`/api/workers/adapter-readiness`、Connector Registry、Worker Fleet 和 Run
+Ledger 的真实数据，不启动 Codex，也不展示凭据或本机 binary 路径。
+
+本机 loopback 首先做只读预检，再显式确认一次任务：
+
+```bash
+agentops worker preflight --adapter codex
+agentops workflow run-task \
+  --adapter codex \
+  --confirm-run \
+  --worker-agent-id <codex_agent_id> \
+  --title "<task title>" \
+  --description "<task description>"
+```
+
+本机 loopback 不应添加 `--use-session`。远程或另一台电脑上的 Codex
+必须先完成 scoped enrollment，再用 `--use-session` 换取短期 session。
+Codex 默认运行在 ephemeral、strict、read-only 模式；workspace-write 是
+另一条高风险路径，必须经过已验证 Agent Plan、精确 PreparedAction、
+人类审批、官方 Codex bundle attestation、受限路径和托管 detached
+worktree。它不会自动 commit、merge、push、deploy 或发布。
+
+仓库同时提供 `plugins/agentops-mis` Codex 插件。它让 Codex 通过现有
+AgentOps CLI/API 领取任务、获取受限上下文并回写 Run、Tool、Evaluation、
+Artifact 与 Audit；不会把 Token 写进插件，也不允许 Agent 自批。安装与
+验证见 `docs/CODEX_PLUGIN_INSTALL_RUNBOOK.md`。原生 AgentOps MIS MCP、
+device-code 登录和一键设备 enrollment 仍未实现。
+现状、客户接入目标和 authority boundary 见
+`docs/CODEX_MIS_PRODUCT_BRIDGE_SPEC.md`。
 
 Hermes/OpenClaw 监督 loop 也可以作为 MIS workflow 运行：
 
@@ -494,7 +724,7 @@ agentops doctor
 agentops worker preflight --adapter mock --agent-id agt_worker_local
 agentops-worker preflight --adapter mock --agent-id agt_worker_local
 agentops-worker --once --adapter mock --agent-id agt_worker_local
-agentops-worker --adapter mock --poll-interval 5 --max-tasks 0 --continue-on-error --write-state --jsonl-log
+agentops-worker --adapter mock --poll-interval 5 --max-tasks 0 --continue-on-error --write-state
 agentops-worker service-template --manager launchd --adapter mock --agent-id agt_worker_local > ~/Library/LaunchAgents/local.agentops.worker.agt_worker_local.plist
 agentops-worker service-install --manager launchd --adapter mock --agent-id agt_worker_local
 agentops-worker service-install --manager launchd --adapter mock --agent-id agt_worker_local --confirm-install
@@ -554,12 +784,15 @@ python3 scripts/agent_worker.py \
 
 ```bash
 python3 scripts/agent_worker.py --adapter mock --poll-interval 5 --max-tasks 10
-python3 scripts/agent_worker.py --adapter mock --poll-interval 5 --max-tasks 0 --continue-on-error --max-errors 5 --write-state --jsonl-log
+python3 scripts/agent_worker.py --adapter mock --poll-interval 5 --max-tasks 0 --continue-on-error --max-errors 5 --write-state
 ```
 
 浏览器派发：
 
 - `/workspace/agents` 现在有 “本地 Worker 循环 / Local Worker Loop” 面板。
+- `/admin/connectors/codex` 展示真实 Codex Connector/Readiness、双向
+  Plugin/Skill 链路、实例、只读 Run、审批和
+  workspace-write attestation，不用其他 adapter 或 mock 数据替代。
 - `/workspace/agents` 现在也有 “客户任务派发 / Customer Task Dispatch” 面板：用户填写一个正常业务任务，选择 mock/Hermes/OpenClaw adapter，系统通过 `POST /api/workflows/customer-worker-task` 创建任务、执行 worker，并显示 task/run/artifact/evidence/plan-evidence 链接。
 - 它可以从页面触发一次 `mock`、`Hermes` 或 `OpenClaw` worker run。
 - 它也可以启动/停止本地 mock / Hermes / OpenClaw daemon，让 worker 持续拉取普通 MIS 任务。

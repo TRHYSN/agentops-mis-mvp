@@ -1,0 +1,5 @@
+interface:
+  display_name: "AgentOps MIS"
+  short_description: "Use governed MIS tasks and evidence from Codex"
+  brand_color: "#22C7D6"
+  default_prompt: "Use $agentops-mis to check my MIS connection and continue one governed task."

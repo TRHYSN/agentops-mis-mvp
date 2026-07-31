@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import stat
 import subprocess
 import sys
@@ -35,6 +36,8 @@ def main() -> int:
         tmp_path = Path(tmp)
         service_path = tmp_path / "local.agentops.worker.agt_service_install.plist"
         wrapper_path = tmp_path / "local.agentops.worker.agt_service_install_wrapper.plist"
+        hermes_path = tmp_path / "local.agentops.worker.agt_service_install_hermes.plist"
+        unsafe_gateway_path = tmp_path / "unsafe-hermes.plist"
 
         dry = run([
             sys.executable,
@@ -127,6 +130,56 @@ def main() -> int:
         require("WorkingDirectory" in wrapper_text, "wrapper launchd service should set repo working directory", failures)
         require("~/Library/Logs" not in wrapper_text, "wrapper launchd service install should expand log path", failures)
 
+        hermes = run([
+            str(ROOT / "scripts" / "agentops"),
+            "worker",
+            "service-install",
+            "--manager",
+            "launchd",
+            "--agent-id",
+            "agt_service_install_hermes",
+            "--adapter",
+            "hermes",
+            "--confirm-run",
+            "--hermes-gateway-url",
+            "http://127.0.0.1:8643/",
+            "--service-path",
+            str(hermes_path),
+            "--confirm-install",
+        ])
+        hermes_payload = parse_json(hermes)
+        require(hermes.returncode == 0, f"Hermes service install failed: {hermes_payload}", failures)
+        require(hermes_payload.get("wrote") is True and hermes_path.exists(), f"Hermes service file missing: {hermes_payload}", failures)
+        hermes_text = hermes_path.read_text(encoding="utf-8") if hermes_path.exists() else ""
+        hermes_gateway_persisted = bool(re.search(
+            r"<key>HERMES_GATEWAY_URL</key>\s*<string>http://127\.0\.0\.1:8643</string>",
+            hermes_text,
+        ))
+        require(hermes_gateway_persisted, "Hermes gateway URL was not normalized and persisted", failures)
+
+        unsafe_gateway = run([
+            sys.executable,
+            "-m",
+            "agentops_mis_cli.worker",
+            "service-install",
+            "--manager",
+            "launchd",
+            "--agent-id",
+            "agt_service_install_unsafe_gateway",
+            "--adapter",
+            "hermes",
+            "--confirm-run",
+            "--hermes-gateway-url",
+            "http://service-user:credential-value@127.0.0.1:8643",
+            "--service-path",
+            str(unsafe_gateway_path),
+            "--confirm-install",
+        ])
+        unsafe_gateway_payload = parse_json(unsafe_gateway)
+        require(unsafe_gateway.returncode == 1, f"credential-bearing Hermes URL should fail: {unsafe_gateway_payload}", failures)
+        require(unsafe_gateway_payload.get("error") == "invalid_hermes_gateway_url", f"wrong Hermes URL error: {unsafe_gateway_payload}", failures)
+        require(unsafe_gateway_payload.get("wrote") is False and not unsafe_gateway_path.exists(), f"unsafe Hermes URL wrote a service file: {unsafe_gateway_payload}", failures)
+
         unsafe = run([
             sys.executable,
             "-m",
@@ -153,16 +206,21 @@ def main() -> int:
             "install": install_payload,
             "duplicate": duplicate_payload,
             "wrapper": wrapper_payload,
+            "hermes": hermes_payload,
+            "unsafe_gateway": unsafe_gateway_payload,
             "unsafe": unsafe_payload,
         }, ensure_ascii=False)
         require("agtok_fake_should_not_be_written" not in serialized, "service-install leaked raw token-like content", failures)
         require("sk-" not in serialized and "ntn_" not in serialized, "service-install leaked secret-like content", failures)
+        require("credential-value" not in serialized and "service-user" not in serialized, "service-install echoed credential-bearing Hermes URL", failures)
 
     print(json.dumps({
         "ok": not failures,
         "dry_run_ok": not failures and dry_payload.get("dry_run"),
         "install_wrote": install_payload.get("wrote"),
         "wrapper_wrote": wrapper_payload.get("wrote"),
+        "hermes_gateway_persisted": hermes_gateway_persisted,
+        "unsafe_gateway_blocked": unsafe_gateway_payload.get("error") == "invalid_hermes_gateway_url",
         "unsafe_blocked": unsafe_payload.get("ok") is False,
         "failures": failures,
     }, ensure_ascii=False, indent=2, sort_keys=True))
