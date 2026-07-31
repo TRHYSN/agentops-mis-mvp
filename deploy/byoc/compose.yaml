@@ -147,6 +147,7 @@ services:
       - --postgres-runtime
       - --human-session
       - --
+    command: ["node", "scripts/start.mjs"]
     environment:
       <<: *control_plane_database_environment
       AGENTOPS_POSTGRES_HOST: postgres

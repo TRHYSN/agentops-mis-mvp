@@ -406,6 +406,10 @@ async function run() {
     controlPlaneService,
     /AGENTOPS_HUMAN_SESSION_HMAC_KEY_SOURCE_FILE:\s*\/run\/secrets\/human_session_hmac_key/,
   );
+  assert.match(
+    controlPlaneService,
+    /command:\s*\["node", "scripts\/start\.mjs"\]/,
+  );
   assert.match(controlPlaneService, /-\s*postgres_runtime_password/);
   assert.match(controlPlaneService, /-\s*human_session_hmac_key/);
   assert.doesNotMatch(
