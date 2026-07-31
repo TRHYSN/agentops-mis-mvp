@@ -514,7 +514,13 @@ async function sourceBoundaryContract() {
   assert.doesNotMatch(realAcceptanceSource, /agent_worker\.py/);
   assert.match(
     realAcceptanceSource,
-    /nextjs_postgres_real_worker_human_review_v4/,
+    /nextjs_postgres_real_worker_human_review_v5/,
+  );
+  assert.match(realAcceptanceSource, /stable_next_release_artifact_sha256/);
+  assert.match(realAcceptanceSource, /next_artifact_identity_verified/);
+  assert.match(
+    realAcceptanceSource,
+    /next_runtime_mutable_artifact_paths_omitted/,
   );
   assert.match(realAcceptanceSource, /"--estimated-cost-usd"/);
   assert.match(realAcceptanceSource, /configure:workspace-entitlement/);

@@ -386,6 +386,18 @@ jobs:
             exit "${status}"
           }
           trap report_lifecycle_failure EXIT
+          audit_log_count() {
+            local audit_id="$1"
+            docker compose \
+              --env-file "${AGENTOPS_BYOC_ENV_FILE}" \
+              -f "${AGENTOPS_BYOC_COMPOSE_FILE}" \
+              exec -T \
+              -e "ACCEPTANCE_AUDIT_ID=${audit_id}" \
+              postgres sh -ceu \
+              'psql --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" --no-psqlrc --tuples-only --no-align --set=audit_id="$ACCEPTANCE_AUDIT_ID"' <<'SQL'
+          SELECT count(*) FROM audit_logs WHERE audit_id=:'audit_id';
+          SQL
+          }
           lifecycle_dir="${AGENTOPS_BYOC_LIFECYCLE_STATE_DIR}"
           install -d -m 700 "${lifecycle_dir}"
 
@@ -475,15 +487,7 @@ jobs:
           test "$(docker inspect --format '{{.Image}}' "${control_plane_id}")" = \
             "${AGENTOPS_BYOC_TARGET_IMAGE_ID}"
 
-          authority_after_apply="$(
-            docker compose \
-              --env-file "${AGENTOPS_BYOC_ENV_FILE}" \
-              -f "${AGENTOPS_BYOC_COMPOSE_FILE}" \
-              exec -T \
-              -e "ACCEPTANCE_AUTHORITY_ID=${AGENTOPS_BYOC_AUTHORITY_ID}" \
-              postgres sh -ceu \
-              'psql --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" --no-psqlrc --tuples-only --no-align --set=authority_id="$ACCEPTANCE_AUTHORITY_ID" --command "SELECT count(*) FROM audit_logs WHERE audit_id=:'\''authority_id'\''"'
-          )"
+          authority_after_apply="$(audit_log_count "${AGENTOPS_BYOC_AUTHORITY_ID}")"
           test "${authority_after_apply}" = "1"
 
           docker compose \
@@ -535,24 +539,8 @@ jobs:
               and .quarantine_cleanup_pending == false
             ' "${rollback_receipt}" > /dev/null
 
-          authority_after_rollback="$(
-            docker compose \
-              --env-file "${AGENTOPS_BYOC_ENV_FILE}" \
-              -f "${AGENTOPS_BYOC_COMPOSE_FILE}" \
-              exec -T \
-              -e "ACCEPTANCE_AUTHORITY_ID=${AGENTOPS_BYOC_AUTHORITY_ID}" \
-              postgres sh -ceu \
-              'psql --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" --no-psqlrc --tuples-only --no-align --set=authority_id="$ACCEPTANCE_AUTHORITY_ID" --command "SELECT count(*) FROM audit_logs WHERE audit_id=:'\''authority_id'\''"'
-          )"
-          probe_after_rollback="$(
-            docker compose \
-              --env-file "${AGENTOPS_BYOC_ENV_FILE}" \
-              -f "${AGENTOPS_BYOC_COMPOSE_FILE}" \
-              exec -T \
-              -e "ACCEPTANCE_PROBE_ID=${AGENTOPS_BYOC_POST_APPLY_PROBE_ID}" \
-              postgres sh -ceu \
-              'psql --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" --no-psqlrc --tuples-only --no-align --set=probe_id="$ACCEPTANCE_PROBE_ID" --command "SELECT count(*) FROM audit_logs WHERE audit_id=:'\''probe_id'\''"'
-          )"
+          authority_after_rollback="$(audit_log_count "${AGENTOPS_BYOC_AUTHORITY_ID}")"
+          probe_after_rollback="$(audit_log_count "${AGENTOPS_BYOC_POST_APPLY_PROBE_ID}")"
           test "${authority_after_rollback}" = "1"
           test "${probe_after_rollback}" = "0"
 

@@ -159,14 +159,53 @@ def drop_database(
     env: dict[str, str],
     admin_database: str,
     database: str,
-) -> None:
-    psql(
+) -> subprocess.CompletedProcess[bytes]:
+    return psql(
         psql_bin,
         env,
         admin_database,
         f"DROP DATABASE IF EXISTS {checked_identifier(database)} WITH (FORCE);\n",
         check=False,
     )
+
+
+def cleanup_databases(
+    psql_bin: str,
+    env: dict[str, str],
+    admin_database: str,
+    databases: tuple[str, ...],
+) -> None:
+    cleanup_failed = False
+    for database in databases:
+        try:
+            result = drop_database(
+                psql_bin,
+                env,
+                admin_database,
+                database,
+            )
+            cleanup_failed = cleanup_failed or result.returncode != 0
+        except (OSError, SmokeError, subprocess.SubprocessError):
+            cleanup_failed = True
+
+    try:
+        remaining = scalar(
+            psql_bin,
+            env,
+            admin_database,
+            "SELECT count(*) FROM pg_database "
+            "WHERE datname IN (:'source_database', :'target_database');\n",
+            variables={
+                "source_database": databases[0],
+                "target_database": databases[1],
+            },
+        )
+        cleanup_failed = cleanup_failed or remaining != "0"
+    except (OSError, SmokeError, subprocess.SubprocessError):
+        cleanup_failed = True
+
+    if cleanup_failed:
+        raise SmokeError("fixture_database_cleanup_failed")
 
 
 def run_guardian(
@@ -509,8 +548,12 @@ def main() -> int:
                 raise SmokeError("restore_lease_directory_residue")
             assert_release(psql_bin, env, admin_database)
         finally:
-            drop_database(psql_bin, env, admin_database, target_database)
-            drop_database(psql_bin, env, admin_database, source_database)
+            cleanup_databases(
+                psql_bin,
+                env,
+                admin_database,
+                (source_database, target_database),
+            )
 
     print(
         json.dumps(
@@ -526,6 +569,7 @@ def main() -> int:
                 "wrapper_sigkill_released_fifo_lease": True,
                 "restore_process_zero_residue": True,
                 "guardian_backend_zero_residue": True,
+                "fixture_database_cleanup_verified": True,
                 "credentials_omitted": True,
             },
             sort_keys=True,

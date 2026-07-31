@@ -133,7 +133,7 @@ source plus explicitly confirmed real Hermes and OpenClaw runs.
 
 Run the frozen-source acceptance harness against an isolated PostgreSQL
 database and the production Next.js server. Its current receipt contract is
-`nextjs_postgres_real_worker_human_review_v4`:
+`nextjs_postgres_real_worker_human_review_v5`:
 
 ```bash
 python3 scripts/nextjs_postgres_real_worker_human_review_smoke.py \
@@ -149,6 +149,11 @@ not start, a real provider call ran with `dry_run=false`, and `source_commit`
 matches the clean candidate `HEAD`. The harness rejects tracked or untracked
 worktree changes before execution and requires the tracked source fingerprint
 and Git identity to remain unchanged for the full run.
+
+The receipt also binds the immutable Next.js release artifact before startup,
+after acceptance, and after cleanup. Next runtime state under `.next/cache` and
+`.next/trace` is explicitly omitted from that release hash and reported in
+`next_runtime_mutable_artifact_paths_omitted`.
 
 The same acceptance provisions distinct migrator, runtime, and entitlement
 administrator database identities. Normal fixture and product writes use the

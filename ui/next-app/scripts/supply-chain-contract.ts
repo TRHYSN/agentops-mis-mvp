@@ -156,6 +156,11 @@ async function run() {
   assert.match(byoc, /authority_database_bound == true/);
   assert.match(byoc, /backup_restore_authoritative == true/);
   assert.match(byoc, /quarantine_cleanup_pending == false/);
+  assert.match(byoc, /audit_log_count\(\)[\s\S]*<<'SQL'[\s\S]*audit_id=:'audit_id'/);
+  assert.doesNotMatch(
+    byoc,
+    /--command\s+["\\]+SELECT count\(\*\) FROM audit_logs/,
+  );
   assert.match(byoc, /authority_after_rollback[^]*= "1"/);
   assert.match(byoc, /probe_after_rollback[^]*= "0"/);
   assert.match(byoc, /volume_identity_before/);
