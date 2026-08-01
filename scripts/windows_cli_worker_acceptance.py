@@ -354,6 +354,8 @@ public static class AgentOpsCodexFixture
             childInfo.Arguments = "--fixture-no-stdin";
             childInfo.UseShellExecute = false;
             childInfo.CreateNoWindow = true;
+            childInfo.RedirectStandardOutput = true;
+            childInfo.RedirectStandardError = true;
             Process child = Process.Start(childInfo);
             File.WriteAllText(args[1], child.Id.ToString());
             return 0;
@@ -599,7 +601,7 @@ def main() -> int:
                 _run_codex_bounded(
                     command=[str(fake_codex), "--fixture-exit-with-child", str(escaped_child_pid)],
                     cwd=temp_root,
-                    prompt="bounded child cleanup fixture",
+                    prompt="x" * 1_000_000,
                     timeout=1,
                 )
             except subprocess.TimeoutExpired:
@@ -745,6 +747,7 @@ def main() -> int:
                 ],
                 cwd=temp_root,
                 env=shim_env,
+                expected_returncode=1,
             )
             rejected_service_payload = json_stdout(rejected_service_install, "rejected Windows Codex shim service install")
             require(rejected_service_install.returncode != 0 and rejected_service_payload.get("ok") is False, "Windows Codex service accepted a .cmd shim")
@@ -862,6 +865,7 @@ def main() -> int:
                 ],
                 cwd=temp_root,
                 env=shim_env,
+                expected_returncode=1,
             )
             rejected_check_payload = json_stdout(rejected_service_check, "rejected Windows Codex shim service check")
             require(rejected_service_check.returncode != 0 and rejected_check_payload.get("ok") is False, "Windows Codex service check accepted a .cmd shim")
@@ -896,6 +900,7 @@ def main() -> int:
                 ],
                 cwd=temp_root,
                 env=shim_env,
+                expected_returncode=1,
             )
             rejected_control_payload = json_stdout(rejected_service_control, "rejected Windows Codex shim service control")
             require(rejected_service_control.returncode != 0 and rejected_control_payload.get("ok") is False, "Windows Codex service control accepted a .cmd shim")
