@@ -248,8 +248,8 @@ def json_stdout(result: subprocess.CompletedProcess[str], label: str) -> dict[st
     return payload
 
 
-def require_request_order(expected: list[tuple[str, str]]) -> None:
-    position = -1
+def require_request_order(expected: list[tuple[str, str]], *, start: int = 0) -> None:
+    position = start - 1
     for method, path in expected:
         for index in range(position + 1, len(SmokeGateway.requests)):
             request = SmokeGateway.requests[index]
@@ -554,7 +554,7 @@ def main() -> int:
             require(codex_adapter_preflight.get("version_ok") is True, "Windows Codex fixture version check failed")
             require(codex_preflight_payload.get("live_execution_performed") is False, "Codex preflight executed a task")
 
-            SmokeGateway.requests = []
+            codex_request_start = len(SmokeGateway.requests)
             codex_state_path = temp_root / "state" / "codex-worker.json"
             codex_once = run(
                 [
@@ -604,18 +604,19 @@ def main() -> int:
                     ("POST", "/api/agent-gateway/evaluations/submit"),
                     ("POST", "/api/agent-gateway/audit"),
                     ("POST", "/api/agent-gateway/plan-evidence-manifests"),
-                ]
+                ],
+                start=codex_request_start,
             )
             codex_request_payloads = {
                 str(request.get("path")): request.get("payload") or {}
-                for request in SmokeGateway.requests
+                for request in SmokeGateway.requests[codex_request_start:]
                 if request.get("method") == "POST"
             }
             require(codex_request_payloads[f"/api/agent-gateway/tasks/{TASK_ID}/claim"].get("runtime_type") == "codex", "Codex claim runtime drifted")
             require(codex_request_payloads["/api/agent-gateway/runs/start"].get("runtime_type") == "codex", "Codex run runtime drifted")
             require(codex_request_payloads["/api/agent-gateway/tool-calls"].get("tool_name") == "agent_worker.codex", "Codex tool evidence drifted")
             require(codex_request_payloads["/api/agent-gateway/evaluations/submit"].get("pass_fail") == "pass", "Codex evaluation did not pass")
-            codex_rendered_requests = json.dumps(SmokeGateway.requests, sort_keys=True)
+            codex_rendered_requests = json.dumps(SmokeGateway.requests[codex_request_start:], sort_keys=True)
             require("Windows Codex read-only worker completed" in codex_rendered_requests, "Codex bounded summary was not recorded")
             require(
                 not any(marker in codex_rendered_requests for marker in ("agtok_", "agtsess_", "sk-", "ntn_")),
