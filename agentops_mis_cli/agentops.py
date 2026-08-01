@@ -5450,6 +5450,8 @@ def cmd_worker_service_check(args, client: AgentOpsClient) -> dict:
     )
     payload = worker_mod.check_service_installation(check_args)
     payload["command"] = "agentops worker service-check"
+    if payload.get("ok") is not True:
+        payload["_exit_code"] = 1
     return payload
 
 
@@ -5484,6 +5486,8 @@ def cmd_worker_service_install(args, client: AgentOpsClient) -> dict:
     )
     payload = worker_mod.install_service_file(install_args)
     payload["command"] = "agentops worker service-install"
+    if payload.get("ok") is not True:
+        payload["_exit_code"] = 1
     return payload
 
 
@@ -5517,6 +5521,8 @@ def cmd_worker_service_control(args, client: AgentOpsClient) -> dict:
     )
     payload = worker_mod.control_service(control_args)
     payload["command"] = "agentops worker service-control"
+    if payload.get("ok") is not True:
+        payload["_exit_code"] = 1
     return payload
 
 
@@ -6823,7 +6829,7 @@ def build_parser() -> argparse.ArgumentParser:
     worker_service_install.add_argument("--config-path", default=str(CONFIG_PATH))
     worker_service_install.add_argument("--worker-command", default="", help="Worker executable command for service templates. Defaults to installed agentops-worker or python -m fallback.")
     worker_service_install.add_argument("--hermes-gateway-url", default=os.environ.get("HERMES_GATEWAY_URL", ""), help="Persist an explicit credential-free Hermes HTTP(S) base URL for a Hermes service.")
-    worker_service_install.add_argument("--codex-bin", default=os.environ.get("CODEX_BIN", ""), help="Persist the exact local Codex executable or Windows command shim for a Codex service.")
+    worker_service_install.add_argument("--codex-bin", default=os.environ.get("CODEX_BIN", ""), help="Persist the exact local Codex executable; Windows requires a native .exe.")
     worker_service_install.add_argument("--service-path", default="")
     worker_service_install.add_argument("--confirm-install", action="store_true", help="Write the service file. Default is dry-run.")
     worker_service_install.add_argument("--overwrite", action="store_true")
