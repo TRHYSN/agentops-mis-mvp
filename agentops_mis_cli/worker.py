@@ -45,6 +45,7 @@ from agentops_mis_cli.codex_runtime import (
     managed_codex_worktree_path,
     normalize_allowed_paths,
     remove_managed_codex_worktree,
+    resolve_codex_binary,
 )
 from agentops_mis_cli.http_transport import credential_opener, credential_transport_url_allowed, safe_credential_error
 from agentops_mis_cli.platform_paths import (
@@ -3373,6 +3374,17 @@ def service_env_values(args) -> dict[str, str]:
     return env_values
 
 
+def normalize_service_codex_bin(value: object) -> str:
+    binary = resolve_codex_binary(str(value or ""))
+    executable = binary.is_file() and (
+        is_windows() and binary.suffix.lower() in {".bat", ".cmd", ".exe"}
+        or os.access(binary, os.X_OK)
+    )
+    if not executable:
+        raise WorkerServiceConfigError("codex_binary_unavailable")
+    return str(binary.resolve())
+
+
 def build_worker_command(args) -> list[str]:
     command = [
         *resolve_worker_entrypoint(args),
@@ -3396,6 +3408,8 @@ def build_worker_command(args) -> list[str]:
         ])
     if args.confirm_run:
         command.append("--confirm-run")
+    if args.adapter == "codex":
+        command.extend(["--codex-bin", normalize_service_codex_bin(getattr(args, "codex_bin", ""))])
     return command
 
 
@@ -3540,7 +3554,7 @@ def build_service_template_parser() -> argparse.ArgumentParser:
     parser.add_argument("--base-url", default=os.environ.get("AGENTOPS_BASE_URL", DEFAULT_BASE_URL))
     parser.add_argument("--workspace-id", default=os.environ.get("AGENTOPS_WORKSPACE_ID", DEFAULT_WORKSPACE_ID))
     parser.add_argument("--agent-id", default=os.environ.get("AGENTOPS_AGENT_ID", DEFAULT_AGENT_ID))
-    parser.add_argument("--adapter", choices=["mock", "hermes", "openclaw"], default="mock")
+    parser.add_argument("--adapter", choices=["mock", "hermes", "openclaw", "codex"], default="mock")
     parser.add_argument("--confirm-run", action="store_true")
     parser.add_argument("--use-session", action="store_true", help="Render a session-minting worker command for remote/scoped tokens. Local loopback services omit this by default.")
     parser.add_argument("--session-ttl-sec", type=int, default=900)
@@ -3555,6 +3569,7 @@ def build_service_template_parser() -> argparse.ArgumentParser:
     parser.add_argument("--config-path", default=str(DEFAULT_CONFIG_PATH))
     parser.add_argument("--worker-command", default="", help="Worker executable command for service templates. Defaults to installed agentops-worker or python -m fallback.")
     parser.add_argument("--hermes-gateway-url", default=os.environ.get("HERMES_GATEWAY_URL", ""), help="Persist an explicit credential-free Hermes HTTP(S) base URL for a Hermes service.")
+    parser.add_argument("--codex-bin", default=os.environ.get("CODEX_BIN", ""), help="Persist the exact local Codex executable or Windows command shim for a Codex service.")
     return parser
 
 
@@ -3925,6 +3940,15 @@ def check_service_installation(args) -> dict:
             "raw_content_omitted": True,
         }
     confirm_gate_ok = args.adapter == "mock" or "--confirm-run" in inspection_content
+    codex_runtime = None
+    runtime_ready = True
+    if args.adapter == "codex":
+        codex_runtime = codex_preflight(
+            binary_path=str(getattr(args, "codex_bin", "") or ""),
+            cwd=Path(getattr(args, "working_directory", DEFAULT_WORKER_CWD)).expanduser().resolve(strict=False),
+            timeout=min(max(int(getattr(args, "timeout", 5) or 5), 1), 20),
+        )
+        runtime_ready = codex_runtime.get("ok") is True
     if args.manager == "launchd":
         service_status = launchd_status(label, args.timeout)
     elif args.manager == "systemd":
@@ -3941,7 +3965,7 @@ def check_service_installation(args) -> dict:
         else (use_session_present or local_dev_no_token)
     )
     windows_contract_ok = args.manager != "windows-task" or windows_contract.get("valid") is True
-    ok = bool(exists and command_has_worker and adapter_present and credential_source_ok and confirm_gate_ok and relaunch_policy["enabled"] and windows_contract_ok and not token_like_detected)
+    ok = bool(exists and command_has_worker and adapter_present and credential_source_ok and confirm_gate_ok and relaunch_policy["enabled"] and windows_contract_ok and runtime_ready and not token_like_detected)
     hints = []
     if not exists:
         hints.append("Render a template with agentops-worker service-template and write it to service_path.")
@@ -3959,6 +3983,8 @@ def check_service_installation(args) -> dict:
         hints.append("Installed service credential source does not match the requested check policy.")
     if exists and not service_status.get("loaded"):
         hints.append("Service file exists but does not appear loaded; load it manually on the agent machine after review.")
+    if args.adapter == "codex" and not runtime_ready:
+        hints.append("Codex service definition exists, but the configured Codex runtime did not pass local preflight.")
     return {
         "ok": ok,
         "provider": "agentops-worker",
@@ -3992,6 +4018,21 @@ def check_service_installation(args) -> dict:
             else None
         ),
         "service_status": service_status,
+        "runtime_readiness": (
+            {
+                "checked": True,
+                "ready": runtime_ready,
+                "adapter": "codex",
+                "binary_exists": bool((codex_runtime or {}).get("binary_exists")),
+                "binary_executable": bool((codex_runtime or {}).get("binary_executable")),
+                "version_ok": bool((codex_runtime or {}).get("version_ok")),
+                "live_execution_performed": False,
+                "raw_binary_path_omitted": True,
+                "token_omitted": True,
+            }
+            if args.adapter == "codex"
+            else {"checked": False, "ready": True, "adapter": args.adapter, "live_execution_performed": False, "token_omitted": True}
+        ),
         "setup_hints": hints,
         "live_execution_performed": False,
         "token_omitted": True,
@@ -4015,6 +4056,7 @@ def build_service_check_parser() -> argparse.ArgumentParser:
     parser.add_argument("--runtime-dir", default="")
     parser.add_argument("--worker-command", default="")
     parser.add_argument("--hermes-gateway-url", default=os.environ.get("HERMES_GATEWAY_URL", ""))
+    parser.add_argument("--codex-bin", default=os.environ.get("CODEX_BIN", ""))
     parser.add_argument("--service-path", default="")
     parser.add_argument("--api-key-placeholder", default=DEFAULT_API_KEY_PLACEHOLDER)
     parser.add_argument("--credential-source", choices=["auto", "direct", "local_config"], default="auto")
@@ -4094,6 +4136,7 @@ def install_service_file(args) -> dict:
         working_directory=args.working_directory,
         runtime_dir=args.runtime_dir,
         hermes_gateway_url=args.hermes_gateway_url,
+        codex_bin=args.codex_bin,
         timeout=args.timeout,
     )
     service_check = check_service_installation(check_args) if service_path.exists() else {
@@ -4118,6 +4161,7 @@ def install_service_file(args) -> dict:
         and checked_file.get("confirm_gate_ok")
         and not checked_file.get("token_like_detected")
         and credential_contract_ok
+        and (args.adapter != "codex" or (service_check.get("runtime_readiness") or {}).get("ready") is True)
     )
     setup_hints = []
     if not args.confirm_install:
@@ -4189,6 +4233,7 @@ def build_service_install_parser() -> argparse.ArgumentParser:
     parser.add_argument("--config-path", default=str(DEFAULT_CONFIG_PATH))
     parser.add_argument("--worker-command", default="", help="Worker executable command for service templates. Defaults to installed agentops-worker or python -m fallback.")
     parser.add_argument("--hermes-gateway-url", default=os.environ.get("HERMES_GATEWAY_URL", ""), help="Persist an explicit credential-free Hermes HTTP(S) base URL for a Hermes service.")
+    parser.add_argument("--codex-bin", default=os.environ.get("CODEX_BIN", ""), help="Persist the exact local Codex executable or Windows command shim for a Codex service.")
     parser.add_argument("--service-path", default="")
     parser.add_argument("--confirm-install", action="store_true", help="Write the service file. Default is dry-run.")
     parser.add_argument("--overwrite", action="store_true", help="Replace an existing service file after local review.")
@@ -4245,6 +4290,7 @@ def control_service(args) -> dict:
         working_directory=getattr(args, "working_directory", str(DEFAULT_WORKER_CWD)),
         runtime_dir=getattr(args, "runtime_dir", ""),
         hermes_gateway_url=getattr(args, "hermes_gateway_url", ""),
+        codex_bin=getattr(args, "codex_bin", ""),
         timeout=args.timeout,
     )
     service_check = check_service_installation(check_args)
@@ -4361,6 +4407,7 @@ def build_service_control_parser() -> argparse.ArgumentParser:
     parser.add_argument("--runtime-dir", default="")
     parser.add_argument("--worker-command", default="")
     parser.add_argument("--hermes-gateway-url", default=os.environ.get("HERMES_GATEWAY_URL", ""))
+    parser.add_argument("--codex-bin", default=os.environ.get("CODEX_BIN", ""))
     parser.add_argument("--service-path", default="")
     parser.add_argument("--api-key-placeholder", default=DEFAULT_API_KEY_PLACEHOLDER)
     parser.add_argument("--credential-source", choices=["auto", "direct", "local_config"], default="auto")

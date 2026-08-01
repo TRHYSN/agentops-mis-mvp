@@ -5,10 +5,10 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-import selectors
 import shutil
 import signal
 import subprocess
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -102,6 +102,22 @@ class CodexOutputLimitExceeded(RuntimeError):
     pass
 
 
+def _binary_is_executable(path: Path) -> bool:
+    if not path.is_file():
+        return False
+    if os.name == "nt" and path.suffix.lower() in {".bat", ".cmd", ".exe"}:
+        return True
+    return os.access(path, os.X_OK)
+
+
+def _binary_command(binary: Path, arguments: list[str]) -> list[str]:
+    invocation = [str(binary), *arguments]
+    if os.name == "nt" and binary.suffix.lower() in {".bat", ".cmd"}:
+        command_processor = os.environ.get("COMSPEC") or shutil.which("cmd.exe") or "cmd.exe"
+        return [command_processor, "/d", "/s", "/c", subprocess.list2cmdline(invocation)]
+    return invocation
+
+
 def resolve_codex_binary(configured: str = "") -> Path:
     candidates = [
         configured.strip(),
@@ -113,7 +129,7 @@ def resolve_codex_binary(configured: str = "") -> Path:
         if not candidate:
             continue
         path = Path(candidate).expanduser()
-        if path.is_file() and os.access(path, os.X_OK):
+        if _binary_is_executable(path):
             return path
     return Path(candidates[0] or "codex").expanduser()
 
@@ -127,9 +143,20 @@ def _safe_proxy_value(value: str) -> str | None:
 
 def codex_subprocess_env() -> dict[str, str]:
     allowed = {
+        "APPDATA",
+        "COMSPEC",
         "HOME",
+        "HOMEDRIVE",
+        "HOMEPATH",
         "PATH",
+        "PATHEXT",
+        "LOCALAPPDATA",
+        "SYSTEMROOT",
+        "TEMP",
         "TMPDIR",
+        "TMP",
+        "USERPROFILE",
+        "WINDIR",
         "LANG",
         "LC_ALL",
         "LC_CTYPE",
@@ -154,7 +181,7 @@ def codex_subprocess_env() -> dict[str, str]:
 def codex_binary_attestation(binary_path: str, *, timeout: int = 10) -> dict:
     binary = resolve_codex_binary(binary_path)
     default_binary = Path(DEFAULT_CODEX_APP_BIN)
-    executable = binary.is_file() and os.access(binary, os.X_OK)
+    executable = _binary_is_executable(binary)
     official_bundle = False
     if executable and default_binary.is_file():
         official_bundle = binary.resolve() == default_binary.resolve()
@@ -164,7 +191,7 @@ def codex_binary_attestation(binary_path: str, *, timeout: int = 10) -> dict:
     if executable:
         try:
             proc = subprocess.run(
-                [str(binary), "--version"],
+                _binary_command(binary, ["--version"]),
                 cwd=Path.cwd(),
                 env=codex_subprocess_env(),
                 capture_output=True,
@@ -196,8 +223,7 @@ def codex_binary_attestation(binary_path: str, *, timeout: int = 10) -> dict:
 
 def codex_command(binary: Path, cwd: Path, *, sandbox: str = "read-only") -> list[str]:
     disabled_features = DISABLED_FEATURES if sandbox == "read-only" else WORKSPACE_WRITE_DISABLED_FEATURES
-    command = [
-        str(binary),
+    arguments = [
         "exec",
         "--json",
         "--ephemeral",
@@ -205,8 +231,8 @@ def codex_command(binary: Path, cwd: Path, *, sandbox: str = "read-only") -> lis
         "--strict-config",
     ]
     if sandbox == "read-only":
-        command.append("--skip-git-repo-check")
-    command.extend([
+        arguments.append("--skip-git-repo-check")
+    arguments.extend([
         "--config",
         'web_search="disabled"',
         "--sandbox",
@@ -218,11 +244,61 @@ def codex_command(binary: Path, cwd: Path, *, sandbox: str = "read-only") -> lis
         "-",
     ])
     for feature in disabled_features:
-        command[2:2] = ["--disable", feature]
-    return command
+        arguments[1:1] = ["--disable", feature]
+    return _binary_command(binary, arguments)
+
+
+def _terminate_process_tree(proc: subprocess.Popen[bytes]) -> None:
+    if proc.poll() is not None:
+        return
+    if os.name == "nt":
+        try:
+            subprocess.run(
+                ["taskkill", "/PID", str(proc.pid), "/T", "/F"],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=5,
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError):
+            pass
+        if proc.poll() is None:
+            proc.kill()
+        return
+    try:
+        os.killpg(proc.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+
+
+def _capture_stream(
+    stream,
+    target: bytearray,
+    limit: int,
+    output_limit_exceeded: threading.Event,
+) -> None:
+    try:
+        while True:
+            chunk = stream.read(65_536)
+            if not chunk:
+                return
+            remaining = max((limit + 1) - len(target), 0)
+            if remaining:
+                target.extend(chunk[:remaining])
+            if len(chunk) > remaining or len(target) > limit:
+                output_limit_exceeded.set()
+                return
+    finally:
+        stream.close()
 
 
 def _run_codex_bounded(*, command: list[str], cwd: Path, prompt: str, timeout: int) -> BoundedProcessResult:
+    process_options: dict[str, object] = {}
+    if os.name == "nt":
+        process_options["creationflags"] = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+    else:
+        process_options["start_new_session"] = True
     proc = subprocess.Popen(
         command,
         cwd=cwd,
@@ -230,44 +306,48 @@ def _run_codex_bounded(*, command: list[str], cwd: Path, prompt: str, timeout: i
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
-        start_new_session=True,
+        **process_options,
     )
     stdout = bytearray()
     stderr = bytearray()
     started = time.monotonic()
-
-    def terminate_group() -> None:
-        try:
-            os.killpg(proc.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
+    output_limit_exceeded = threading.Event()
 
     try:
         if proc.stdin is None or proc.stdout is None or proc.stderr is None:
             raise RuntimeError("Codex subprocess pipes were not created")
         proc.stdin.write(prompt.encode("utf-8"))
         proc.stdin.close()
-        selector = selectors.DefaultSelector()
-        selector.register(proc.stdout, selectors.EVENT_READ, stdout)
-        selector.register(proc.stderr, selectors.EVENT_READ, stderr)
-        while selector.get_map():
+        readers = [
+            threading.Thread(
+                target=_capture_stream,
+                args=(proc.stdout, stdout, MAX_JSONL_BYTES, output_limit_exceeded),
+                daemon=True,
+            ),
+            threading.Thread(
+                target=_capture_stream,
+                args=(proc.stderr, stderr, MAX_STDERR_BYTES, output_limit_exceeded),
+                daemon=True,
+            ),
+        ]
+        for reader in readers:
+            reader.start()
+        while proc.poll() is None:
+            if output_limit_exceeded.is_set():
+                _terminate_process_tree(proc)
+                raise CodexOutputLimitExceeded("Codex subprocess output exceeded its bounded capture limit")
             if time.monotonic() - started > timeout:
-                terminate_group()
+                _terminate_process_tree(proc)
                 raise subprocess.TimeoutExpired(command, timeout)
-            events = selector.select(timeout=0.1)
-            for key, _mask in events:
-                chunk = os.read(key.fileobj.fileno(), 65_536)
-                if not chunk:
-                    selector.unregister(key.fileobj)
-                    key.fileobj.close()
-                    continue
-                target = key.data
-                target.extend(chunk)
-                limit = MAX_JSONL_BYTES if target is stdout else MAX_STDERR_BYTES
-                if len(target) > limit:
-                    terminate_group()
-                    raise CodexOutputLimitExceeded("Codex subprocess output exceeded its bounded capture limit")
+            time.sleep(0.05)
         returncode = proc.wait(timeout=5)
+        for reader in readers:
+            reader.join(timeout=5)
+        if any(reader.is_alive() for reader in readers):
+            _terminate_process_tree(proc)
+            raise RuntimeError("Codex subprocess output pipes did not close")
+        if output_limit_exceeded.is_set():
+            raise CodexOutputLimitExceeded("Codex subprocess output exceeded its bounded capture limit")
         return BoundedProcessResult(
             returncode=returncode,
             stdout=bytes(stdout).decode("utf-8", errors="replace"),
@@ -275,7 +355,7 @@ def _run_codex_bounded(*, command: list[str], cwd: Path, prompt: str, timeout: i
         )
     except Exception:
         if proc.poll() is None:
-            terminate_group()
+            _terminate_process_tree(proc)
             try:
                 proc.wait(timeout=5)
             except subprocess.TimeoutExpired:
@@ -889,13 +969,13 @@ def execute_codex_workspace_write(
 def codex_preflight(*, binary_path: str, cwd: Path, timeout: int) -> dict:
     binary = resolve_codex_binary(binary_path)
     exists = binary.is_file()
-    executable = exists and os.access(binary, os.X_OK)
+    executable = _binary_is_executable(binary)
     version_ok = False
     version_summary = ""
     if executable:
         try:
             proc = subprocess.run(
-                [str(binary), "--version"],
+                _binary_command(binary, ["--version"]),
                 cwd=cwd,
                 env=codex_subprocess_env(),
                 capture_output=True,

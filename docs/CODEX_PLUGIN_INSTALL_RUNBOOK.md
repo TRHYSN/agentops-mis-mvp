@@ -50,6 +50,38 @@ For an authenticated or remote deployment, provide the API key through the
 process environment or a host secret manager. Do not put it in a prompt, Skill,
 plugin file, shell history, screenshot, or command argument.
 
+## Windows client path
+
+Install the AgentOps Windows CLI first, then install the same repository plugin
+with the Codex CLI:
+
+```powershell
+Set-ExecutionPolicy -Scope Process Bypass
+.\packaging\windows\install.ps1 -AddToPath
+
+$Repo = (Resolve-Path ".").Path
+codex plugin marketplace add "$Repo"
+codex plugin add agentops-mis@agentops-mis
+codex plugin list
+```
+
+Open a new PowerShell and Codex task after installation. The Skill uses
+`agentops` from `PATH`; the repository's shell fallback helper is POSIX-only and
+is not the Windows execution path.
+
+Use the no-echo login prompt before asking Codex to receive work:
+
+```powershell
+agentops login `
+  --base-url "https://your-private-host.example" `
+  --workspace-id "local-demo" `
+  --agent-id "agt_windows_codex_client" `
+  --prompt-api-key
+
+agentops status
+agentops worker preflight --adapter codex --codex-bin (Get-Command codex).Source
+```
+
 ## Governed Codex-Side Loop
 
 The Skill guides Codex through the primitive CLI workflow:

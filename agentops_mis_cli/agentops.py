@@ -5441,6 +5441,7 @@ def cmd_worker_service_check(args, client: AgentOpsClient) -> dict:
         runtime_dir=args.runtime_dir or "",
         worker_command=args.worker_command or "",
         hermes_gateway_url=args.hermes_gateway_url or "",
+        codex_bin=args.codex_bin or "",
         service_path=args.service_path or "",
         api_key_placeholder=args.api_key_placeholder,
         credential_source=args.credential_source,
@@ -5475,6 +5476,7 @@ def cmd_worker_service_install(args, client: AgentOpsClient) -> dict:
         config_path=args.config_path,
         worker_command=args.worker_command or "",
         hermes_gateway_url=args.hermes_gateway_url or "",
+        codex_bin=args.codex_bin or "",
         service_path=args.service_path or "",
         confirm_install=bool(args.confirm_install),
         overwrite=bool(args.overwrite),
@@ -5505,6 +5507,7 @@ def cmd_worker_service_control(args, client: AgentOpsClient) -> dict:
         runtime_dir=args.runtime_dir or "",
         worker_command=args.worker_command or "",
         hermes_gateway_url=args.hermes_gateway_url or "",
+        codex_bin=args.codex_bin or "",
         service_path=args.service_path or "",
         api_key_placeholder=args.api_key_placeholder,
         credential_source=args.credential_source,
@@ -6795,6 +6798,7 @@ def build_parser() -> argparse.ArgumentParser:
     worker_service_check.add_argument("--runtime-dir", default="")
     worker_service_check.add_argument("--worker-command", default="")
     worker_service_check.add_argument("--hermes-gateway-url", default=os.environ.get("HERMES_GATEWAY_URL", ""))
+    worker_service_check.add_argument("--codex-bin", default=os.environ.get("CODEX_BIN", ""))
     worker_service_check.add_argument("--service-path", default="")
     worker_service_check.add_argument("--api-key-placeholder", default="<paste one-time token here>")
     worker_service_check.add_argument("--credential-source", choices=["auto", "direct", "local_config"], default="auto")
@@ -6819,6 +6823,7 @@ def build_parser() -> argparse.ArgumentParser:
     worker_service_install.add_argument("--config-path", default=str(CONFIG_PATH))
     worker_service_install.add_argument("--worker-command", default="", help="Worker executable command for service templates. Defaults to installed agentops-worker or python -m fallback.")
     worker_service_install.add_argument("--hermes-gateway-url", default=os.environ.get("HERMES_GATEWAY_URL", ""), help="Persist an explicit credential-free Hermes HTTP(S) base URL for a Hermes service.")
+    worker_service_install.add_argument("--codex-bin", default=os.environ.get("CODEX_BIN", ""), help="Persist the exact local Codex executable or Windows command shim for a Codex service.")
     worker_service_install.add_argument("--service-path", default="")
     worker_service_install.add_argument("--confirm-install", action="store_true", help="Write the service file. Default is dry-run.")
     worker_service_install.add_argument("--overwrite", action="store_true")
@@ -6839,6 +6844,7 @@ def build_parser() -> argparse.ArgumentParser:
     worker_service_control.add_argument("--runtime-dir", default="")
     worker_service_control.add_argument("--worker-command", default="")
     worker_service_control.add_argument("--hermes-gateway-url", default=os.environ.get("HERMES_GATEWAY_URL", ""))
+    worker_service_control.add_argument("--codex-bin", default=os.environ.get("CODEX_BIN", ""))
     worker_service_control.add_argument("--service-path", default="")
     worker_service_control.add_argument("--api-key-placeholder", default="<paste one-time token here>")
     worker_service_control.add_argument("--credential-source", choices=["auto", "direct", "local_config"], default="auto")

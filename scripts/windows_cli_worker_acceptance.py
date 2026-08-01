@@ -319,6 +319,43 @@ def executable(name: str) -> Path:
     return path
 
 
+def create_fake_codex(root: Path) -> Path:
+    fixture = root / "fake_codex.py"
+    fixture.write_text(
+        """import json
+import sys
+
+if \"--version\" in sys.argv:
+    print(\"codex-cli windows-acceptance-fixture\")
+    raise SystemExit(0)
+
+_prompt = sys.stdin.read()
+events = [
+    {\"type\": \"thread.started\", \"thread_id\": \"thr_windows_codex_fixture\"},
+    {\"type\": \"turn.started\"},
+    {
+        \"type\": \"item.completed\",
+        \"item\": {
+            \"id\": \"item_windows_codex_fixture\",
+            \"type\": \"agent_message\",
+            \"text\": \"Windows Codex read-only worker completed the bounded fixture.\",
+        },
+    },
+    {\"type\": \"turn.completed\", \"usage\": {\"output_tokens\": 12}},
+]
+for event in events:
+    print(json.dumps(event, separators=(\",\", \":\")))
+""",
+        encoding="utf-8",
+    )
+    launcher = root / "codex-fixture.cmd"
+    launcher.write_text(
+        f'@echo off\r\n"{sys.executable}" "{fixture}" %*\r\n',
+        encoding="utf-8",
+    )
+    return launcher
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--wheel", type=Path, required=True)
@@ -490,6 +527,176 @@ def main() -> int:
                 not any(marker in rendered_requests for marker in ("agtok_", "agtsess_", "sk-", "ntn_")),
                 "offline mock protocol captured token-like content",
             )
+
+            fake_codex = create_fake_codex(temp_root)
+            codex_preflight = run(
+                [
+                    str(agentops),
+                    "--base-url",
+                    base_url,
+                    "worker",
+                    "preflight",
+                    "--adapter",
+                    "codex",
+                    "--agent-id",
+                    "agt_windows_acceptance",
+                    "--codex-bin",
+                    str(fake_codex),
+                ],
+                cwd=temp_root,
+                env=env,
+            )
+            codex_preflight_payload = json_stdout(codex_preflight, "agentops worker preflight --adapter codex")
+            require(codex_preflight_payload.get("ok") is True, "Windows Codex preflight failed")
+            codex_adapter_preflight = codex_preflight_payload.get("adapter_preflight") or {}
+            require(codex_adapter_preflight.get("adapter") == "codex", "Windows Codex preflight adapter drifted")
+            require(codex_adapter_preflight.get("version_ok") is True, "Windows Codex fixture version check failed")
+            require(codex_preflight_payload.get("live_execution_performed") is False, "Codex preflight executed a task")
+
+            SmokeGateway.requests = []
+            codex_state_path = temp_root / "state" / "codex-worker.json"
+            codex_once = run(
+                [
+                    str(worker),
+                    "--once",
+                    "--adapter",
+                    "codex",
+                    "--confirm-run",
+                    "--codex-bin",
+                    str(fake_codex),
+                    "--codex-timeout",
+                    "15",
+                    "--base-url",
+                    base_url,
+                    "--workspace-id",
+                    "local-demo",
+                    "--agent-id",
+                    "agt_windows_acceptance",
+                    "--task-id",
+                    TASK_ID,
+                    "--state-path",
+                    str(codex_state_path),
+                    "--poll-interval",
+                    "0",
+                ],
+                cwd=temp_root,
+                env=env,
+            )
+            codex_once_payload = json_stdout(codex_once, "agentops-worker --adapter codex --once")
+            codex_results = codex_once_payload.get("results") or []
+            require(codex_once_payload.get("ok") is True, "Windows Codex worker failed")
+            require(codex_once_payload.get("processed") == 1, "Windows Codex worker did not process one task")
+            require(len(codex_results) == 1 and isinstance(codex_results[0], dict), "Windows Codex result is missing")
+            require(codex_results[0].get("ok") is True, "Windows Codex result failed")
+            require(codex_results[0].get("run_id") == RUN_ID, "Windows Codex run id drifted")
+            require(codex_results[0].get("plan_evidence_pass") is True, "Windows Codex manifest did not verify")
+            require(codex_state_path.is_file(), "Windows Codex worker did not write isolated state")
+
+            require_request_order(
+                [
+                    ("GET", "/api/agent-gateway/tasks/pull"),
+                    ("POST", f"/api/agent-gateway/tasks/{TASK_ID}/claim"),
+                    ("POST", "/api/agent-gateway/runs/start"),
+                    ("POST", "/api/agent-gateway/runtime-events"),
+                    ("POST", "/api/agent-gateway/tool-calls"),
+                    ("POST", f"/api/agent-gateway/runs/{RUN_ID}/heartbeat"),
+                    ("POST", "/api/agent-gateway/evaluations/submit"),
+                    ("POST", "/api/agent-gateway/audit"),
+                    ("POST", "/api/agent-gateway/plan-evidence-manifests"),
+                ]
+            )
+            codex_request_payloads = {
+                str(request.get("path")): request.get("payload") or {}
+                for request in SmokeGateway.requests
+                if request.get("method") == "POST"
+            }
+            require(codex_request_payloads[f"/api/agent-gateway/tasks/{TASK_ID}/claim"].get("runtime_type") == "codex", "Codex claim runtime drifted")
+            require(codex_request_payloads["/api/agent-gateway/runs/start"].get("runtime_type") == "codex", "Codex run runtime drifted")
+            require(codex_request_payloads["/api/agent-gateway/tool-calls"].get("tool_name") == "agent_worker.codex", "Codex tool evidence drifted")
+            require(codex_request_payloads["/api/agent-gateway/evaluations/submit"].get("pass_fail") == "pass", "Codex evaluation did not pass")
+            codex_rendered_requests = json.dumps(SmokeGateway.requests, sort_keys=True)
+            require("Windows Codex read-only worker completed" in codex_rendered_requests, "Codex bounded summary was not recorded")
+            require(
+                not any(marker in codex_rendered_requests for marker in ("agtok_", "agtsess_", "sk-", "ntn_")),
+                "Windows Codex protocol captured token-like content",
+            )
+
+            codex_service_path = temp_root / "services" / "agentops-codex-worker.xml"
+            codex_service_install = run(
+                [
+                    str(agentops),
+                    "--base-url",
+                    base_url,
+                    "--workspace-id",
+                    "local-demo",
+                    "worker",
+                    "service-install",
+                    "--manager",
+                    "windows-task",
+                    "--adapter",
+                    "codex",
+                    "--confirm-run",
+                    "--agent-id",
+                    "agt_windows_acceptance",
+                    "--credential-source",
+                    "local_config",
+                    "--config-path",
+                    env["AGENTOPS_CONFIG"],
+                    "--codex-bin",
+                    str(fake_codex),
+                    "--working-directory",
+                    str(temp_root),
+                    "--service-path",
+                    str(codex_service_path),
+                    "--confirm-install",
+                ],
+                cwd=temp_root,
+                env=env,
+            )
+            codex_service_payload = json_stdout(codex_service_install, "agentops worker service-install --adapter codex")
+            require(codex_service_payload.get("ok") is True, "Windows Codex Task Scheduler install failed")
+            require(codex_service_payload.get("service_file_contract_ok") is True, "Windows Codex service contract failed")
+            codex_runtime_readiness = ((codex_service_payload.get("service_check") or {}).get("runtime_readiness") or {})
+            require(codex_runtime_readiness.get("ready") is True, "Windows Codex service runtime is not ready")
+            codex_service_xml = codex_service_path.read_text(encoding="utf-16")
+            _codex_service_command, codex_service_arguments = task_action(codex_service_xml)
+            require("--adapter codex" in codex_service_arguments, "Windows Codex service did not bind the adapter")
+            require("--confirm-run" in codex_service_arguments, "Windows Codex service omitted the confirmation gate")
+            require(str(fake_codex) in codex_service_arguments, "Windows Codex service did not bind the exact runtime")
+
+            codex_service_check = run(
+                [
+                    str(agentops),
+                    "--base-url",
+                    base_url,
+                    "--workspace-id",
+                    "local-demo",
+                    "worker",
+                    "service-check",
+                    "--manager",
+                    "windows-task",
+                    "--adapter",
+                    "codex",
+                    "--confirm-run",
+                    "--agent-id",
+                    "agt_windows_acceptance",
+                    "--credential-source",
+                    "local_config",
+                    "--config-path",
+                    env["AGENTOPS_CONFIG"],
+                    "--codex-bin",
+                    str(fake_codex),
+                    "--working-directory",
+                    str(temp_root),
+                    "--service-path",
+                    str(codex_service_path),
+                ],
+                cwd=temp_root,
+                env=env,
+            )
+            codex_service_check_payload = json_stdout(codex_service_check, "agentops worker service-check --adapter codex")
+            require(codex_service_check_payload.get("ok") is True, "Windows Codex service check failed")
+            require((codex_service_check_payload.get("runtime_readiness") or {}).get("ready") is True, "Windows Codex service check did not verify the runtime")
 
             service_template = run(
                 [
@@ -762,6 +969,10 @@ def main() -> int:
                 "worker_help": True,
                 "worker_preflight": True,
                 "worker_once_offline_mock": True,
+                "codex_preflight": True,
+                "codex_worker_once_offline_fixture": True,
+                "codex_task_scheduler_contract": True,
+                "codex_runtime_readiness_checked": True,
                 "worker_state_written": True,
                 "evidence_request_order_verified": True,
                 "windows_task_template": True,
@@ -775,6 +986,7 @@ def main() -> int:
                 "windows_host_fail_closed": True,
                 "gateway_request_count": len(SmokeGateway.requests),
                 "ci_offline_mock": True,
+                "ci_offline_codex_fixture": True,
                 "database_created": False,
                 "live_execution_performed": False,
                 "token_omitted": True,

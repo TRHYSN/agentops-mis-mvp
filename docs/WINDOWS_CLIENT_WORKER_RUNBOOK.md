@@ -11,7 +11,7 @@ that Host ledger.
 | --- | --- |
 | Human Workspace | Open the Host HTTPS Workspace in Chrome or Edge |
 | Operator CLI | Install `agentops`, connect to the Host, manage tasks and Host workers |
-| Agent Worker | Install `agentops-worker`, enroll it, and run mock/Hermes/OpenClaw adapters |
+| Agent Worker | Install `agentops-worker`, enroll it, and run mock/Hermes/OpenClaw/Codex read-only adapters |
 | Persistent Worker | Install a user-level Task Scheduler definition with failure restart |
 | Authority Host | Not supported on Windows in this release; use the macOS Private Host or Linux deployment |
 
@@ -110,9 +110,64 @@ agentops-worker --once `
   --write-state
 ```
 
-For Hermes or OpenClaw, install and verify that runtime on the Windows machine,
-run its preflight, and add `--confirm-run`. The confirmation is intentionally
-required for every persistent live-adapter definition.
+For Hermes, OpenClaw, or Codex, install and verify that runtime on the Windows
+machine, run its preflight, and add `--confirm-run`. The confirmation is
+intentionally required for every persistent live-adapter definition.
+
+## Connect Codex in both directions
+
+The two directions are separate and both use the Agent Gateway rather than
+direct database access:
+
+- `MIS -> Codex`: an enrolled `agentops-worker --adapter codex` pulls a task,
+  executes the official non-interactive Codex CLI in the bounded read-only
+  profile, and writes Run, Runtime Event, Tool, Evaluation, Artifact, Memory
+  Candidate, Plan Evidence, and Audit summaries back to MIS.
+- `Codex -> MIS`: the current Codex task loads the `agentops-mis` plugin/Skill,
+  uses the installed `agentops` CLI to pull and claim work, and records its own
+  governed evidence without starting a nested Codex Worker.
+
+After installing and signing in to the Codex CLI on Windows, bind the exact
+local launcher and run a read-only preflight:
+
+```powershell
+$CodexBin = (Get-Command codex).Source
+codex --version
+agentops worker preflight --adapter codex --codex-bin "$CodexBin"
+```
+
+Process one assigned task through the independent Codex Worker path:
+
+```powershell
+agentops-worker --once `
+  --adapter codex `
+  --confirm-run `
+  --codex-bin "$CodexBin" `
+  --base-url "https://your-private-host.example" `
+  --workspace-id "local-demo" `
+  --agent-id "agt_windows_codex" `
+  --credential-source local_config `
+  --use-session `
+  --write-state
+```
+
+Install the repository plugin for the current-Codex-as-client path:
+
+```powershell
+$Repo = (Resolve-Path ".").Path
+codex plugin marketplace add "$Repo"
+codex plugin add agentops-mis@agentops-mis
+codex plugin list
+```
+
+Start a new Codex task and ask it to use `$agentops-mis` to check the MIS
+connection and continue one governed task. On Windows the plugin resolves the
+installed `agentops` command from `PATH`; its POSIX fallback helper is not used.
+
+This release keeps Codex read-only execution cross-platform. Codex
+workspace-write remains fail-closed on Windows until the Windows runtime has an
+official bundle attestation and the managed-worktree write acceptance passes on
+that OS. Codex can still propose a plan or approval request from Windows.
 
 ## Install a persistent Worker
 
@@ -162,6 +217,12 @@ The task runs at user logon, ignores duplicate starts, and requests restart
 after failure. It references only the protected config path and mints a
 short-lived Worker Session; the enrollment token is not copied into XML.
 
+For a persistent Codex Worker, replace `--adapter mock` with
+`--adapter codex --confirm-run --codex-bin "$CodexBin"` in the install, check,
+and control commands. AgentOps stores the exact launcher path in the
+credential-free Task Scheduler action and `service-check` separately verifies
+the service definition and local Codex runtime readiness.
+
 Inspect or remove it:
 
 ```powershell
@@ -186,13 +247,13 @@ Worker state, logs, and service templates. Purging data requires both
 ## Acceptance boundary
 
 The Windows CI gate builds and installs the wheel on `windows-2022`, executes
-the installed CLI, runs a complete offline mock Worker protocol through
-pull/claim/run/tool/evaluation/audit writeback, writes isolated state, validates
-Task Scheduler XML installation, and proves `agentops host` fails closed rather
-than importing POSIX Host code.
+the installed CLI, runs complete offline mock and fake-Codex Worker protocols
+through pull/claim/run/runtime/tool/evaluation/artifact/audit/plan-evidence
+writeback, writes isolated state, validates Task Scheduler XML installation,
+and proves `agentops host` fails closed rather than importing POSIX Host code.
 
 This CI evidence is an offline fallback, not real-runtime evidence. A customer
 readiness claim additionally requires one physical Windows acceptance against
-the target Host and a real Hermes or OpenClaw runtime installed on that Windows
-machine. The Codex local adapter and a native Windows Authority Host remain
-outside this release boundary.
+the target Host and the selected real runtime installed on that Windows
+machine. A native Windows Authority Host and Windows Codex workspace-write
+remain outside this release boundary.

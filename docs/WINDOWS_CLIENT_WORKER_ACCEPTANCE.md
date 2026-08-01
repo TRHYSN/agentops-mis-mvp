@@ -56,6 +56,10 @@ OS gate. On `windows-2022` it must:
 - build and install the dependency-free wheel;
 - execute `agentops` and `agentops-worker` from the isolated installation;
 - run a complete one-shot Worker protocol against the bounded fake Gateway;
+- execute a Windows `.cmd` Codex fixture through stdin/JSONL and verify the
+  Codex task-to-ledger evidence chain;
+- bind the exact Codex launcher into a credential-free Task Scheduler action
+  and verify service definition plus runtime readiness;
 - verify config and service XML DACLs;
 - register, run, stop, and delete a real Task Scheduler task;
 - prove Windows Host commands fail closed;
@@ -83,10 +87,16 @@ capture:
 - the resulting Task, Run, Evaluation, and Audit identifiers in MIS;
 - `windows-task` service check after logoff/login or reboot.
 
-Physical Windows plus real Hermes/OpenClaw remains a customer-machine
-acceptance item until that evidence is captured. Windows CLI/Worker support
-does not require installing either runtime when the Worker is only operating
-against adapters available on its own machine.
+Physical Windows plus the selected real Hermes/OpenClaw/Codex runtime remains a
+customer-machine acceptance item until that evidence is captured. Windows
+CLI/Worker support does not require installing every runtime; a Worker only
+needs the adapter runtime it will execute on that machine.
+
+The deterministic Windows Codex fixture is CI evidence for process transport,
+bounded JSONL, Task Scheduler binding, and MIS ledger closure. Product evidence
+for a specific Windows Codex installation still requires one physical Windows
+run using the installed official Codex CLI. The cross-platform read-only path
+does not authorize Windows Codex workspace-write.
 
 ## Known limitations
 
@@ -94,4 +104,6 @@ against adapters available on its own machine.
 - The user-local installer is not yet a signed MSI/MSIX package.
 - There is no Start Menu desktop shell; Human Workspace remains browser based.
 - Runtime installation and model licensing stay under the runtime owner's
-  control; AgentOps MIS does not silently install Hermes or OpenClaw.
+  control; AgentOps MIS does not silently install Hermes, OpenClaw, or Codex.
+- Codex workspace-write remains macOS-attested and fail-closed on Windows;
+  Windows supports the governed read-only Worker and Codex-to-MIS plugin path.

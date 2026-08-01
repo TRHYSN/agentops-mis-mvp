@@ -107,7 +107,9 @@ loopback Host 运行。普通用户只需在主机安装并启动 AgentOps；另
 
 Windows 10/11 同时支持正式的 `agentops` 操控 CLI 和
 `agentops-worker` 执行端，不再局限于浏览器访问。它提供用户级 PowerShell
-安装器、`%LOCALAPPDATA%` 私有配置和 Windows Task Scheduler 常驻 Worker；
+安装器、`%LOCALAPPDATA%` 私有配置和 Windows Task Scheduler 常驻 Worker。
+Codex 可作为受治理只读 Worker，也可通过 AgentOps 插件/CLI 主动领取并回写
+MIS 任务；
 权威 Host 仍部署在 macOS/Linux。安装与实跑步骤见
 [`docs/WINDOWS_CLIENT_WORKER_RUNBOOK.md`](docs/WINDOWS_CLIENT_WORKER_RUNBOOK.md)。
 
