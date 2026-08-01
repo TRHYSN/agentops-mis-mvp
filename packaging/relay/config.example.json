@@ -1,0 +1,24 @@
+{
+  "browser_listen": {
+    "host": "0.0.0.0",
+    "port": 443
+  },
+  "connector_listen": {
+    "host": "0.0.0.0",
+    "port": 9443
+  },
+  "connector_tls": {
+    "cert_file": "/etc/agentops-mis-relay/tls/relay-cert.pem",
+    "key_file": "/etc/agentops-mis-relay/tls/relay-key.pem"
+  },
+  "routes": [
+    {
+      "hostname": "replace-me.console.example.invalid",
+      "key_file": "/etc/agentops-mis-relay/routes/replace-me.key",
+      "route": "rte_replace_me"
+    }
+  ],
+  "schema_version": 1,
+  "state_path": "/var/lib/agentops-mis-relay/epochs.json",
+  "status_path": "/run/agentops-mis-relay/status.json"
+}

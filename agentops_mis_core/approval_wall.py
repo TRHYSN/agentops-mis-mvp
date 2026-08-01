@@ -2,10 +2,12 @@
 from __future__ import annotations
 
 import hashlib
+import ipaddress
 import json
 import re
 import datetime as dt
 from typing import Any
+from urllib.parse import urlparse
 
 
 REDACTION_RULES: tuple[tuple[str, str], ...] = (
@@ -55,11 +57,66 @@ EXTERNAL_SIDE_EFFECT_SCHEMES = (
     "discord://",
     "email://",
 )
-LOOPBACK_HTTP_PREFIXES = (
-    "http://127.0.0.1",
-    "http://localhost",
-    "http://[::1]",
+EXTERNAL_WRITE_INTENT_KEYWORDS = (
+    "knowledge base upload",
+    "customer portal",
+    "external write",
+    "send email",
+    "file search",
+    "生产发布",
+    "知识库上传",
+    "外部写入",
+    "publish",
+    "upload",
+    "deploy",
+    "push",
+    "send",
+    "webhook",
+    "notion",
+    "dify",
+    "dataset",
+    "发布",
+    "上传",
+    "部署",
+    "推送",
+    "发邮件",
+    "发送",
 )
+EXTERNAL_WRITE_NEGATION_RE = re.compile(
+    r"(?:"
+    r"\b(?:do(?:es)?\s+not|don't|must\s+not|shall\s+not|may\s+not|should\s+not|"
+    r"will\s+not|would\s+not|could\s+not|never|cannot|can't)\b[^.!?;\n]{0,64}|"
+    r"(?:不要|不得|禁止|不允许|不再|不能|不会)[^。！？；\n]{0,40}"
+    r")$",
+    re.IGNORECASE,
+)
+EXTERNAL_WRITE_ACTION_CHAIN_TERM = (
+    r"(?:publish(?:es|ed|ing)?|upload(?:s|ed|ing)?|deploy(?:s|ed|ing)?|"
+    r"push(?:es|ed|ing)?|send(?:s|ing)?|sent|external\s+writ(?:e|es|ing|ten)|"
+    r"生产发布|知识库上传|外部写入|发布|上传|部署|推送|发邮件|发送)"
+)
+EXTERNAL_WRITE_TIGHT_NEGATION_RE = re.compile(
+    r"(?:"
+    r"\b(?:without|no)\b(?:\s+(?:any|an|a|direct|actual|external|production|unauthorized|outbound))*|"
+    r"(?:无需|无须|不进行|不执行|不使用|不调用)(?:任何形式的|任何|外部|对外|直接|实际)*|"
+    r"不(?!仅|但)(?:再|向外部|对外|直接|实际)?"
+    r")\s*"
+    rf"(?:{EXTERNAL_WRITE_ACTION_CHAIN_TERM}\s*(?:,|、|，)?\s*(?:or|and|或|和|及|与)\s*)*$",
+    re.IGNORECASE,
+)
+EXTERNAL_WRITE_NEGATION_BREAK_RE = re.compile(
+    r"(?:\b(?:but|however|then|instead|except)\b|但是|但|不过|然而|然后|随后|(?<!不)再|改为|而是|除外)",
+    re.IGNORECASE,
+)
+EXTERNAL_WRITE_ASCII_KEYWORD_PATTERNS = {
+    "publish": r"publish(?:es|ed|ing)?",
+    "upload": r"upload(?:s|ed|ing)?",
+    "deploy": r"deploy(?:s|ed|ing)?",
+    "push": r"push(?:es|ed|ing)?",
+    "send": r"(?:send(?:s|ing)?|sent)",
+    "webhook": r"webhooks?",
+    "dataset": r"datasets?",
+}
 
 
 def stable_hash(value: Any) -> str:
@@ -79,6 +136,84 @@ def redact_text(text: Any, limit: int = 200) -> str:
         value = re.sub(pattern, replacement, value)
     value = re.sub(r"\s+", " ", value).strip()
     return value[:limit]
+
+
+def external_write_keyword_indexes(text: str, keyword: str):
+    if keyword.isascii():
+        body = EXTERNAL_WRITE_ASCII_KEYWORD_PATTERNS.get(keyword, re.escape(keyword))
+        pattern = re.compile(rf"(?<![a-z0-9_])(?:{body})(?![a-z0-9_])", re.IGNORECASE)
+        yield from (match.start() for match in pattern.finditer(text))
+        return
+
+    start = 0
+    while True:
+        index = text.find(keyword, start)
+        if index < 0:
+            return
+        yield index
+        start = index + len(keyword)
+
+
+def positive_external_write_intent(text: Any) -> bool:
+    """Detect write intent while ignoring only explicitly negated occurrences."""
+    lowered = str(text or "").lower()
+    for keyword in EXTERNAL_WRITE_INTENT_KEYWORDS:
+        needle = keyword.lower()
+        for index in external_write_keyword_indexes(lowered, needle):
+            prefix = lowered[max(0, index - 80):index]
+            negation = EXTERNAL_WRITE_NEGATION_RE.search(prefix) or EXTERNAL_WRITE_TIGHT_NEGATION_RE.search(prefix)
+            if negation is None or EXTERNAL_WRITE_NEGATION_BREAK_RE.search(negation.group(0)):
+                return True
+    return False
+
+
+def is_loopback_http_target(value: Any) -> bool:
+    """Accept only an exact HTTP loopback hostname, never a string prefix."""
+    try:
+        parsed = urlparse(str(value or "").strip())
+        hostname = (parsed.hostname or "").rstrip(".").lower()
+    except ValueError:
+        return False
+    if parsed.scheme.lower() != "http" or not hostname:
+        return False
+    if hostname == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(hostname).is_loopback
+    except ValueError:
+        return False
+
+
+def task_has_external_write_intent(
+    *,
+    title: Any,
+    description: Any,
+    acceptance_criteria: Any,
+    target_resource: Any = None,
+    external_action_type: Any = None,
+    explicit_intent: Any = None,
+) -> bool:
+    """Classify task intent without allowing negative prose to bypass real writes."""
+    if explicit_intent is not None:
+        normalized_intent = str(explicit_intent).strip().lower()
+        if explicit_intent is not False and normalized_intent not in {"", "0", "false", "no", "off"}:
+            return True
+
+    action_type = str(external_action_type or "").strip()
+    if action_type:
+        return True
+
+    target = str(target_resource or "").strip().lower()
+    target_is_loopback = is_loopback_http_target(target)
+    if target.startswith(EXTERNAL_SIDE_EFFECT_SCHEMES) and not target_is_loopback:
+        return True
+    if positive_external_write_intent(target):
+        return True
+
+    return any(
+        positive_external_write_intent(value)
+        for value in (title, description, acceptance_criteria)
+    )
 
 
 def safe_json_metadata(value: Any) -> Any:
@@ -405,6 +540,12 @@ def tool_call_has_external_side_effect_intent(
         "read_only_runtime",
         "agent_id",
         "knowledge_retrieval_evidence_consumed",
+        "knowledge_context_approved_memory_ids",
+        "knowledge_context_block_count",
+        "knowledge_context_block_hashes",
+        "knowledge_context_consumed",
+        "knowledge_context_contract_version",
+        "knowledge_context_packet_hash",
         "knowledge_retrieval_ids",
         "knowledge_retrieval_metrics",
         "knowledge_retrieval_omissions",
@@ -456,8 +597,8 @@ def tool_call_has_external_side_effect_intent(
         json.dumps(scanned_args, ensure_ascii=False, sort_keys=True),
     ]).lower()
     target = (target_resource or "").strip().lower()
-    target_is_loopback = target.startswith(LOOPBACK_HTTP_PREFIXES)
-    explicit_target_is_loopback = explicit_target.startswith(LOOPBACK_HTTP_PREFIXES)
+    target_is_loopback = is_loopback_http_target(target)
+    explicit_target_is_loopback = is_loopback_http_target(explicit_target)
     if (
         (target.startswith(EXTERNAL_SIDE_EFFECT_SCHEMES) and not target_is_loopback)
         or (explicit_target.startswith(EXTERNAL_SIDE_EFFECT_SCHEMES) and not explicit_target_is_loopback)

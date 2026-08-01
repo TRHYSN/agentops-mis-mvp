@@ -17,11 +17,13 @@ import datetime as dt
 import html
 import hashlib
 import json
+import math
 import os
 import re
 import shlex
 import shutil
 import signal
+import stat
 import subprocess
 import sys
 import time
@@ -31,6 +33,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode, urlparse
 from urllib.request import Request, urlopen
 
+from agentops_mis_core.approval_wall import task_has_external_write_intent
 from agentops_mis_cli.codex_runtime import (
     codex_preflight,
     codex_binary_attestation,
@@ -42,9 +45,11 @@ from agentops_mis_cli.codex_runtime import (
     normalize_allowed_paths,
     remove_managed_codex_worktree,
 )
+from agentops_mis_cli.http_transport import credential_opener, credential_transport_url_allowed, safe_credential_error
 from agentops_mis_cli.redaction import redact_text
 
 
+PACKAGE_LINK_ROOT = Path(__file__).absolute().parents[1]
 PACKAGE_ROOT = Path(__file__).resolve().parents[1]
 REPO_ROOT = PACKAGE_ROOT if (PACKAGE_ROOT / "server.py").exists() else None
 DEFAULT_BASE_URL = "http://127.0.0.1:8787"
@@ -54,7 +59,28 @@ DEFAULT_HERMES_GATEWAY_URL = "http://127.0.0.1:8642"
 DEFAULT_HERMES_MODEL = "hermes-agent"
 DEFAULT_HERMES_MAX_TOKENS = int(os.environ.get("HERMES_MAX_TOKENS", "512"))
 DEFAULT_OPENCLAW_BIN = "/opt/homebrew/bin/openclaw"
+WORKER_PULL_CANDIDATE_LIMIT = 50
 WORKER_SECRET_BOUNDARY_VERSION = "trusted_worker_client_v1"
+DEFAULT_CONFIG_PATH = Path(os.environ.get("AGENTOPS_CONFIG", "~/.agentops/config.json")).expanduser()
+LOCAL_CONFIG_WORKER_SESSION_SCOPES = (
+    "agents:write",
+    "agents:heartbeat",
+    "agent_plans:read",
+    "agent_plans:write",
+    "plan_evidence:read",
+    "plan_evidence:write",
+    "knowledge:read",
+    "knowledge:write",
+    "tasks:read",
+    "tasks:claim",
+    "runs:write",
+    "runtime_events:write",
+    "toolcalls:write",
+    "artifacts:write",
+    "memories:propose",
+    "evaluations:submit",
+    "audit:write",
+)
 
 
 def default_runtime_dir() -> Path:
@@ -70,7 +96,13 @@ def default_worker_cwd() -> Path:
     configured = os.environ.get("AGENTOPS_WORKER_CWD")
     if configured:
         return Path(configured).expanduser()
-    return REPO_ROOT or Path.cwd()
+    if REPO_ROOT:
+        if PACKAGE_ROOT.parent.name == "versions":
+            current = PACKAGE_ROOT.parent.parent / "current"
+            if current.is_symlink() and current.resolve() == PACKAGE_ROOT:
+                return current
+        return PACKAGE_LINK_ROOT
+    return Path.cwd()
 
 
 DEFAULT_RUNTIME_DIR = default_runtime_dir()
@@ -107,6 +139,30 @@ def stable_hash(value) -> str:
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
+def current_process_identity() -> dict:
+    """Return a non-reversible identity for this worker process."""
+    pid = os.getpid()
+    try:
+        process = subprocess.run(
+            ["/bin/ps", "-p", str(pid), "-o", "lstart=", "-o", "command="],
+            capture_output=True,
+            text=True,
+            timeout=2,
+            check=False,
+        )
+        rendered = process.stdout.strip()
+        process_group_id = os.getpgid(pid)
+    except (OSError, subprocess.TimeoutExpired):
+        return {}
+    if process.returncode != 0 or not rendered:
+        return {}
+    return {
+        "process_identity_schema_version": 1,
+        "process_group_id": process_group_id,
+        "process_identity_hash": hashlib.sha256(rendered.encode("utf-8")).hexdigest(),
+    }
+
+
 def json_dumps(data) -> str:
     return json.dumps(data, ensure_ascii=False, indent=2, sort_keys=True)
 
@@ -135,6 +191,93 @@ def safe_error(exc: Exception | str) -> dict:
     }
 
 
+def safe_worker_result_error(result: dict) -> dict:
+    error_type = result.get("error_type") or "WorkerResultError"
+    error_message = result.get("error_message") or result.get("reason") or "worker_result_failed"
+    return {
+        "error_type": redact_text(str(error_type), 120),
+        "error_message": redact_text(str(error_message), 260),
+    }
+
+
+class WorkerCredentialError(RuntimeError):
+    def __init__(self, code: str):
+        super().__init__(code)
+        self.code = code
+
+
+class WorkerServiceConfigError(RuntimeError):
+    def __init__(self, code: str):
+        super().__init__(code)
+        self.code = code
+
+
+def load_local_config_api_key(args) -> str:
+    if str(getattr(args, "api_key", "") or ""):
+        raise WorkerCredentialError("local_config_conflicts_with_direct_api_key")
+    config_path = Path(str(getattr(args, "config_path", "") or DEFAULT_CONFIG_PATH)).expanduser()
+    if config_path.is_symlink():
+        raise WorkerCredentialError("local_config_symlink_rejected")
+    try:
+        flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+        descriptor = os.open(config_path, flags)
+    except FileNotFoundError as exc:
+        raise WorkerCredentialError("local_config_not_found") from exc
+    except OSError as exc:
+        raise WorkerCredentialError("local_config_unreadable") from exc
+    try:
+        file_stat = os.fstat(descriptor)
+        if not stat.S_ISREG(file_stat.st_mode):
+            raise WorkerCredentialError("local_config_not_regular_file")
+        if file_stat.st_mode & 0o077:
+            raise WorkerCredentialError("local_config_permissions_too_open")
+        if hasattr(os, "getuid") and file_stat.st_uid != os.getuid():
+            raise WorkerCredentialError("local_config_owner_mismatch")
+        with os.fdopen(descriptor, "r", encoding="utf-8") as handle:
+            descriptor = -1
+            config = json.load(handle)
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise WorkerCredentialError("local_config_invalid") from exc
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+    if not isinstance(config, dict):
+        raise WorkerCredentialError("local_config_invalid")
+    requested_base_url = str(args.base_url or "").rstrip("/")
+    configured_base_url = str(config.get("base_url") or "").rstrip("/")
+    configured_key_origin = str(config.get("api_key_base_url") or "").rstrip("/")
+    if not requested_base_url or configured_base_url != requested_base_url or configured_key_origin != requested_base_url:
+        raise WorkerCredentialError("local_config_origin_mismatch")
+    if str(config.get("workspace_id") or "") != str(args.workspace_id or ""):
+        raise WorkerCredentialError("local_config_workspace_mismatch")
+    api_key = str(config.get("api_key") or "").strip()
+    if not api_key:
+        raise WorkerCredentialError("local_config_api_key_missing")
+    if not credential_transport_url_allowed(requested_base_url):
+        raise WorkerCredentialError("local_config_transport_rejected")
+    return api_key
+
+
+def resolve_worker_api_key(args) -> str:
+    source = str(getattr(args, "credential_source", "direct") or "direct").strip().lower()
+    if source == "direct":
+        return str(getattr(args, "api_key", "") or "")
+    if source == "local_config":
+        return load_local_config_api_key(args)
+    raise WorkerCredentialError("credential_source_unsupported")
+
+
+def apply_local_config_session_policy(args) -> None:
+    if str(getattr(args, "credential_source", "direct") or "direct") != "local_config":
+        return
+    allowed = set(LOCAL_CONFIG_WORKER_SESSION_SCOPES)
+    requested = split_csv(getattr(args, "session_scopes", ""))
+    if requested and not set(requested).issubset(allowed):
+        raise WorkerCredentialError("local_config_session_scopes_exceed_worker_policy")
+    args.session_scopes = ",".join(requested or LOCAL_CONFIG_WORKER_SESSION_SCOPES)
+    args.use_session = True
+
+
 class WorkerState:
     def __init__(self, args):
         if args.state_path:
@@ -142,11 +285,20 @@ class WorkerState:
         else:
             self.path = DEFAULT_RUNTIME_DIR / f"{args.adapter}.state.json"
         self.enabled = bool(args.write_state or args.state_path)
+        management_mode = str(os.environ.get("AGENTOPS_WORKER_MANAGEMENT_MODE") or "standalone").strip().lower()
+        if management_mode not in {"standalone", "daemon_api", "host_stack"}:
+            management_mode = "standalone"
         self.data = {
             "adapter": args.adapter,
             "agent_id": args.agent_id,
             "workspace_id": args.workspace_id,
             "base_url": args.base_url,
+            "pid": os.getpid(),
+            **current_process_identity(),
+            "management_mode": management_mode,
+            "confirm_run": bool(args.confirm_run),
+            "poll_interval": args.poll_interval,
+            "max_tasks": args.max_tasks,
             "status": "starting",
             "processed": 0,
             "iterations": 0,
@@ -162,9 +314,11 @@ class WorkerState:
             "next_sleep_sec": 0,
             "session_refresh_count": 0,
             "adapter_max_attempts": args.adapter_max_attempts,
+            "state_schema_version": 2,
             "started_at": now_iso(),
             "updated_at": now_iso(),
             "last_heartbeat_at": None,
+            "last_iteration_at": None,
             "last_result": None,
             "last_error": None,
         }
@@ -176,20 +330,29 @@ class WorkerState:
         self.write()
 
     def record_result(self, result: dict):
-        if result.get("processed"):
+        failed = worker_result_failed(result)
+        processed = bool(result.get("processed"))
+        if processed:
             self.data["processed"] = int(self.data.get("processed") or 0) + 1
+            self.data["consecutive_idle"] = 0
+        elif failed:
             self.data["consecutive_idle"] = 0
         else:
             self.data["consecutive_idle"] = int(self.data.get("consecutive_idle") or 0) + 1
         self.data["iterations"] = int(self.data.get("iterations") or 0) + 1
-        self.data["consecutive_errors"] = 0
-        self.data["last_error"] = None
+        if failed:
+            self.data["total_errors"] = int(self.data.get("total_errors") or 0) + 1
+            self.data["consecutive_errors"] = int(self.data.get("consecutive_errors") or 0) + 1
+            self.data["last_error"] = safe_worker_result_error(result)
+        else:
+            self.data["consecutive_errors"] = 0
+            self.data["last_error"] = None
         self.update(
-            status="idle" if not result.get("processed") else "completed" if result.get("ok", True) else "failed",
+            status="failed" if failed else "completed" if processed else "idle",
             last_result=result,
             last_task_id=result.get("task_id"),
             last_run_id=result.get("run_id"),
-            last_heartbeat_at=now_iso(),
+            last_iteration_at=now_iso(),
         )
 
     def record_error(self, exc: Exception | str):
@@ -197,7 +360,7 @@ class WorkerState:
         self.data["iterations"] = int(self.data.get("iterations") or 0) + 1
         self.data["total_errors"] = int(self.data.get("total_errors") or 0) + 1
         self.data["consecutive_errors"] = int(self.data.get("consecutive_errors") or 0) + 1
-        self.update(status="error", last_error=error, last_result=None, last_heartbeat_at=now_iso())
+        self.update(status="error", last_error=error, last_result=None, last_iteration_at=now_iso())
         return error
 
     def stop(self, status: str = "stopped"):
@@ -206,11 +369,22 @@ class WorkerState:
     def write(self):
         if not self.enabled:
             return
+        temporary = self.path.with_name(f".{self.path.name}.{os.getpid()}.tmp")
         try:
             self.path.parent.mkdir(parents=True, exist_ok=True)
-            self.path.write_text(json.dumps(self.data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+            descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+                handle.write(json.dumps(self.data, ensure_ascii=False, indent=2) + "\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, self.path)
         except Exception:
             pass
+        finally:
+            try:
+                temporary.unlink(missing_ok=True)
+            except OSError:
+                pass
 
 
 class AgentOpsClient:
@@ -233,6 +407,9 @@ class AgentOpsClient:
             and "token is not recognized" in detail
         )
 
+    def safe_error_detail(self, value: object, limit: int) -> str:
+        return safe_credential_error(value, self.api_key, limit)
+
     def request(self, method: str, path: str, payload: dict | None = None, query: dict | None = None, timeout: int = 180):
         url = self.base_url + path
         if query:
@@ -246,24 +423,32 @@ class AgentOpsClient:
                 "X-AgentOps-Agent-Id": self.agent_id,
             }
             if api_key:
+                if not credential_transport_url_allowed(url):
+                    raise RuntimeError(
+                        "Credentialed Agent Gateway requests require HTTPS or a literal loopback HTTP target"
+                    )
                 headers["X-AgentOps-Api-Key"] = api_key
                 headers["Authorization"] = f"Bearer {api_key}"
             return Request(url, data=data, headers=headers, method=method)
 
+        opener = credential_opener()
         try:
-            with urlopen(make_request(self.api_key), timeout=timeout) as res:
+            with opener.open(make_request(self.api_key), timeout=timeout) as res:
                 raw = res.read().decode("utf-8")
                 return json.loads(raw) if raw else {}
         except HTTPError as exc:
             detail = exc.read().decode("utf-8", errors="replace")
             if self._can_retry_without_stale_config_token(detail, exc.code):
-                with urlopen(make_request(""), timeout=timeout) as res:
+                with opener.open(make_request(""), timeout=timeout) as res:
                     self.stale_config_token_ignored = True
                     raw = res.read().decode("utf-8")
                     return json.loads(raw) if raw else {}
-            raise RuntimeError(f"{method} {path} failed: {exc.code} {detail}") from exc
+            raise RuntimeError(
+                f"{method} {path} failed: {exc.code} "
+                f"{self.safe_error_detail(detail, 1200)}"
+            ) from exc
         except URLError as exc:
-            raise RuntimeError(f"Cannot reach {url}: {exc.reason}") from exc
+            raise RuntimeError(f"Cannot reach {self.safe_error_detail(url, 500)}: {self.safe_error_detail(exc.reason, 500)}") from exc
 
     def get(self, path: str, query: dict | None = None):
         return self.request("GET", path, query=query)
@@ -316,13 +501,21 @@ def session_needs_refresh(session_info: dict | None, refresh_margin_sec: float) 
     return session_seconds_remaining(session_info) <= max(float(refresh_margin_sec or 0), 0.0)
 
 
+def append_worker_session_history(history: list[dict], session: dict, limit: int = 20) -> int:
+    history.append(session)
+    overflow = max(len(history) - max(int(limit or 1), 1), 0)
+    if overflow:
+        del history[:overflow]
+    return overflow
+
+
 def ensure_worker_session(client: AgentOpsClient, args, state: WorkerState, parent_api_key: str, session_info: dict | None, session_history: list[dict]) -> dict:
     if not session_needs_refresh(session_info, args.session_refresh_margin_sec):
         return session_info or {}
     state.update(status="refreshing_session" if session_info else "minting_session")
     next_session = mint_worker_session(client, args, parent_api_key=parent_api_key)
-    session_history.append(next_session)
-    refresh_count = max(len(session_history) - 1, 0)
+    append_worker_session_history(session_history, next_session)
+    refresh_count = int(state.data.get("session_refresh_count") or 0) + (1 if session_info else 0)
     state.update(
         status="session_ready",
         session_id=next_session.get("session_id"),
@@ -432,6 +625,27 @@ def build_task_prompt_bundle(task: dict, adapter: str | None = None) -> tuple[st
     knowledge = task.get("_knowledge_retrieval_evidence") or {}
     knowledge_paths = [redact_text(path, 120) for path in (knowledge.get("paths") or [])[:5]]
     knowledge_metrics = knowledge.get("metrics") or {}
+    prompt_context_blocks = knowledge.get("prompt_context_blocks") if isinstance(knowledge.get("prompt_context_blocks"), list) else []
+    prompt_context_lines: list[str] = []
+    for block in prompt_context_blocks[:8]:
+        if not isinstance(block, dict):
+            continue
+        source_type = redact_text(block.get("source_type") or "project_context", 40)
+        authority = redact_text(block.get("authority") or "reference", 60)
+        label = redact_text(block.get("title") or block.get("memory_type") or block.get("path") or block.get("context_id"), 120)
+        heading = redact_text(block.get("heading_path"), 120)
+        summary = redact_text(block.get("summary"), 800)
+        if not summary:
+            continue
+        location = f" / {heading}" if heading else ""
+        prompt_context_lines.append(f"- [{source_type}; {authority}] {label}{location}: {summary}")
+    bounded_project_context = (
+        "MIS 受治理项目上下文（仅用于本次模型调用，账本只记录来源 ID/hash，不保存下列摘要）：\n"
+        + "\n".join(prompt_context_lines)
+        + "\n"
+        if prompt_context_lines
+        else "MIS 受治理项目上下文：当前 Host 未提供可消费的受限摘要；不要仅凭文档路径推断内容。\n"
+    )
     knowledge_context = (
         "项目知识检索证据："
         f"status={redact_text(knowledge.get('packet_status') or knowledge.get('status') or 'unavailable', 60)}; "
@@ -440,7 +654,8 @@ def build_task_prompt_bundle(task: dict, adapter: str | None = None) -> tuple[st
         f"recall_at_5={knowledge_metrics.get('recall_at_5')}; "
         f"mrr={knowledge_metrics.get('mrr')}; "
         f"paths={', '.join(knowledge_paths) if knowledge_paths else 'none'}; "
-        "raw_query/snippet/content/prompt/response/token omitted.\n"
+        f"context_consumed={bool(prompt_context_lines)}; "
+        "raw_query/source_body/prompt/response/token omitted.\n"
     )
     loop = task.get("_loop_supervision_gate") if isinstance(task.get("_loop_supervision_gate"), dict) else {}
     service = loop.get("service_managed_loop") if isinstance(loop.get("service_managed_loop"), dict) else {}
@@ -466,6 +681,26 @@ def build_task_prompt_bundle(task: dict, adapter: str | None = None) -> tuple[st
             f"local_run_path_present={bool(local_deployment.get('local_run_path_present'))}; "
             "proof_source=/api/operator/loop-supervision; "
             "server_shell=false; raw_service_template/prompt/response/token omitted.\n"
+        )
+    execution_fact = (
+        task.get("_worker_execution_fact")
+        if isinstance(task.get("_worker_execution_fact"), dict)
+        else {}
+    )
+    execution_fact_context = ""
+    if execution_fact:
+        execution_fact_context = (
+            "当前 Worker 执行事实："
+            f"adapter={redact_text(execution_fact.get('adapter') or adapter or 'worker', 40)}; "
+            f"agent_id={redact_text(execution_fact.get('agent_id'), 120)}; "
+            f"task_id={redact_text(execution_fact.get('task_id') or task.get('task_id'), 120)}; "
+            f"worker_process_active={bool(execution_fact.get('worker_process_active'))}; "
+            f"gateway_task_claim_succeeded={bool(execution_fact.get('gateway_task_claim_succeeded'))}; "
+            f"evidence_source={redact_text(execution_fact.get('evidence_source'), 100)}; "
+            f"os_service_ownership_inferred={bool(execution_fact.get('os_service_ownership_inferred'))}; "
+            "本条只证明当前进程已成功认领本任务；历史 service receipt/readback 仍是治理证据，"
+            "但不能否定已发生的当前 claim，也不能据此推断 launchd/systemd ownership； "
+            "raw_service_template/prompt/response/token omitted.\n"
         )
     intake_plan = task.get("_intake_plan_evidence") if isinstance(task.get("_intake_plan_evidence"), dict) else {}
     intake_plan_context = ""
@@ -503,7 +738,9 @@ def build_task_prompt_bundle(task: dict, adapter: str | None = None) -> tuple[st
         f"验收标准：{acceptance}\n"
         f"{profile_context}"
         f"{knowledge_context}"
+        f"{bounded_project_context}"
         f"{service_context}"
+        f"{execution_fact_context}"
         f"{intake_plan_context}"
     )
     return prompt, profile
@@ -827,30 +1064,6 @@ def adapter_capability_profile(adapter: str, codex_mode: str = "read-only") -> d
     }
 
 
-EXTERNAL_WRITE_INTENT_KEYWORDS = {
-    "publish",
-    "upload",
-    "deploy",
-    "push",
-    "send email",
-    "webhook",
-    "external write",
-    "notion",
-    "dify",
-    "dataset",
-    "file search",
-    "customer portal",
-    "生产发布",
-    "发布",
-    "上传",
-    "部署",
-    "推送",
-    "发邮件",
-    "外部写入",
-    "知识库上传",
-}
-
-
 def worker_external_write_intent(task: dict, args, capability: dict) -> bool:
     if args.adapter not in {"hermes", "openclaw", "codex"}:
         return False
@@ -858,14 +1071,13 @@ def worker_external_write_intent(task: dict, args, capability: dict) -> bool:
         return False
     if capability.get("requires_prepared_action_for_external_write") is not True:
         return False
-    combined = " ".join([
-        str(task.get("title") or ""),
-        str(task.get("description") or ""),
-        str(task.get("acceptance_criteria") or ""),
-        str(task.get("target_resource") or ""),
-        str(task.get("external_action_type") or ""),
-    ]).lower()
-    return any(keyword.lower() in combined for keyword in EXTERNAL_WRITE_INTENT_KEYWORDS)
+    return task_has_external_write_intent(
+        title=task.get("title"),
+        description=task.get("description"),
+        acceptance_criteria=task.get("acceptance_criteria"),
+        target_resource=task.get("target_resource"),
+        external_action_type=task.get("external_action_type"),
+    )
 
 
 def codex_workspace_write_requested(args) -> bool:
@@ -1038,31 +1250,138 @@ def create_worker_external_write_gate(
     }
 
 
-def emit_jsonl(args, payload: dict):
-    if args.jsonl_log:
-        print(json.dumps(payload, ensure_ascii=False, sort_keys=True), flush=True)
-
-
-def safe_worker_heartbeat(client: AgentOpsClient, args, status: str, summary: str):
+def emit_jsonl(args, payload: dict) -> bool:
+    if not args.jsonl_log or getattr(args, "_jsonl_log_disabled", False):
+        return False
     try:
-        client.post("/api/agent-gateway/heartbeat", {
-            "workspace_id": client.workspace_id,
-            "agent_id": client.agent_id,
-            "status": status,
-            "summary": redact_text(summary, 200),
-            "runtime_type": args.adapter,
-        }, timeout=20)
+        print(json.dumps(payload, ensure_ascii=False, sort_keys=True), flush=True)
+        return True
+    except (BrokenPipeError, OSError):
+        args._jsonl_log_disabled = True
+        try:
+            sys.stdout = open(os.devnull, "w", encoding="utf-8")
+        except OSError:
+            pass
+        return False
+
+
+def emit_worker_summary(payload: dict) -> bool:
+    try:
+        print(json_dumps(payload), flush=True)
+        return True
+    except (BrokenPipeError, OSError):
+        try:
+            sys.stdout = open(os.devnull, "w", encoding="utf-8")
+        except OSError:
+            pass
+        return False
+
+
+def worker_result_history_limit(args) -> int:
+    if getattr(args, "once", False):
+        return 1
+    max_tasks = max(int(getattr(args, "max_tasks", 0) or 0), 0)
+    return min(max(max_tasks, 20), 100) if max_tasks else 20
+
+
+def append_worker_result(history: list[dict], result: dict, limit: int) -> int:
+    history.append(result)
+    overflow = max(len(history) - max(int(limit or 1), 1), 0)
+    if overflow:
+        del history[:overflow]
+    return overflow
+
+
+def worker_result_failed(result: dict) -> bool:
+    return result.get("ok") is False
+
+
+def worker_heartbeat(client: AgentOpsClient, args, status: str, summary: str, *, force: bool = False) -> dict:
+    interval_sec = max(float(getattr(args, "heartbeat_interval_sec", 60.0) or 0), 0.0)
+    monotonic_now = time.monotonic()
+    last_sent_at = getattr(client, "_worker_heartbeat_sent_at", None)
+    last_status = getattr(client, "_worker_heartbeat_status", None)
+    if (
+        not force
+        and last_sent_at is not None
+        and last_status == status
+        and monotonic_now - float(last_sent_at) < interval_sec
+    ):
+        return {
+            "sent": False,
+            "reason": "heartbeat_interval",
+            "interval_sec": interval_sec,
+            "token_omitted": True,
+        }
+    response = client.post("/api/agent-gateway/heartbeat", {
+        "workspace_id": client.workspace_id,
+        "agent_id": client.agent_id,
+        "status": status,
+        "summary": redact_text(summary, 200),
+        "runtime_type": args.adapter,
+    }, timeout=20)
+    client._worker_heartbeat_sent_at = monotonic_now
+    client._worker_heartbeat_status = status
+    return {
+        "sent": True,
+        "ledger_recorded": bool(response.get("ledger_recorded", True)),
+        "token_omitted": True,
+    }
+
+
+def safe_worker_heartbeat(client: AgentOpsClient, args, status: str, summary: str, *, force: bool = False) -> dict:
+    try:
+        return worker_heartbeat(client, args, status, summary, force=force)
     except Exception:
-        pass
+        return {"sent": False, "failed": True, "token_omitted": True}
+
+
+def release_worker_session(client: AgentOpsClient, session_info: dict | None) -> dict:
+    if not session_info or not session_info.get("session_id"):
+        return {
+            "attempted": False,
+            "revoked": False,
+            "session_id_omitted": True,
+            "token_omitted": True,
+        }
+    try:
+        response = client.post("/api/agent-gateway/session/revoke-self", {}, timeout=20)
+        return {
+            "attempted": True,
+            "revoked": response.get("revoked") is True,
+            "session_ref": response.get("session_ref"),
+            "session_id_omitted": True,
+            "token_omitted": True,
+        }
+    except Exception:
+        return {
+            "attempted": True,
+            "revoked": False,
+            "failed": True,
+            "session_id_omitted": True,
+            "token_omitted": True,
+        }
 
 
 def backoff_sleep(base_interval: float, cap: float, streak: int, factor: float) -> float:
     base = max(float(base_interval or 0), 0.0)
     if base <= 0:
         return 0.0
-    capped = max(float(cap or base), base)
-    multiplier = max(float(factor or 1.0), 1.0) ** max(int(streak or 1) - 1, 0)
-    return min(base * multiplier, capped)
+    capped = max(float(base if cap is None else cap), 0.0)
+    if capped <= 0 or base >= capped:
+        return capped
+    growth = max(float(factor or 1.0), 1.0)
+    steps = max(int(streak or 1) - 1, 0)
+    if steps == 0 or growth == 1.0:
+        return base
+
+    # Saturate before exponentiation. A long-lived idle Worker can accumulate
+    # thousands of iterations; calculating growth ** steps first overflows even
+    # though the configured result is capped to a few seconds.
+    saturation_step = (math.log(capped) - math.log(base)) / math.log(growth)
+    if steps >= saturation_step:
+        return capped
+    return min(base * (growth ** steps), capped)
 
 
 def register_worker(client: AgentOpsClient, adapter: str):
@@ -1110,6 +1429,10 @@ def build_worker_knowledge_query(task: dict, adapter: str | None = None) -> str:
     return redact_text(query, 240)
 
 
+def context_packet_endpoint_missing(exc: Exception) -> bool:
+    return "GET /api/agent-gateway/knowledge/context-packet failed: 404" in str(exc)
+
+
 def fetch_worker_knowledge_evidence(client: AgentOpsClient, task: dict, adapter: str | None = None) -> dict:
     task_id = str(task.get("task_id") or "").strip()
     query = build_worker_knowledge_query(task, adapter=adapter)
@@ -1123,13 +1446,23 @@ def fetch_worker_knowledge_evidence(client: AgentOpsClient, task: dict, adapter:
     else:
         packet_query["q"] = query
     try:
-        packet = client.get("/api/agent-gateway/knowledge/evidence-packet", packet_query)
+        try:
+            packet = client.get("/api/agent-gateway/knowledge/context-packet", packet_query)
+        except Exception as context_exc:
+            if not context_packet_endpoint_missing(context_exc):
+                raise
+            packet = client.get("/api/agent-gateway/knowledge/evidence-packet", packet_query)
         compact = compact_worker_knowledge_evidence(packet)
         if compact.get("knowledge_retrieval_evidence_consumed"):
             return compact
         try:
             indexed = client.post("/api/agent-gateway/knowledge/index", {"rebuild": False})
-            packet = client.get("/api/agent-gateway/knowledge/evidence-packet", packet_query)
+            try:
+                packet = client.get("/api/agent-gateway/knowledge/context-packet", packet_query)
+            except Exception as context_exc:
+                if not context_packet_endpoint_missing(context_exc):
+                    raise
+                packet = client.get("/api/agent-gateway/knowledge/evidence-packet", packet_query)
             compact = compact_worker_knowledge_evidence(packet)
             compact["knowledge_index_attempted"] = True
             compact["knowledge_index_status"] = indexed.get("status") or indexed.get("operation")
@@ -1156,6 +1489,9 @@ def fetch_worker_knowledge_evidence(client: AgentOpsClient, task: dict, adapter:
                 "token_omitted": True,
             },
             "knowledge_retrieval_evidence_consumed": False,
+            "knowledge_context_consumed": False,
+            "context_contract_version": None,
+            "prompt_context_blocks": [],
             "results": [],
             "retrieval_ids": [],
             "paths": [],
@@ -1187,6 +1523,40 @@ def compact_worker_knowledge_evidence(packet: dict) -> dict:
             "raw_prompt_omitted": True,
             "token_omitted": True,
         })
+    prompt_context_blocks = []
+    context_bindings = []
+    for block in (packet.get("context_blocks") or [])[:8]:
+        if not isinstance(block, dict):
+            continue
+        summary = redact_text(block.get("summary"), 800)
+        if not summary:
+            continue
+        safe_block = {
+            "context_id": block.get("context_id"),
+            "source_type": block.get("source_type"),
+            "authority": block.get("authority"),
+            "retrieval_id": block.get("retrieval_id"),
+            "memory_id": block.get("memory_id"),
+            "memory_type": block.get("memory_type"),
+            "path": block.get("path"),
+            "title": block.get("title"),
+            "heading_path": block.get("heading_path"),
+            "source_hash": block.get("source_hash"),
+            "summary": summary,
+            "summary_hash": block.get("summary_hash") or stable_hash(summary),
+            "raw_source_body_omitted": True,
+            "raw_transcript_omitted": True,
+            "token_omitted": True,
+        }
+        prompt_context_blocks.append(safe_block)
+        context_bindings.append({
+            "context_id": safe_block["context_id"],
+            "source_type": safe_block["source_type"],
+            "retrieval_id": safe_block["retrieval_id"],
+            "memory_id": safe_block["memory_id"],
+            "summary_hash": safe_block["summary_hash"],
+        })
+    context_contract_version = packet.get("version") if packet.get("operation") == "knowledge_project_context_packet" else None
     core = {
         "operation": "worker_knowledge_retrieval_evidence",
         "packet_operation": packet.get("operation"),
@@ -1206,6 +1576,12 @@ def compact_worker_knowledge_evidence(packet: dict) -> dict:
         "retrieval_ids": [row.get("retrieval_id") for row in rows if row.get("retrieval_id")],
         "paths": [row.get("path") for row in rows if row.get("path")],
         "source_hashes": [row.get("source_hash") for row in rows if row.get("source_hash")],
+        "context_contract_version": context_contract_version,
+        "context_packet_hash": packet.get("packet_hash") if context_contract_version else None,
+        "context_block_count": len(prompt_context_blocks),
+        "context_block_hashes": [row.get("summary_hash") for row in prompt_context_blocks if row.get("summary_hash")],
+        "approved_memory_ids": [row.get("memory_id") for row in prompt_context_blocks if row.get("source_type") == "approved_memory" and row.get("memory_id")],
+        "prompt_context_blocks": prompt_context_blocks,
         "results": rows,
         "raw_content_omitted": True,
         "raw_prompt_omitted": True,
@@ -1219,8 +1595,12 @@ def compact_worker_knowledge_evidence(packet: dict) -> dict:
         "query_hash": core["query_hash"],
         "metrics": core["metrics"],
         "results": rows,
+        "context_contract_version": context_contract_version,
+        "context_packet_hash": core["context_packet_hash"],
+        "context_bindings": context_bindings,
     })
     core["knowledge_retrieval_evidence_consumed"] = bool(rows)
+    core["knowledge_context_consumed"] = bool(prompt_context_blocks)
     return core
 
 
@@ -1242,7 +1622,7 @@ def compact_worker_loop_supervision_gate(payload: dict, *, adapter: str, task_id
     service_closure = item.get("service_closure") if isinstance(item.get("service_closure"), dict) else {}
     service_closure_gate = next((gate for gate in raw_gates if isinstance(gate, dict) and gate.get("id") == "service_managed_loop"), {})
     service_closure_status = str(service_closure.get("status") or service_closure_gate.get("status") or "not_applicable")
-    service_closure_required = bool(
+    service_closure_requested = bool(
         service_closure.get("required") is True
         or service_closure_status in {"attention", "blocked", "record_first"}
         or (
@@ -1250,6 +1630,10 @@ def compact_worker_loop_supervision_gate(payload: dict, *, adapter: str, task_id
             and service_closure_gate.get("ok") is not True
             and service_closure_status not in {"pass", "not_applicable"}
         )
+    )
+    service_closure_hard_gate = bool(
+        service_closure.get("hard_run_start_gate") is True
+        or service_closure_gate.get("hard_run_start_gate") is True
     )
     service_closure_command = service_closure.get("command") or service_closure_gate.get("command")
     gates = [
@@ -1273,7 +1657,7 @@ def compact_worker_loop_supervision_gate(payload: dict, *, adapter: str, task_id
         and not server_shell
         and not blockers
         and plan_quality_issue_count == 0
-        and not service_closure_required
+        and not service_closure_hard_gate
         and status not in {"blocked", "attention", "preview_only", "unavailable"}
     )
     core = {
@@ -1330,14 +1714,14 @@ def compact_worker_loop_supervision_gate(payload: dict, *, adapter: str, task_id
             "token_omitted": True,
         },
         "service_closure": {
-            "required": service_closure_required,
+            "required": service_closure_requested,
             "status": service_closure_status,
             "step": service_closure.get("step") or service_closure_gate.get("step"),
             "phase": service_closure.get("phase") or service_closure_gate.get("phase"),
             "command": service_closure_command,
             "gate_status": service_closure_gate.get("status"),
             "gate_ok": service_closure_gate.get("ok") is True,
-            "hard_run_start_gate": service_closure.get("hard_run_start_gate") is True or service_closure_gate.get("hard_run_start_gate") is True,
+            "hard_run_start_gate": service_closure_hard_gate,
             "server_executes_shell": service_closure.get("server_executes_shell") is True or service_closure_gate.get("server_executes_shell") is True,
             "token_omitted": True,
         },
@@ -1422,6 +1806,7 @@ def create_worker_agent_plan(client: AgentOpsClient, task: dict, args, knowledge
         *[path for path in retrieved_paths if path.endswith(".md") and not path.startswith("knowledge/")],
     ])[:8]
     referenced_memories = unique_values([
+        *[memory_id for memory_id in (knowledge_evidence.get("approved_memory_ids") or []) if isinstance(memory_id, str)],
         "knowledge/shared/common_failures.md",
         *retrieved_paths,
     ])[:8]
@@ -2274,7 +2659,7 @@ def process_one_task(client: AgentOpsClient, args) -> dict:
     pull_query = {
         "agent_id": client.agent_id,
         "workspace_id": client.workspace_id,
-        "limit": 1,
+        "limit": WORKER_PULL_CANDIDATE_LIMIT,
         "status": args.status,
         "enforce_intake": "true" if args.enforce_intake else "false",
     }
@@ -2285,6 +2670,12 @@ def process_one_task(client: AgentOpsClient, args) -> dict:
     if not tasks:
         intake = pulled.get("intake") or {}
         if intake.get("blocked"):
+            worker_heartbeat(
+                client,
+                args,
+                "idle",
+                "Worker intake is blocked pending required planning or review.",
+            )
             auto_plan_result = maybe_auto_plan_intake_block(client, args, intake)
             if auto_plan_result:
                 return {
@@ -2306,13 +2697,7 @@ def process_one_task(client: AgentOpsClient, args) -> dict:
                     "token_omitted": True,
                 },
             }
-        client.post("/api/agent-gateway/heartbeat", {
-            "workspace_id": client.workspace_id,
-            "agent_id": client.agent_id,
-            "status": "idle",
-            "summary": "Worker found no eligible task.",
-            "runtime_type": args.adapter,
-        })
+        worker_heartbeat(client, args, "idle", "Worker found no eligible task.")
         return {"processed": False, "reason": "no_task"}
 
     task = tasks[0]
@@ -2371,6 +2756,18 @@ def process_one_task(client: AgentOpsClient, args) -> dict:
         })
     knowledge_evidence = fetch_worker_knowledge_evidence(client, task, adapter=args.adapter)
     task = dict(task)
+    task["_worker_execution_fact"] = {
+        "adapter": args.adapter,
+        "agent_id": client.agent_id,
+        "task_id": task_id,
+        "worker_process_active": True,
+        "gateway_task_claim_succeeded": True,
+        "evidence_source": "agent_gateway.task_claim.current_process",
+        "os_service_ownership_inferred": False,
+        "raw_prompt_omitted": True,
+        "raw_response_omitted": True,
+        "token_omitted": True,
+    }
     task["_knowledge_retrieval_evidence"] = knowledge_evidence
     plan_reused = False
     plan_id, verified_plan = verified_intake_plan_for_task(client, task)
@@ -2519,6 +2916,9 @@ def process_one_task(client: AgentOpsClient, args) -> dict:
         "args": {
             "task_id": task_id,
             "adapter": args.adapter,
+            # The Host bounds metadata to its first 40 fields. Keep the secret
+            # boundary ahead of optional runtime/context evidence.
+            **secret_boundary,
             "prompt_hash": result.prompt_hash,
             "prompt_profile_id": result.prompt_profile_id,
             "prompt_profile_version": result.prompt_profile_version,
@@ -2540,6 +2940,12 @@ def process_one_task(client: AgentOpsClient, args) -> dict:
             "external_writes_supported": capability.get("external_writes_supported"),
             "hermes_max_tokens": args.hermes_max_tokens if args.adapter == "hermes" else None,
             "knowledge_retrieval_evidence_consumed": bool(knowledge_evidence.get("knowledge_retrieval_evidence_consumed")),
+            "knowledge_context_consumed": bool(knowledge_evidence.get("knowledge_context_consumed")),
+            "knowledge_context_contract_version": knowledge_evidence.get("context_contract_version"),
+            "knowledge_context_packet_hash": knowledge_evidence.get("context_packet_hash"),
+            "knowledge_context_block_count": int(knowledge_evidence.get("context_block_count") or 0),
+            "knowledge_context_block_hashes": knowledge_evidence.get("context_block_hashes") or [],
+            "knowledge_context_approved_memory_ids": knowledge_evidence.get("approved_memory_ids") or [],
             "knowledge_retrieval_packet_hash": knowledge_evidence.get("packet_hash"),
             "knowledge_retrieval_query_hash": knowledge_evidence.get("query_hash"),
             "knowledge_retrieval_status": knowledge_evidence.get("packet_status") or knowledge_evidence.get("status"),
@@ -2553,12 +2959,13 @@ def process_one_task(client: AgentOpsClient, args) -> dict:
                 "query_omitted": True,
                 "snippet_omitted": True,
                 "raw_content_omitted": True,
+                "context_body_not_persisted": True,
+                "raw_transcript_omitted": True,
                 "raw_prompt_omitted": True,
                 "raw_response_omitted": True,
                 "token_omitted": True,
             },
             "raw_omitted": True,
-            **secret_boundary,
         },
         "result_summary": result.output_summary,
     })
@@ -2574,7 +2981,12 @@ def process_one_task(client: AgentOpsClient, args) -> dict:
         "error_type": result.error_type,
         "error_message": result.error_message,
     })
-    knowledge_gate_pass = bool(knowledge_evidence.get("knowledge_retrieval_evidence_consumed"))
+    knowledge_context_required = bool(knowledge_evidence.get("context_contract_version"))
+    knowledge_context_consumed = bool(knowledge_evidence.get("knowledge_context_consumed"))
+    knowledge_gate_pass = bool(
+        knowledge_evidence.get("knowledge_retrieval_evidence_consumed")
+        and (knowledge_context_consumed or not knowledge_context_required)
+    )
     knowledge_gate_status = (
         "pass"
         if knowledge_gate_pass
@@ -2584,7 +2996,7 @@ def process_one_task(client: AgentOpsClient, args) -> dict:
     )
     evaluation_pass = bool(result.ok and knowledge_gate_pass)
     if evaluation_pass:
-        evaluation_notes = "Worker adapter loop completed with compact knowledge retrieval evidence."
+        evaluation_notes = "Worker adapter loop completed with compact retrieval evidence and bounded project context."
     elif result.ok:
         evaluation_notes = "Worker adapter loop completed but failed quality gate: knowledge retrieval evidence was unavailable or missing."
     else:
@@ -2600,8 +3012,10 @@ def process_one_task(client: AgentOpsClient, args) -> dict:
         "rubric": {
             "gate": "worker_adapter_loop",
             "adapter": args.adapter,
+            **secret_boundary,
             "requires_completed_run": True,
             "requires_knowledge_retrieval_evidence": True,
+            "requires_project_context_packet": knowledge_context_required,
             "prompt_profile_id": result.prompt_profile_id,
             "prompt_profile_version": result.prompt_profile_version,
             "prompt_profile_hash": result.prompt_profile_hash,
@@ -2624,6 +3038,12 @@ def process_one_task(client: AgentOpsClient, args) -> dict:
             "read_only_runtime": capability.get("read_only_runtime") is True,
             "external_writes_supported": capability.get("external_writes_supported"),
             "knowledge_retrieval_evidence_consumed": bool(knowledge_evidence.get("knowledge_retrieval_evidence_consumed")),
+            "knowledge_context_consumed": knowledge_context_consumed,
+            "knowledge_context_contract_version": knowledge_evidence.get("context_contract_version"),
+            "knowledge_context_packet_hash": knowledge_evidence.get("context_packet_hash"),
+            "knowledge_context_block_count": int(knowledge_evidence.get("context_block_count") or 0),
+            "knowledge_context_block_hashes": knowledge_evidence.get("context_block_hashes") or [],
+            "knowledge_context_approved_memory_ids": knowledge_evidence.get("approved_memory_ids") or [],
             "knowledge_retrieval_packet_hash": knowledge_evidence.get("packet_hash"),
             "knowledge_retrieval_query_hash": knowledge_evidence.get("query_hash"),
             "knowledge_retrieval_status": knowledge_evidence.get("packet_status") or knowledge_evidence.get("status"),
@@ -2634,11 +3054,12 @@ def process_one_task(client: AgentOpsClient, args) -> dict:
                 "query_omitted": True,
                 "snippet_omitted": True,
                 "raw_content_omitted": True,
+                "context_body_not_persisted": True,
+                "raw_transcript_omitted": True,
                 "raw_prompt_omitted": True,
                 "raw_response_omitted": True,
                 "token_omitted": True,
             },
-            **secret_boundary,
         },
         "notes": evaluation_notes,
     })
@@ -2687,6 +3108,7 @@ def process_one_task(client: AgentOpsClient, args) -> dict:
         "run_id": run_id,
         "metadata": {
             "adapter": args.adapter,
+            **secret_boundary,
             "ok": result.ok,
             "prompt_hash": result.prompt_hash,
             "prompt_profile_id": result.prompt_profile_id,
@@ -2709,6 +3131,12 @@ def process_one_task(client: AgentOpsClient, args) -> dict:
             "worker_runtime_event_summary_recorded": bool(worker_runtime_event_id),
             "runtime_internal_tools_remain_opaque": capability.get("observation_level") == "ledger_summary_only",
             "knowledge_retrieval_evidence_consumed": bool(knowledge_evidence.get("knowledge_retrieval_evidence_consumed")),
+            "knowledge_context_consumed": bool(knowledge_evidence.get("knowledge_context_consumed")),
+            "knowledge_context_contract_version": knowledge_evidence.get("context_contract_version"),
+            "knowledge_context_packet_hash": knowledge_evidence.get("context_packet_hash"),
+            "knowledge_context_block_count": int(knowledge_evidence.get("context_block_count") or 0),
+            "knowledge_context_block_hashes": knowledge_evidence.get("context_block_hashes") or [],
+            "knowledge_context_approved_memory_ids": knowledge_evidence.get("approved_memory_ids") or [],
             "knowledge_retrieval_packet_hash": knowledge_evidence.get("packet_hash"),
             "knowledge_retrieval_query_hash": knowledge_evidence.get("query_hash"),
             "knowledge_retrieval_status": knowledge_evidence.get("packet_status") or knowledge_evidence.get("status"),
@@ -2721,11 +3149,12 @@ def process_one_task(client: AgentOpsClient, args) -> dict:
                 "query_omitted": True,
                 "snippet_omitted": True,
                 "raw_content_omitted": True,
+                "context_body_not_persisted": True,
+                "raw_transcript_omitted": True,
                 "raw_prompt_omitted": True,
                 "raw_response_omitted": True,
                 "token_omitted": True,
             },
-            **secret_boundary,
         },
     })
     audit_id = audit_payload.get("audit_id")
@@ -2740,13 +3169,13 @@ def process_one_task(client: AgentOpsClient, args) -> dict:
     )
     manifest = manifest_payload.get("manifest") or {}
     manifest_verification = manifest_payload.get("verification") or {}
-    client.post("/api/agent-gateway/heartbeat", {
-        "workspace_id": client.workspace_id,
-        "agent_id": client.agent_id,
-        "status": "idle" if result.ok else "error",
-        "summary": result.output_summary,
-        "runtime_type": args.adapter,
-    })
+    worker_heartbeat(
+        client,
+        args,
+        "idle" if result.ok else "error",
+        result.output_summary,
+        force=True,
+    )
     return {
         "processed": True,
         "task_id": task_id,
@@ -2780,6 +3209,12 @@ def process_one_task(client: AgentOpsClient, args) -> dict:
         "runtime_observation": result.runtime_observation or {},
         "knowledge_retrieval_evidence": {
             "consumed": bool(knowledge_evidence.get("knowledge_retrieval_evidence_consumed")),
+            "context_consumed": bool(knowledge_evidence.get("knowledge_context_consumed")),
+            "context_contract_version": knowledge_evidence.get("context_contract_version"),
+            "context_packet_hash": knowledge_evidence.get("context_packet_hash"),
+            "context_block_count": int(knowledge_evidence.get("context_block_count") or 0),
+            "context_block_hashes": knowledge_evidence.get("context_block_hashes") or [],
+            "approved_memory_ids": knowledge_evidence.get("approved_memory_ids") or [],
             "packet_hash": knowledge_evidence.get("packet_hash"),
             "query_hash": knowledge_evidence.get("query_hash"),
             "status": knowledge_evidence.get("packet_status") or knowledge_evidence.get("status"),
@@ -2791,6 +3226,8 @@ def process_one_task(client: AgentOpsClient, args) -> dict:
             "query_omitted": True,
             "snippet_omitted": True,
             "raw_content_omitted": True,
+            "context_body_not_persisted": True,
+            "raw_transcript_omitted": True,
             "raw_prompt_omitted": True,
             "raw_response_omitted": True,
             "token_omitted": True,
@@ -2806,6 +3243,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--workspace-id", default=os.environ.get("AGENTOPS_WORKSPACE_ID", DEFAULT_WORKSPACE_ID))
     parser.add_argument("--agent-id", default=os.environ.get("AGENTOPS_AGENT_ID", DEFAULT_AGENT_ID))
     parser.add_argument("--api-key", default=os.environ.get("AGENTOPS_API_KEY", ""))
+    parser.add_argument("--credential-source", choices=["direct", "local_config"], default=os.environ.get("AGENTOPS_WORKER_CREDENTIAL_SOURCE", "direct"), help="Load a direct API key or a locked local AgentOps CLI config at process start.")
+    parser.add_argument("--config-path", default=os.environ.get("AGENTOPS_CONFIG", str(DEFAULT_CONFIG_PATH)), help="Path used only with --credential-source local_config.")
     parser.add_argument("--api-key-source", choices=["flag", "env", "config", "default", "missing"], default="env" if os.environ.get("AGENTOPS_API_KEY") else "missing")
     parser.add_argument("--use-session", action="store_true", help="Mint a short-lived Agent Gateway session before running the worker.")
     parser.add_argument("--session-ttl-sec", type=int, default=int(os.environ.get("AGENTOPS_SESSION_TTL_SEC", "900")), help="Session TTL when --use-session is set.")
@@ -2818,6 +3257,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--auto-plan-intake", action=argparse.BooleanOptionalAction, default=True, help="When intake blocks an assigned low/medium-risk task for missing/unverified Agent Plan, create or verify the plan before the next poll.")
     parser.add_argument("--once", action="store_true", help="Process at most one task and exit.")
     parser.add_argument("--poll-interval", type=float, default=5.0)
+    parser.add_argument("--heartbeat-interval-sec", type=float, default=float(os.environ.get("AGENTOPS_WORKER_HEARTBEAT_INTERVAL_SEC", "60")), help="Minimum interval between unchanged Worker heartbeat requests.")
     parser.add_argument("--idle-backoff-max", type=float, default=30.0, help="Maximum sleep seconds after consecutive no-task polls.")
     parser.add_argument("--error-backoff-max", type=float, default=30.0, help="Maximum sleep seconds after consecutive worker errors.")
     parser.add_argument("--backoff-factor", type=float, default=2.0, help="Exponential backoff factor for idle/error loops.")
@@ -2865,6 +3305,30 @@ def resolve_worker_entrypoint(args) -> list[str]:
     return [sys.executable, "-m", "agentops_mis_cli.worker"]
 
 
+def normalize_service_hermes_gateway_url(value: object) -> str:
+    configured = str(value or "").strip()
+    if not configured:
+        return ""
+    try:
+        parsed = urlparse(configured)
+        _ = parsed.port
+    except (TypeError, ValueError) as exc:
+        raise WorkerServiceConfigError("invalid_hermes_gateway_url") from exc
+    if (
+        parsed.scheme not in {"http", "https"}
+        or not parsed.hostname
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.params
+        or parsed.query
+        or parsed.fragment
+        or parsed.path not in {"", "/"}
+        or any(character.isspace() for character in configured)
+    ):
+        raise WorkerServiceConfigError("invalid_hermes_gateway_url")
+    return configured.rstrip("/")
+
+
 def service_env_values(args) -> dict[str, str]:
     env_values = {
         "AGENTOPS_BASE_URL": args.base_url,
@@ -2873,9 +3337,20 @@ def service_env_values(args) -> dict[str, str]:
         "AGENTOPS_WORKER_RUNTIME_DIR": args.runtime_dir,
         "AGENTOPS_WORKER_CWD": args.working_directory,
     }
+    credential_source = str(getattr(args, "credential_source", "direct") or "direct")
+    if credential_source == "local_config":
+        config_path = Path(str(getattr(args, "config_path", "") or DEFAULT_CONFIG_PATH)).expanduser().resolve(strict=False)
+        env_values["AGENTOPS_WORKER_CREDENTIAL_SOURCE"] = "local_config"
+        env_values["AGENTOPS_CONFIG"] = str(config_path)
     api_key_placeholder = str(args.api_key_placeholder or "").strip()
-    if api_key_placeholder and api_key_placeholder != DEFAULT_API_KEY_PLACEHOLDER:
+    if credential_source == "direct" and api_key_placeholder and api_key_placeholder != DEFAULT_API_KEY_PLACEHOLDER:
         env_values["AGENTOPS_API_KEY"] = api_key_placeholder
+    if args.adapter == "hermes":
+        hermes_gateway_url = normalize_service_hermes_gateway_url(
+            getattr(args, "hermes_gateway_url", "")
+        )
+        if hermes_gateway_url:
+            env_values["HERMES_GATEWAY_URL"] = hermes_gateway_url
     return env_values
 
 
@@ -2890,10 +3365,9 @@ def build_worker_command(args) -> list[str]:
         "0",
         "--continue-on-error",
         "--write-state",
-        "--jsonl-log",
     ]
     api_key_placeholder = str(args.api_key_placeholder or "").strip()
-    if getattr(args, "use_session", False) or api_key_placeholder not in {"", DEFAULT_API_KEY_PLACEHOLDER}:
+    if getattr(args, "use_session", False) or getattr(args, "credential_source", "direct") == "local_config" or api_key_placeholder not in {"", DEFAULT_API_KEY_PLACEHOLDER}:
         command.extend([
             "--use-session",
             "--session-ttl-sec",
@@ -2991,7 +3465,10 @@ def build_service_template_parser() -> argparse.ArgumentParser:
     parser.add_argument("--runtime-dir", default="")
     parser.add_argument("--log-path", default="")
     parser.add_argument("--api-key-placeholder", default=DEFAULT_API_KEY_PLACEHOLDER)
+    parser.add_argument("--credential-source", choices=["direct", "local_config"], default="direct")
+    parser.add_argument("--config-path", default=str(DEFAULT_CONFIG_PATH))
     parser.add_argument("--worker-command", default="", help="Worker executable command for service templates. Defaults to installed agentops-worker or python -m fallback.")
+    parser.add_argument("--hermes-gateway-url", default=os.environ.get("HERMES_GATEWAY_URL", ""), help="Persist an explicit credential-free Hermes HTTP(S) base URL for a Hermes service.")
     return parser
 
 
@@ -3119,6 +3596,18 @@ def check_service_installation(args) -> dict:
     adapter_present = args.adapter in content
     use_session_present = "--use-session" in content
     if args.manager == "launchd":
+        local_config_reference = bool(
+            re.search(r"AGENTOPS_WORKER_CREDENTIAL_SOURCE</key>\s*<string>local_config</string>", content)
+            and re.search(r"AGENTOPS_CONFIG</key>\s*<string>[^<]+</string>", content)
+            and "AGENTOPS_API_KEY" not in content
+        )
+    else:
+        local_config_reference = bool(
+            re.search(r"(?m)^Environment=.*AGENTOPS_WORKER_CREDENTIAL_SOURCE=local_config", content)
+            and re.search(r"(?m)^Environment=.*AGENTOPS_CONFIG=\S+", content)
+            and "AGENTOPS_API_KEY" not in content
+        )
+    if args.manager == "launchd":
         local_dev_no_token = bool(
             not re.search(r"AGENTOPS_API_KEY", content)
             and re.search(r"AGENTOPS_BASE_URL</key>\s*<string>http://127\.0\.0\.1:", content)
@@ -3152,7 +3641,15 @@ def check_service_installation(args) -> dict:
     else:
         unit = service_path.name
         service_status = systemd_status(unit, args.timeout)
-    ok = bool(exists and command_has_worker and adapter_present and (use_session_present or local_dev_no_token) and confirm_gate_ok and relaunch_policy["enabled"] and not token_like_detected)
+    observed_credential_source = "local_config" if local_config_reference else "direct"
+    requested_credential_source = str(getattr(args, "credential_source", "auto") or "auto")
+    credential_source_matches = requested_credential_source == "auto" or requested_credential_source == observed_credential_source
+    credential_source_ok = credential_source_matches and bool(
+        local_config_reference and use_session_present
+        if local_config_reference
+        else (use_session_present or local_dev_no_token)
+    )
+    ok = bool(exists and command_has_worker and adapter_present and credential_source_ok and confirm_gate_ok and relaunch_policy["enabled"] and not token_like_detected)
     hints = []
     if not exists:
         hints.append("Render a template with agentops-worker service-template and write it to service_path.")
@@ -3164,6 +3661,10 @@ def check_service_installation(args) -> dict:
         hints.append("Hermes/OpenClaw services need --confirm-run only when the operator intentionally allows live execution.")
     if exists and not use_session_present and not local_dev_no_token:
         hints.append("Remote/shared service files should use --use-session with a scoped token source; local loopback can run without a session token.")
+    if "AGENTOPS_WORKER_CREDENTIAL_SOURCE" in content and not local_config_reference:
+        hints.append("Local config credential references must include a config path, omit raw API keys, and mint a short-lived session.")
+    if exists and not credential_source_matches:
+        hints.append("Installed service credential source does not match the requested check policy.")
     if exists and not service_status.get("loaded"):
         hints.append("Service file exists but does not appear loaded; load it manually on the agent machine after review.")
     return {
@@ -3181,6 +3682,9 @@ def check_service_installation(args) -> dict:
             "command_has_worker": command_has_worker,
             "adapter_present": adapter_present,
             "use_session_present": use_session_present,
+            "credential_source": observed_credential_source,
+            "credential_source_matches": credential_source_matches,
+            "local_config_reference": local_config_reference,
             "local_dev_no_token": local_dev_no_token,
             "relaunch_policy_ok": relaunch_policy["enabled"],
             "confirm_gate_ok": confirm_gate_ok,
@@ -3205,6 +3709,8 @@ def build_service_check_parser() -> argparse.ArgumentParser:
     parser.add_argument("--label", default="")
     parser.add_argument("--service-path", default="")
     parser.add_argument("--api-key-placeholder", default=DEFAULT_API_KEY_PLACEHOLDER)
+    parser.add_argument("--credential-source", choices=["auto", "direct", "local_config"], default="auto")
+    parser.add_argument("--config-path", default=str(DEFAULT_CONFIG_PATH))
     parser.add_argument("--timeout", type=int, default=5)
     return parser
 
@@ -3219,7 +3725,28 @@ def run_service_check(argv: list[str]) -> int:
 def install_service_file(args) -> dict:
     label = args.label or service_label(args.agent_id)
     service_path = Path(args.service_path).expanduser() if args.service_path else default_service_path(args.manager, args.agent_id, label)
-    template = render_service_template_for_args(args)
+    try:
+        template = render_service_template_for_args(args)
+    except WorkerServiceConfigError as exc:
+        return {
+            "ok": False,
+            "provider": "agentops-worker",
+            "command": "agentops-worker service-install",
+            "manager": args.manager,
+            "dry_run": not bool(args.confirm_install),
+            "confirmed_install": bool(args.confirm_install),
+            "wrote": False,
+            "agent_id": args.agent_id,
+            "workspace_id": args.workspace_id,
+            "adapter": args.adapter,
+            "service_path": str(service_path),
+            "error": exc.code,
+            "setup_hints": ["Use a credential-free http(s) Hermes base URL without a path, query, or fragment."],
+            "live_execution_performed": False,
+            "service_loaded": False,
+            "raw_content_omitted": True,
+            "token_omitted": True,
+        }
     token_like_detected = bool(re.search(r"(agtok_|agtsess_|sk-|ntn_)", template))
     exists_before = service_path.exists()
     safe_to_write = not token_like_detected and (not exists_before or bool(args.overwrite))
@@ -3241,6 +3768,8 @@ def install_service_file(args) -> dict:
         label=label,
         service_path=str(service_path),
         api_key_placeholder=args.api_key_placeholder,
+        credential_source=getattr(args, "credential_source", "direct"),
+        config_path=getattr(args, "config_path", str(DEFAULT_CONFIG_PATH)),
         worker_command=args.worker_command,
         timeout=args.timeout,
     )
@@ -3281,6 +3810,7 @@ def install_service_file(args) -> dict:
         "agent_id": args.agent_id,
         "workspace_id": args.workspace_id,
         "adapter": args.adapter,
+        "credential_source": getattr(args, "credential_source", "direct"),
         "service_path": str(service_path),
         "service_file_mode": "0600" if wrote else None,
         "template_hash": stable_hash(template),
@@ -3313,7 +3843,10 @@ def build_service_install_parser() -> argparse.ArgumentParser:
     parser.add_argument("--runtime-dir", default="")
     parser.add_argument("--log-path", default="")
     parser.add_argument("--api-key-placeholder", default=DEFAULT_API_KEY_PLACEHOLDER)
+    parser.add_argument("--credential-source", choices=["direct", "local_config"], default="direct")
+    parser.add_argument("--config-path", default=str(DEFAULT_CONFIG_PATH))
     parser.add_argument("--worker-command", default="", help="Worker executable command for service templates. Defaults to installed agentops-worker or python -m fallback.")
+    parser.add_argument("--hermes-gateway-url", default=os.environ.get("HERMES_GATEWAY_URL", ""), help="Persist an explicit credential-free Hermes HTTP(S) base URL for a Hermes service.")
     parser.add_argument("--service-path", default="")
     parser.add_argument("--confirm-install", action="store_true", help="Write the service file. Default is dry-run.")
     parser.add_argument("--overwrite", action="store_true", help="Replace an existing service file after local review.")
@@ -3358,6 +3891,8 @@ def control_service(args) -> dict:
         label=label,
         service_path=str(service_path),
         api_key_placeholder=args.api_key_placeholder,
+        credential_source=getattr(args, "credential_source", "auto"),
+        config_path=getattr(args, "config_path", str(DEFAULT_CONFIG_PATH)),
         timeout=args.timeout,
     )
     service_check = check_service_installation(check_args)
@@ -3443,6 +3978,8 @@ def build_service_control_parser() -> argparse.ArgumentParser:
     parser.add_argument("--label", default="")
     parser.add_argument("--service-path", default="")
     parser.add_argument("--api-key-placeholder", default=DEFAULT_API_KEY_PLACEHOLDER)
+    parser.add_argument("--credential-source", choices=["auto", "direct", "local_config"], default="auto")
+    parser.add_argument("--config-path", default=str(DEFAULT_CONFIG_PATH))
     parser.add_argument("--timeout", type=int, default=10)
     parser.add_argument("--confirm-control", action="store_true", help="Actually call launchctl/systemctl. Default is preview only.")
     return parser
@@ -3457,7 +3994,17 @@ def run_service_control(argv: list[str]) -> int:
 
 def render_service_template(argv: list[str]) -> int:
     args = build_service_template_parser().parse_args(argv)
-    sys.stdout.write(render_service_template_for_args(args))
+    try:
+        template = render_service_template_for_args(args)
+    except WorkerServiceConfigError as exc:
+        print(json_dumps({
+            "ok": False,
+            "error": exc.code,
+            "raw_content_omitted": True,
+            "token_omitted": True,
+        }), file=sys.stderr)
+        return 2
+    sys.stdout.write(template)
     return 0
 
 
@@ -3605,22 +4152,52 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     signal.signal(signal.SIGTERM, handle_stop_signal)
     signal.signal(signal.SIGINT, handle_stop_signal)
-    client = AgentOpsClient(args.base_url, args.workspace_id, args.agent_id, args.api_key, args.api_key_source)
     state = WorkerState(args)
+    try:
+        parent_api_key = resolve_worker_api_key(args)
+        apply_local_config_session_policy(args)
+    except WorkerCredentialError as exc:
+        state.stop("failed_credential_source")
+        emit_worker_summary({
+            "ok": False,
+            "processed": 0,
+            "credential_source": str(getattr(args, "credential_source", "direct") or "direct"),
+            "error": exc.code,
+            "state": state.data,
+            "token_omitted": True,
+        })
+        return 1
+    args.api_key = parent_api_key
+    api_key_source = (
+        args.api_key_source
+        if str(getattr(args, "credential_source", "direct")) == "direct"
+        else "local_config"
+    )
+    client = AgentOpsClient(
+        args.base_url,
+        args.workspace_id,
+        args.agent_id,
+        parent_api_key,
+        api_key_source,
+    )
     processed = 0
     results = []
+    results_seen = 0
+    results_omitted = 0
+    result_failed_seen = False
+    once_result_failed = False
+    result_history_limit = worker_result_history_limit(args)
     registered = False
     fatal_failure = False
     session_info = None
     session_history = []
-    parent_api_key = args.api_key
     if args.use_session:
         try:
             session_info = ensure_worker_session(client, args, state, parent_api_key, session_info, session_history)
         except Exception as exc:
             error = state.record_error(exc)
             state.stop("failed_session_create")
-            print(json_dumps({"ok": False, "processed": 0, "results": [{**error, "processed": False, "ok": False}], "state": state.data, "session": {"token_omitted": True}, "sessions": session_history}))
+            emit_worker_summary({"ok": False, "processed": 0, "results": [{**error, "processed": False, "ok": False}], "state": state.data, "session": {"token_omitted": True}, "sessions": session_history})
             return 1
     while True:
         if SHOULD_STOP:
@@ -3634,15 +4211,44 @@ def main(argv: list[str] | None = None) -> int:
                 registered = True
             state.update(status="polling")
             result = process_one_task(client, args)
-            results.append(result)
+            results_omitted += append_worker_result(results, result, result_history_limit)
+            results_seen += 1
+            result_failed_seen = result_failed_seen or worker_result_failed(result)
+            once_result_failed = once_result_failed or bool(args.once and result.get("ok") is False)
             state.record_result(result)
-            emit_jsonl(args, {"event": "worker.iteration", "ok": True, "result": result, "state": state.data})
+            iteration_failed = worker_result_failed(result)
+            emit_jsonl(args, {"event": "worker.iteration", "ok": not iteration_failed, "result": result, "state": state.data})
             if result.get("processed"):
                 processed += 1
             if args.once:
                 break
             if args.max_tasks and processed >= args.max_tasks:
                 break
+            if iteration_failed:
+                error = state.data.get("last_error") or safe_worker_result_error(result)
+                safe_worker_heartbeat(client, args, "error", error["error_message"], force=True)
+                if not args.continue_on_error:
+                    fatal_failure = True
+                    state.stop("failed")
+                    break
+                if int(state.data.get("consecutive_errors") or 0) >= max(int(args.max_errors or 1), 1):
+                    fatal_failure = True
+                    state.stop("failed_max_errors")
+                    break
+                sleep_sec = backoff_sleep(
+                    args.poll_interval,
+                    args.error_backoff_max,
+                    int(state.data.get("consecutive_errors") or 1),
+                    args.backoff_factor,
+                )
+                state.update(
+                    status="sleeping_after_error",
+                    last_sleep_sec=sleep_sec,
+                    next_sleep_sec=sleep_sec,
+                    last_sleep_reason="error_backoff",
+                )
+                time.sleep(sleep_sec)
+                continue
             if result.get("processed"):
                 sleep_sec = max(args.poll_interval, 0.0)
                 sleep_reason = "post_task"
@@ -3657,8 +4263,11 @@ def main(argv: list[str] | None = None) -> int:
         except Exception as exc:
             error = state.record_error(exc)
             result = {"processed": False, "ok": False, **error}
-            results.append(result)
-            safe_worker_heartbeat(client, args, "error", error["error_message"])
+            results_omitted += append_worker_result(results, result, result_history_limit)
+            results_seen += 1
+            result_failed_seen = True
+            once_result_failed = once_result_failed or bool(args.once)
+            safe_worker_heartbeat(client, args, "error", error["error_message"], force=True)
             emit_jsonl(args, {"event": "worker.error", "ok": False, "error": error, "state": state.data})
             if args.once or not args.continue_on_error:
                 fatal_failure = True
@@ -3673,12 +4282,39 @@ def main(argv: list[str] | None = None) -> int:
             time.sleep(sleep_sec)
     final_ok = (
         not fatal_failure
-        and all(item.get("ok", True) for item in results if item.get("processed"))
-        and not any(item.get("ok") is False for item in results if args.once)
+        and not result_failed_seen
+        and not once_result_failed
     )
     final_status = "stopped" if SHOULD_STOP else "completed" if final_ok else "failed"
     state.stop(final_status)
-    print(json_dumps({"ok": final_ok, "processed": processed, "results": results, "state": state.data, "session": session_info or {"token_omitted": True}, "sessions": session_history}))
+    terminal_heartbeat = (
+        safe_worker_heartbeat(
+            client,
+            args,
+            "disabled",
+            "Worker process exited normally and released execution capacity.",
+            force=True,
+        )
+        if final_ok and registered
+        else {"sent": False, "preserved_error_status": not final_ok, "token_omitted": True}
+    )
+    session_cleanup = release_worker_session(client, session_info)
+    session_total = int(state.data.get("session_refresh_count") or 0) + (1 if session_info else 0)
+    emit_worker_summary({
+        "ok": final_ok,
+        "processed": processed,
+        "results": results,
+        "results_seen": results_seen,
+        "results_omitted": results_omitted,
+        "result_history_limit": result_history_limit,
+        "state": state.data,
+        "session": session_info or {"token_omitted": True},
+        "session_cleanup": session_cleanup,
+        "sessions": session_history,
+        "sessions_seen": session_total,
+        "sessions_omitted": max(session_total - len(session_history), 0),
+        "terminal_heartbeat": terminal_heartbeat,
+    })
     return 0 if final_ok else 1
 
 

@@ -1,5 +1,10 @@
 # AgentOps MIS Current Project State
 
+> Historical baseline notice: the operational branch, commit, installed/source
+> boundary, CI state, and next action below are from 2026-06-22. Read
+> [`CURRENT_CONTEXT_SNAPSHOT.md`](./CURRENT_CONTEXT_SNAPSHOT.md) first for the
+> current continuation point. This file remains the governance/v1.5 baseline.
+
 > Status date: 2026-06-22
 > Repository: `geogejoy107-jpg/agentops-mis-mvp`
 > Development line: `codex/agent-gateway-kb-demo`

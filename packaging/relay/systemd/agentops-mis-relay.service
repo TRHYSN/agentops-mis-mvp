@@ -1,0 +1,50 @@
+[Unit]
+Description=AgentOps MIS authority-free Relay
+Wants=network-online.target
+After=network-online.target
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=agentops-relay
+Group=agentops-relay
+WorkingDirectory=/var/lib/agentops-mis-relay
+ExecStartPre=/usr/local/bin/agentops-relay check --config /etc/agentops-mis-relay/config.json
+ExecStart=/usr/local/bin/agentops-relay serve --config /etc/agentops-mis-relay/config.json
+Restart=on-failure
+RestartSec=5s
+KillSignal=SIGTERM
+TimeoutStartSec=30s
+TimeoutStopSec=15s
+RuntimeDirectory=agentops-mis-relay
+RuntimeDirectoryMode=0700
+RuntimeDirectoryPreserve=yes
+StateDirectory=agentops-mis-relay
+StateDirectoryMode=0700
+UMask=0077
+LimitNOFILE=8192
+TasksMax=512
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectControlGroups=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+LockPersonality=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+ReadOnlyPaths=/etc/agentops-mis-relay
+ReadWritePaths=/var/lib/agentops-mis-relay /run/agentops-mis-relay
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=agentops-mis-relay
+
+[Install]
+WantedBy=multi-user.target

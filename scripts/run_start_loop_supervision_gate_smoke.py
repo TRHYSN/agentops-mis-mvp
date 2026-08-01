@@ -162,7 +162,19 @@ def fake_codex_supervision() -> dict:
             "can_confirm_all": True,
             "record_required": False,
         },
-        "items": [],
+        "items": [
+            {
+                "adapter": "hermes",
+                "status": "blocked",
+                "blockers": ["hermes_runtime_unavailable"],
+                "safety": {
+                    "read_only": True,
+                    "live_execution_performed": False,
+                    "server_executes_shell": False,
+                    "token_omitted": True,
+                },
+            }
+        ],
         "safety": {
             "read_only": True,
             "ledger_mutated": False,

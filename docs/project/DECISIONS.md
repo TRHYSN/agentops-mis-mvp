@@ -12,6 +12,7 @@
 | D-004 | Preserve Project Delta, not whole responses | Accepted | 2026-06-21 |
 | D-005 | Use Notion for knowledge/decisions and GitHub for execution; no Asana yet | Accepted | 2026-06-21 |
 | D-006 | Freeze horizontal expansion until hardening, CI, and v1.5 RC | Accepted | 2026-06-21 |
+| D-007 | Capture durable Project Delta before expiring raw Codex sessions | Accepted | 2026-07-23 |
 
 ## D-001 — Authority Split
 
@@ -108,3 +109,27 @@ The product already has substantial breadth. Reliability and authority-chain cor
 **Consequences**
 
 New feature proposals remain `Proposed` unless they close a current release gate or are explicitly reprioritized by the project owner.
+
+## D-007 — Summarize Then Expire Raw Codex Sessions
+
+**Decision**
+
+Completed Codex session history may be deleted only after its durable Project
+Delta is captured in versioned project documents, reviewed Memory, Git
+evidence, or the AgentOps MIS ledger. The current active task and an explicitly
+chosen recovery window must remain. Session cleanup uses metadata only and must
+not inspect or copy raw JSONL bodies.
+
+**Rationale**
+
+Raw session archives consume substantial local storage but are not an authority
+for current project state. Keeping every transcript duplicates knowledge,
+weakens privacy boundaries, and does not improve runtime retrieval.
+
+**Consequences**
+
+- Deleting a session removes the ability to resume that raw conversation.
+- Git code, approved Memory, MIS evidence, and project snapshots remain intact.
+- A retention acceptance record must name the retained active task, aggregate
+  deletion scope, and post-cleanup verification without storing conversation
+  content.

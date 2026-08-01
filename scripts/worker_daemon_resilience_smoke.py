@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
-"""Verify local worker daemon state, log evidence, and bounded error recovery."""
+"""Verify local worker daemon state, quiet diagnostics, and bounded error recovery."""
 
 from __future__ import annotations
 
 import argparse
 import datetime as dt
 import json
+import math
+import os
 import subprocess
 import sys
 import time
@@ -15,6 +17,10 @@ from urllib.request import Request, urlopen
 
 
 ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from agentops_mis_cli.worker import backoff_sleep  # noqa: E402
 
 
 def stamp() -> str:
@@ -59,13 +65,35 @@ def poll_until(deadline: float, interval: float, fn):
     return last
 
 
+def direct_backoff_sleep_smoke() -> dict:
+    cases = [
+        ("streak_one", 2.0, 30.0, 1, 2.0, 2.0),
+        ("normal_growth", 2.0, 30.0, 4, 2.0, 16.0),
+        ("huge_streak", 1.0, 30.0, 1_000_000, 2.0, 30.0),
+        ("zero_base", 0.0, 30.0, 10, 2.0, 0.0),
+        ("unit_factor", 2.0, 30.0, 10, 1.0, 2.0),
+        ("cap_below_base", 10.0, 3.0, 2, 2.0, 3.0),
+    ]
+    results = {}
+    for name, base, cap, streak, factor, expected in cases:
+        sleep_sec = backoff_sleep(base, cap, streak, factor)
+        require(math.isfinite(sleep_sec), f"{name} backoff is not finite: {sleep_sec}")
+        require(sleep_sec >= 0.0, f"{name} backoff is negative: {sleep_sec}")
+        require(sleep_sec <= cap, f"{name} backoff exceeds cap {cap}: {sleep_sec}")
+        require(sleep_sec == expected, f"{name} backoff mismatch: expected {expected}, got {sleep_sec}")
+        results[name] = sleep_sec
+    require(results["huge_streak"] == 30.0, f"huge streak did not saturate cap exactly: {results['huge_streak']}")
+    return {"cases": results, "huge_streak": 1_000_000, "huge_streak_saturated_cap": True}
+
+
 def server_daemon_smoke(base_url: str, run_stamp: str) -> dict:
-    agent_id = "agt_worker_daemon_mock"
+    agent_id = f"agt_worker_daemon_mock_{run_stamp}"
     task_id = f"tsk_worker_daemon_resilience_{run_stamp}"
     http_json("POST", base_url, "/api/workers/local/stop", {"adapter": "mock"})
 
     status, started = http_json("POST", base_url, "/api/workers/local/start", {
         "adapter": "mock",
+        "agent_id": agent_id,
         "poll_interval": 1,
         "max_tasks": 0,
         "max_errors": 3,
@@ -76,7 +104,7 @@ def server_daemon_smoke(base_url: str, run_stamp: str) -> dict:
         "task_id": task_id,
         "workspace_id": "local-demo",
         "title": "worker daemon resilience smoke task",
-        "description": "Verify daemon state and JSONL log evidence while processing a normal MIS task.",
+        "description": "Verify bounded daemon state telemetry while processing a normal MIS task.",
         "owner_agent_id": agent_id,
         "status": "planned",
         "priority": "high",
@@ -100,18 +128,30 @@ def server_daemon_smoke(base_url: str, run_stamp: str) -> dict:
     run_id = (runs[0] or {}).get("run_id") if runs else None
     require(bool(run_id), f"completed task has no run evidence: {detail}")
 
-    status, worker_status = http_json("GET", base_url, "/api/workers/status")
-    require(status == 200, f"worker status failed: {status} {worker_status}")
-    daemon = next((item for item in worker_status.get("daemons", []) if item.get("adapter") == "mock"), {})
+    latest_worker_status: dict = {}
+
+    def daemon_processed():
+        status, worker_status = http_json("GET", base_url, "/api/workers/status")
+        latest_worker_status.update({"status": status, "payload": worker_status})
+        if status != 200:
+            return None
+        candidate = next((item for item in worker_status.get("daemons", []) if item.get("adapter") == "mock"), {})
+        if candidate.get("running") is True and int(candidate.get("processed") or 0) >= 1:
+            return candidate
+        return None
+
+    daemon = poll_until(time.time() + 10, 0.25, daemon_processed)
+    require(bool(daemon), f"daemon state did not converge after task completion: {latest_worker_status}")
+    worker_status = latest_worker_status.get("payload") or {}
     require(daemon.get("running") is True, f"mock daemon is not running: {daemon}")
     require(int(daemon.get("processed") or 0) >= 1, f"daemon state did not record processed count: {daemon}")
     require(int(daemon.get("iterations") or 0) >= 1, f"daemon state did not record iterations: {daemon}")
     require(daemon.get("continue_on_error") is True, f"daemon did not report continue_on_error: {daemon}")
+    require(daemon.get("jsonl_log") is False, f"API-started daemon should keep per-poll JSONL disabled: {daemon}")
 
     status, logs = http_json("GET", base_url, "/api/workers/local/logs?adapter=mock")
     require(status == 200, f"log endpoint failed: {status} {logs}")
-    tail = ((logs.get("daemon") or {}).get("log_tail") or [])
-    require(any("worker.iteration" in line for line in tail), "daemon log tail did not include JSONL worker.iteration")
+    require((logs.get("daemon") or {}).get("jsonl_log") is False, f"daemon log read model lost quiet-mode evidence: {logs}")
 
     return {
         "task_id": task_id,
@@ -120,12 +160,15 @@ def server_daemon_smoke(base_url: str, run_stamp: str) -> dict:
         "iterations": daemon.get("iterations"),
         "status": daemon.get("status"),
         "worker_status": daemon.get("worker_status"),
-        "log_jsonl": True,
+        "log_jsonl": False,
+        "state_telemetry": True,
     }
 
 
 def direct_error_recovery_smoke(run_stamp: str) -> dict:
-    state_path = ROOT / ".agentops_runtime" / "workers" / f"resilience-smoke-{run_stamp}.state.json"
+    state_dir = Path(os.environ.get("AGENTOPS_WORKER_RUNTIME_DIR") or (ROOT / ".agentops_runtime" / "workers"))
+    state_dir.mkdir(parents=True, exist_ok=True)
+    state_path = state_dir / f"resilience-smoke-{run_stamp}.state.json"
     if state_path.exists():
         state_path.unlink()
     cmd = [
@@ -181,6 +224,7 @@ def main(argv: list[str] | None = None) -> int:
     run_stamp = stamp()
     result = {"ok": False, "base_url": args.base_url}
     try:
+        result["direct_backoff_sleep"] = direct_backoff_sleep_smoke()
         result["server_daemon"] = server_daemon_smoke(args.base_url, run_stamp)
         result["direct_error_recovery"] = direct_error_recovery_smoke(run_stamp)
         result["ok"] = True

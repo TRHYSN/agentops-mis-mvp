@@ -166,6 +166,58 @@ def main() -> int:
     require("AGENTOPS_API_KEY" not in service_prompt, "service prompt should not expose API-key env", failures)
     require("task_understanding" not in service_prompt, "intake plan prompt should not expose raw plan body", failures)
 
+    current_claim_task = dict(service_task)
+    current_claim_task["_loop_supervision_gate"] = {
+        **service_task["_loop_supervision_gate"],
+        "ready_for_live_dispatch": False,
+        "service_managed_loop": {
+            **service_task["_loop_supervision_gate"]["service_managed_loop"],
+            "service_managed_loop_ready": False,
+            "service_loaded": False,
+            "service_active_loop_ready": False,
+            "active_loop_status": "unverified",
+        },
+    }
+    current_claim_task["_worker_execution_fact"] = {
+        "adapter": "hermes",
+        "agent_id": "agt_worker_local_stack_hermes",
+        "task_id": "tsk_service_context_smoke",
+        "worker_process_active": True,
+        "gateway_task_claim_succeeded": True,
+        "evidence_source": "agent_gateway.task_claim.current_process",
+        "os_service_ownership_inferred": False,
+        "raw_prompt_omitted": True,
+        "raw_response_omitted": True,
+        "token_omitted": True,
+    }
+    current_claim_prompt, _current_claim_profile = build_task_prompt_bundle(
+        current_claim_task,
+        adapter="hermes",
+    )
+    combined_prompt += "\n" + current_claim_prompt
+    current_claim_markers = [
+        "当前 Worker 执行事实",
+        "worker_process_active=True",
+        "gateway_task_claim_succeeded=True",
+        "evidence_source=agent_gateway.task_claim.current_process",
+        "os_service_ownership_inferred=False",
+        "当前进程已成功认领本任务",
+        "不能否定已发生的当前 claim",
+        "不能据此推断 launchd/systemd ownership",
+        "raw_service_template/prompt/response/token omitted",
+    ]
+    for marker in current_claim_markers:
+        require(
+            marker in current_claim_prompt,
+            f"current claim prompt missing marker {marker}: {current_claim_prompt}",
+            failures,
+        )
+    require(
+        "service_managed_loop_ready=False" in current_claim_prompt,
+        "current claim smoke must preserve stale historical service evidence",
+        failures,
+    )
+
     worker_source = WORKER.read_text(encoding="utf-8")
     approval_wall_source = APPROVAL_WALL.read_text(encoding="utf-8")
     source_markers = [
@@ -181,6 +233,7 @@ def main() -> int:
         "raw_response_omitted",
         "token_omitted",
         "_loop_supervision_gate",
+        "_worker_execution_fact",
         "service_managed_loop",
         "control_readback_id",
         "_intake_plan_evidence",
@@ -189,6 +242,18 @@ def main() -> int:
     ]
     for marker in source_markers:
         require(marker in worker_source, f"worker source missing marker: {marker}", failures)
+    claim_call_position = worker_source.find('client.post(f"/api/agent-gateway/tasks/{task_id}/claim"')
+    current_fact_position = worker_source.find('task["_worker_execution_fact"] = {')
+    adapter_execution_position = worker_source.find("result = execute_adapter_with_retries(task, args)")
+    current_claim_fact_injected_after_claim = (
+        claim_call_position >= 0
+        and claim_call_position < current_fact_position < adapter_execution_position
+    )
+    require(
+        current_claim_fact_injected_after_claim,
+        "current worker execution fact must be injected after successful claim and before adapter execution",
+        failures,
+    )
     for marker in ["prompt_profile_id", "prompt_profile_version", "prompt_profile_hash"]:
         require(marker in approval_wall_source, f"approval wall safe metadata missing marker: {marker}", failures)
     require(worker_source.count('"prompt_profile_id": result.prompt_profile_id') >= 3, "tool/eval/audit profile metadata not wired from AdapterResult", failures)
@@ -204,6 +269,8 @@ def main() -> int:
         "profile_count": len(set(profile_ids.values())),
         "approval_wall_profile_metadata_safe": all(marker in approval_wall_source for marker in ["prompt_profile_id", "prompt_profile_version", "prompt_profile_hash"]),
         "service_loop_context_prompted": all(marker in service_prompt for marker in service_markers),
+        "current_claim_fact_prompted": all(marker in current_claim_prompt for marker in current_claim_markers),
+        "current_claim_fact_injected_after_claim": current_claim_fact_injected_after_claim,
         "source_markers_checked": len(source_markers),
         "failures": failures,
         "safety": {

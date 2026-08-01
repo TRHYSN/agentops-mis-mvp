@@ -99,6 +99,15 @@ def smoke(base_url: str, stamp: str) -> dict:
         revoke_session_id = revoke_session.get("session_id")
         require(revoke_session_token and revoke_session_id, f"missing revoke session token: {revoke_session}")
 
+        status, self_revoke_session = http_json("POST", base_url, "/api/agent-gateway/session/create", {
+            "ttl_sec": 60,
+            "scopes": ["agents:heartbeat", "tasks:read"],
+        }, token=enrollment_token)
+        require(status == 201, f"self-revoke session create failed: {status} {self_revoke_session}")
+        self_revoke_session_token = self_revoke_session.get("session_token")
+        self_revoke_session_id = self_revoke_session.get("session_id")
+        require(self_revoke_session_token and self_revoke_session_id, f"missing self-revoke session token: {self_revoke_session}")
+
         status, cascade_session = http_json("POST", base_url, "/api/agent-gateway/session/create", {
             "ttl_sec": 60,
             "scopes": ["agents:heartbeat", "tasks:read"],
@@ -123,6 +132,7 @@ def smoke(base_url: str, stamp: str) -> dict:
         expected_refs = {
             safe_ref("session_ref", session_id),
             safe_ref("session_ref", revoke_session_id),
+            safe_ref("session_ref", self_revoke_session_id),
             safe_ref("session_ref", cascade_session_id),
             safe_ref("session_ref", expire_session_id),
         }
@@ -147,6 +157,37 @@ def smoke(base_url: str, stamp: str) -> dict:
         }, token=revoke_session_token)
         require(status == 401, f"revoked session should be rejected: {status} {rejected}")
         require("revoked" in json.dumps(rejected).lower(), f"revoked session message missing: {rejected}")
+
+        status, wrong_actor_self_revoke = http_json(
+            "POST",
+            base_url,
+            "/api/agent-gateway/session/revoke-self",
+            {},
+            token=enrollment_token,
+        )
+        require(status == 403 and wrong_actor_self_revoke.get("error") == "session_auth_required",
+                f"parent enrollment token revoked a child session as self: {status} {wrong_actor_self_revoke}")
+        status, self_revoked = http_json(
+            "POST",
+            base_url,
+            "/api/agent-gateway/session/revoke-self",
+            {},
+            token=self_revoke_session_token,
+        )
+        require(status == 200 and self_revoked.get("revoked") is True,
+                f"session self-revoke failed: {status} {self_revoked}")
+        require(self_revoked.get("session_id_omitted") is True and self_revoked.get("token_omitted") is True,
+                f"session self-revoke omission proof missing: {self_revoked}")
+        require(self_revoke_session_id not in json.dumps(self_revoked, ensure_ascii=False),
+                f"session self-revoke leaked raw session id: {self_revoked}")
+        require(self_revoked.get("session_ref") == safe_ref("session_ref", self_revoke_session_id),
+                f"session self-revoke safe ref mismatch: {self_revoked}")
+        status, self_revoke_rejected = http_json("POST", base_url, "/api/agent-gateway/heartbeat", {
+            "status": "idle",
+            "summary": "self-revoked session heartbeat",
+        }, token=self_revoke_session_token)
+        require(status == 401 and "revoked" in json.dumps(self_revoke_rejected).lower(),
+                f"self-revoked session retained access: {status} {self_revoke_rejected}")
 
         status, task = http_json("POST", base_url, "/api/tasks", {
             "task_id": task_id,
@@ -221,6 +262,7 @@ def smoke(base_url: str, stamp: str) -> dict:
             "token_ref": safe_ref("token_ref", enrollment.get("token_id") or ""),
             "session_ref": safe_ref("session_ref", session_id),
             "revoked_session_ref": safe_ref("session_ref", revoke_session_id),
+            "self_revoked_session_ref": safe_ref("session_ref", self_revoke_session_id),
             "cascade_session_ref": safe_ref("session_ref", cascade_session_id),
             "expired_session_ref": safe_ref("session_ref", expire_session_id),
             "session_scopes": session.get("scopes", []),
@@ -229,6 +271,7 @@ def smoke(base_url: str, stamp: str) -> dict:
             "status_parent_token_ref": gateway_auth.get("parent_token_ref"),
             "listed_session_count": len(session_rows),
             "revoke_status": rejected.get("error"),
+            "self_revoke_status": self_revoke_rejected.get("error"),
             "expired_status": expired.get("error"),
             "parent_revoked_status": parent_revoked.get("error"),
             "cascade_sessions_revoked": revoke_parent.get("sessions_revoked"),

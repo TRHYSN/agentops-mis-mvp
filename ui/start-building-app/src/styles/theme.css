@@ -192,6 +192,10 @@
     var(--mis-bg);
 }
 
+.theme-enterprise .app-main-locked {
+  background: var(--mis-bg);
+}
+
 .theme-workforce .app-main {
   background:
     linear-gradient(180deg, rgba(34, 43, 56, 0.78), rgba(17, 21, 30, 0.24) 260px, transparent 520px),

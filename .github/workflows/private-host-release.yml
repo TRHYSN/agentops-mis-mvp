@@ -1,0 +1,161 @@
+name: Private Host Preview Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing tag that must point to the selected workflow commit
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: agentops-private-host-release-${{ inputs.tag }}
+  cancel-in-progress: false
+
+jobs:
+  build-and-release:
+    runs-on: macos-14
+    timeout-minutes: 30
+    steps:
+      - name: Checkout selected commit
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Verify exact tag
+        env:
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          [[ "$RELEASE_TAG" =~ ^v[A-Za-z0-9._-]+$ ]]
+          git fetch --tags --force
+          test "$(git rev-parse --verify "refs/tags/$RELEASE_TAG^{commit}")" = "$GITHUB_SHA"
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: ui/start-building-app/package-lock.json
+
+      - name: Build production UI
+        working-directory: ui/start-building-app
+        run: |
+          set -euo pipefail
+          npm ci
+          npm run build
+
+      - name: Verify private Host bundle
+        run: |
+          set -euo pipefail
+          python3 scripts/secret_scan_smoke.py
+          python3 scripts/license_provenance_smoke.py
+          python3 scripts/public_claims_release_gate_smoke.py
+          python3 scripts/private_host_backup_restore_smoke.py
+          python3 scripts/private_host_acceptance_receipt_smoke.py
+          python3 scripts/private_host_bundle_smoke.py
+          python3 scripts/private_host_release_consumer_smoke.py
+
+      - name: Build versioned release assets
+        env:
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          VERSION="${RELEASE_TAG#v}"
+          python3 scripts/build_private_host_bundle.py \
+            --version "$VERSION" \
+            --output-dir build/private-host
+
+      - name: Stage, verify, and publish unsigned developer preview
+        env:
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          release_created=false
+          success=false
+          draft_home="$RUNNER_TEMP/draft-consumer-home"
+          public_home="$RUNNER_TEMP/public-consumer-home"
+          cleanup() {
+            original_exit_code=$?
+            cleanup_status=0
+            for home in "$draft_home" "$public_home"; do
+              cli="$home/.local/bin/agentops"
+              if [ -x "$cli" ]; then
+                HOME="$home" AGENTOPS_INSTALL_ROOT="$home/.local/share/agentops-mis" AGENTOPS_BIN_DIR="$home/.local/bin" AGENTOPS_HOST_HOME="$home/.agentops/host" "$cli" host stop >/dev/null 2>&1 || true
+              fi
+            done
+            if [ "$success" != true ] && [ "$release_created" = true ]; then
+              if ! GH_TOKEN="${{ github.token }}" gh release delete "$RELEASE_TAG" --yes; then
+                echo "::error::Failed to delete rejected Private Host release $RELEASE_TAG"
+                cleanup_status=1
+              elif GH_TOKEN="${{ github.token }}" gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+                echo "::error::Rejected Private Host release still exists after deletion"
+                cleanup_status=1
+              fi
+            fi
+            trap - EXIT HUP INT TERM
+            if [ "$cleanup_status" -ne 0 ]; then
+              exit "$cleanup_status"
+            fi
+            exit "$original_exit_code"
+          }
+          trap cleanup EXIT HUP INT TERM
+
+          verify_exact_tag() {
+            git fetch --tags --force
+            test "$(git rev-parse --verify "refs/tags/$RELEASE_TAG^{commit}")" = "$GITHUB_SHA"
+          }
+
+          verify_exact_tag
+          if GH_TOKEN="${{ github.token }}" gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            echo "release already exists: $RELEASE_TAG" >&2
+            exit 1
+          fi
+
+          if ! GH_TOKEN="${{ github.token }}" gh release create "$RELEASE_TAG" \
+            build/private-host/* \
+            --verify-tag \
+            --draft \
+            --prerelease \
+            --title "AgentOps MIS Private Host ${RELEASE_TAG}" \
+            --notes "Unsigned macOS private Host developer preview. Verify the attached SHA-256 file before installation. Requires Python 3.10+. Hermes, OpenClaw and Tailscale are not installed automatically."; then
+            if GH_TOKEN="${{ github.token }}" gh release view "$RELEASE_TAG" --json isDraft --jq '.isDraft' 2>/dev/null | grep -qx true; then
+              release_created=true
+            fi
+            exit 1
+          fi
+          release_created=true
+
+          roundtrip="$RUNNER_TEMP/release-consumer"
+          mkdir -p "$roundtrip"
+          GH_TOKEN="${{ github.token }}" gh release download "$RELEASE_TAG" --dir "$roundtrip"
+          HOME="$draft_home" \
+          AGENTOPS_INSTALL_ROOT="$draft_home/.local/share/agentops-mis" \
+          AGENTOPS_BIN_DIR="$draft_home/.local/bin" \
+          AGENTOPS_HOST_HOME="$draft_home/.agentops/host" \
+          AGENTOPS_INSTALLER_TEST_MODE=1 \
+          AGENTOPS_INSTALLER_TEST_RELEASE_DIR="$roundtrip" \
+          sh "$roundtrip/install-agentops-mis-private-host.sh" --tag "$RELEASE_TAG" --init --start --port 18879
+          HOME="$draft_home" AGENTOPS_INSTALL_ROOT="$draft_home/.local/share/agentops-mis" AGENTOPS_BIN_DIR="$draft_home/.local/bin" AGENTOPS_HOST_HOME="$draft_home/.agentops/host" "$draft_home/.local/bin/agentops" host status
+          HOME="$draft_home" AGENTOPS_INSTALL_ROOT="$draft_home/.local/share/agentops-mis" AGENTOPS_BIN_DIR="$draft_home/.local/bin" AGENTOPS_HOST_HOME="$draft_home/.agentops/host" "$draft_home/.local/bin/agentops" host stop
+
+          verify_exact_tag
+          GH_TOKEN="${{ github.token }}" gh release edit "$RELEASE_TAG" --draft=false --prerelease
+
+          HOME="$public_home" \
+          AGENTOPS_INSTALL_ROOT="$public_home/.local/share/agentops-mis" \
+          AGENTOPS_BIN_DIR="$public_home/.local/bin" \
+          AGENTOPS_HOST_HOME="$public_home/.agentops/host" \
+          sh "$roundtrip/install-agentops-mis-private-host.sh" --tag "$RELEASE_TAG" --init --start --port 18880
+          HOME="$public_home" AGENTOPS_INSTALL_ROOT="$public_home/.local/share/agentops-mis" AGENTOPS_BIN_DIR="$public_home/.local/bin" AGENTOPS_HOST_HOME="$public_home/.agentops/host" "$public_home/.local/bin/agentops" host status
+          HOME="$public_home" AGENTOPS_INSTALL_ROOT="$public_home/.local/share/agentops-mis" AGENTOPS_BIN_DIR="$public_home/.local/bin" AGENTOPS_HOST_HOME="$public_home/.agentops/host" "$public_home/.local/bin/agentops" host stop
+          verify_exact_tag
+          success=true

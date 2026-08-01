@@ -223,6 +223,31 @@ def main() -> int:
             require(status == 200, f"other private search failed: {status} {other_private}", failures)
             require(not any(row.get("doc_id") == "kdoc_gateway_private_b" for row in other_private.get("results") or []), f"workspace B private doc leaked: {other_private}", failures)
 
+            status, own_context, raw = http_json(
+                base_url,
+                "/api/agent-gateway/knowledge/context-packet",
+                token=token,
+                workspace=workspace_a,
+                query={"q": marker_a, "limit": 5, "memory_limit": 0},
+            )
+            outputs.append(raw)
+            own_context_blocks = own_context.get("context_blocks") or []
+            require(status == 200, f"own context packet failed: {status} {own_context}", failures)
+            require(own_context.get("context_available") is True, f"own context packet unavailable: {own_context}", failures)
+            require(any(row.get("doc_id") == "kdoc_gateway_private_a" and marker_a in str(row.get("summary") or "") for row in own_context_blocks), f"own private context missing: {own_context}", failures)
+            require(all(row.get("raw_source_body_omitted") is True for row in own_context_blocks), f"context source-body omission proof missing: {own_context}", failures)
+
+            status, other_context, raw = http_json(
+                base_url,
+                "/api/agent-gateway/knowledge/context-packet",
+                token=token,
+                workspace=workspace_a,
+                query={"q": marker_b, "limit": 5, "memory_limit": 0},
+            )
+            outputs.append(raw)
+            require(status == 200, f"other context packet failed: {status} {other_context}", failures)
+            require(not any(row.get("doc_id") == "kdoc_gateway_private_b" or marker_b in str(row.get("summary") or "") for row in other_context.get("context_blocks") or []), f"workspace B private context leaked: {other_context}", failures)
+
             status, spoofed, raw = http_json(base_url, "/api/agent-gateway/knowledge/search", token=token, workspace=workspace_b, query={"q": marker_b, "limit": 10})
             outputs.append(raw)
             require(status == 403, f"workspace header spoof should fail: {status} {spoofed}", failures)
@@ -236,6 +261,16 @@ def main() -> int:
             )
             outputs.append(raw)
             require(status == 403, f"workspace query spoof should fail: {status} {qs_spoofed}", failures)
+
+            status, context_spoofed, raw = http_json(
+                base_url,
+                "/api/agent-gateway/knowledge/context-packet",
+                token=token,
+                workspace=workspace_a,
+                query={"q": marker_b, "workspace_id": workspace_b, "limit": 5},
+            )
+            outputs.append(raw)
+            require(status == 403, f"context packet workspace spoof should fail: {status} {context_spoofed}", failures)
         finally:
             if token_id:
                 http_json(base_url, "/api/agent-gateway/enrollment/revoke", "POST", {"token_id": token_id})
@@ -257,6 +292,8 @@ def main() -> int:
             "bound_visibility_enforced": True,
             "private_workspace_a_visible": True,
             "private_workspace_b_hidden": True,
+            "context_packet_workspace_isolated": True,
+            "context_packet_spoof_rejected": True,
             "header_query_spoof_rejected": True,
             "provenance_fields_required": True,
             "gateway_search_read_only": True,

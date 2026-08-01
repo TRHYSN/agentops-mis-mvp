@@ -49,7 +49,7 @@
 - GitHub：账号 `geogejoy107-jpg`；
 - Notion：由 Owner 私下指定的 workspace。
 
-先检查连接器能力，不要把“已连接”理解成“可写”。当前标准 ChatGPT Notion App 的新连接用于文件检索，不能写入或修改页面；Notion 写入需要另行接入支持写操作的 App、插件或自定义 MCP。官方参考：[Notion - app with sync](https://help.openai.com/en/articles/12532955)。
+先检查连接器能力，不要把“已连接”理解成“可写”，也不要把某次会话观察到的只读或可写能力硬编码为永久产品事实。每次执行前检查当前 Notion App、插件或自定义 MCP 是否实际暴露所需写操作；不可用、未授权或只读时失败关闭并返回 `not_written`。官方参考：[Notion - app with sync](https://help.openai.com/en/articles/12532955)。
 
 App 连接、权限和写操作能力参考：[Apps in ChatGPT](https://help.openai.com/en/articles/11487775-connectors-in)。
 
@@ -141,7 +141,7 @@ GitHub 和 Notion 是持续更新的权威源，但仓库中的状态文档可�
 ### Test 4 — 显式同步
 
 ```text
-确认将上一条候选提案写入支持写操作的 Notion Proposed；不要写入 GitHub PROJECT_STATE、BACKLOG 或 HANDOFF。先检查连接器能力，若当前 Notion App 只读则明确失败关闭。
+确认将上一条候选提案写入支持写操作的 Notion Proposed；不要写入 GitHub PROJECT_STATE、BACKLOG 或 HANDOFF。先检查当前连接器能力；不可用、未授权或只读时明确失败关闭。
 ```
 
 合格结果必须先实际检查 App 能力：支持写入时完成写入并返回 Notion URL；只读、不可用或未授权时返回 `not_written` 和明确原因。GitHub 保持 `not_written`。

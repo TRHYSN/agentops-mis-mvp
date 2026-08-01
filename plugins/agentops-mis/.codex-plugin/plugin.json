@@ -1,0 +1,38 @@
+{
+  "name": "agentops-mis",
+  "version": "0.1.0",
+  "description": "Connect Codex to AgentOps MIS tasks, governed context, approvals, and evidence.",
+  "author": {
+    "name": "AgentOps MIS",
+    "url": "https://github.com/geogejoy107-jpg"
+  },
+  "homepage": "https://github.com/geogejoy107-jpg/agentops-mis-mvp",
+  "repository": "https://github.com/geogejoy107-jpg/agentops-mis-mvp",
+  "license": "Proprietary",
+  "keywords": [
+    "agentops",
+    "mis",
+    "codex",
+    "governance",
+    "project-management"
+  ],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "AgentOps MIS",
+    "shortDescription": "Use governed MIS tasks and evidence from Codex.",
+    "longDescription": "Connect Codex as a governed AgentOps MIS client: receive scoped tasks and context, respect approval gates, and write bounded run evidence without exposing credentials or raw model transcripts.",
+    "developerName": "AgentOps MIS",
+    "category": "Productivity",
+    "capabilities": [
+      "Interactive",
+      "Read",
+      "Write"
+    ],
+    "defaultPrompt": [
+      "Check my AgentOps MIS connection and show actionable tasks.",
+      "Use MIS context and approval gates for this project task.",
+      "Record this verified result in the MIS evidence ledger."
+    ],
+    "brandColor": "#22C7D6"
+  }
+}

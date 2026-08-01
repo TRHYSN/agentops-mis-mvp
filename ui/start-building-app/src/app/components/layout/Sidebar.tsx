@@ -4,9 +4,10 @@ import { NavLink, useLocation } from "react-router";
 import {
   Home, CheckSquare, Bot, ShieldCheck, Brain, BarChart2, Package,
   Activity, List, Wrench, Plug, Database, ClipboardList, Map,
-  ChevronDown, ChevronRight, Zap, TerminalSquare, ClipboardCheck,
+  ChevronDown, ChevronRight, Zap, TerminalSquare, ClipboardCheck, MonitorCheck, UserRound, FlaskConical,
 } from "lucide-react";
 import { pick, usePreferences } from "../../context/PreferencesContext";
+import { useHumanAuth } from "../../context/HumanAuthContext";
 
 interface NavItem {
   labelKey: string;
@@ -31,7 +32,9 @@ const navGroups: NavGroup[] = [
       { labelKey: "workerConsole",path: "/workspace/workers",      icon: <TerminalSquare size={15} /> },
       { labelKey: "approvals",    path: "/workspace/approvals",    icon: <ShieldCheck size={15} /> },
       { labelKey: "memory",       path: "/workspace/memory",       icon: <Brain size={15} /> },
+      { labelKey: "experiments",  path: "/workspace/experiments",  icon: <FlaskConical size={15} /> },
       { labelKey: "reports",      path: "/workspace/reports",      icon: <BarChart2 size={15} /> },
+      { labelKey: "account",      path: "/workspace/account",      icon: <UserRound size={15} /> },
       { labelKey: "templates",    path: "/admin/templates",        icon: <Package size={15} /> },
     ],
   },
@@ -46,13 +49,15 @@ const navGroups: NavGroup[] = [
       { labelKey: "connectors",    path: "/admin/connectors",         icon: <Plug size={15} /> },
       { labelKey: "externalBases", path: "/admin/bases/notion",       icon: <Database size={15} /> },
       { labelKey: "audit",         path: "/admin/audit",              icon: <ClipboardList size={15} /> },
+      { labelKey: "privateHostAcceptance", path: "/admin/private-host-acceptance", icon: <MonitorCheck size={15} /> },
     ],
   },
 ];
 
-export function Sidebar() {
+export function Sidebar({ locked = false }: { locked?: boolean }) {
   const location = useLocation();
   const { locale } = usePreferences();
+  const { required: humanAuthRequired, user } = useHumanAuth();
   const [collapsed, setCollapsed] = useState<Record<string, boolean>>({});
   const copy = pick(locale, {
     en: {
@@ -66,7 +71,9 @@ export function Sidebar() {
       workerConsole: "Worker Console",
       approvals: "Approvals",
       memory: "Memory",
+      experiments: "Experiments",
       reports: "Reports",
+      account: "Account and access",
       templates: "Templates",
       controlTower: "Control Tower",
       agentRegistry: "Agent Registry",
@@ -76,7 +83,10 @@ export function Sidebar() {
       connectors: "Connectors",
       externalBases: "External Bases",
       audit: "Audit",
+      privateHostAcceptance: "Private Host Acceptance",
       workspace: "Workspace",
+      productMode: "Private Host",
+      lockedNavigation: "Sign in to access workspace data",
     },
     zh: {
       clientWorkspace: "前台工作区",
@@ -89,7 +99,9 @@ export function Sidebar() {
       workerConsole: "Worker 控制台",
       approvals: "审批",
       memory: "记忆",
+      experiments: "实验",
       reports: "报告",
+      account: "账户与访问",
       templates: "模板",
       controlTower: "控制塔",
       agentRegistry: "代理注册表",
@@ -99,17 +111,22 @@ export function Sidebar() {
       connectors: "连接器",
       externalBases: "外部知识库",
       audit: "审计",
+      privateHostAcceptance: "私有主机验收",
       workspace: "工作区",
+      productMode: "私有主机",
+      lockedNavigation: "登录后访问工作区数据",
     },
   });
 
   const toggleGroup = (title: string) => {
     setCollapsed((prev) => ({ ...prev, [title]: !prev[title] }));
   };
+  const workspaceLabel = user?.workspace_id || (humanAuthRequired ? copy.productMode : "AgentOps Demo");
+  const accountLabel = user?.display_name || user?.username || (humanAuthRequired ? copy.account : "jiwu@agentops.dev");
 
   return (
     <aside
-      className="flex flex-col w-56 shrink-0 h-full border-r"
+      className={`${locked ? "hidden lg:flex" : "hidden md:flex"} flex-col w-56 shrink-0 h-full border-r`}
       style={{
         background: "var(--mis-surface)",
         borderColor: "var(--mis-border)",
@@ -131,7 +148,7 @@ export function Sidebar() {
             AgentOps MIS
           </div>
           <div className="text-[10px] leading-tight" style={{ color: "var(--mis-dim)" }}>
-            v1.3
+            {copy.productMode}
           </div>
         </div>
       </div>
@@ -155,27 +172,48 @@ export function Sidebar() {
               {!isCollapsed && (
                 <ul className="space-y-0.5">
                   {group.items.map((item) => {
-                    const isActive = location.pathname === item.path ||
-                      (item.path !== "/workspace" && item.path !== "/admin" && location.pathname.startsWith(item.path));
+                    const isActive = locked
+                      ? item.path === "/workspace/account"
+                      : location.pathname === item.path ||
+                        (item.path !== "/workspace" && item.path !== "/admin" && location.pathname.startsWith(item.path));
+                    const content = (
+                      <>
+                        {item.icon}
+                        {copy[item.labelKey as keyof typeof copy]}
+                      </>
+                    );
                     return (
                       <li key={item.path}>
-                        <NavLink
-                          to={item.path}
-                          className="flex items-center gap-2 px-2 py-1.5 rounded text-xs transition-colors"
-                          style={{
-                            color: isActive ? "var(--mis-cyan)" : "var(--mis-dim)",
-                            background: isActive ? "rgba(34,211,238,0.08)" : "transparent",
-                          }}
-                          onMouseEnter={(e) => {
-                            if (!isActive) (e.currentTarget as HTMLElement).style.color = "var(--mis-text)";
-                          }}
-                          onMouseLeave={(e) => {
-                            if (!isActive) (e.currentTarget as HTMLElement).style.color = "var(--mis-dim)";
-                          }}
-                        >
-                          {item.icon}
-                          {copy[item.labelKey as keyof typeof copy]}
-                        </NavLink>
+                        {locked ? (
+                          <div
+                            aria-disabled="true"
+                            aria-current={isActive ? "page" : undefined}
+                            className="flex items-center gap-2 px-2 py-1.5 rounded text-xs"
+                            style={{
+                              color: isActive ? "var(--mis-primary)" : "var(--mis-dim)",
+                              background: isActive ? "color-mix(in srgb, var(--mis-primary) 8%, transparent)" : "transparent",
+                            }}
+                          >
+                            {content}
+                          </div>
+                        ) : (
+                          <NavLink
+                            to={item.path}
+                            className="flex items-center gap-2 px-2 py-1.5 rounded text-xs transition-colors"
+                            style={{
+                              color: isActive ? "var(--mis-cyan)" : "var(--mis-dim)",
+                              background: isActive ? "rgba(34,211,238,0.08)" : "transparent",
+                            }}
+                            onMouseEnter={(e) => {
+                              if (!isActive) (e.currentTarget as HTMLElement).style.color = "var(--mis-text)";
+                            }}
+                            onMouseLeave={(e) => {
+                              if (!isActive) (e.currentTarget as HTMLElement).style.color = "var(--mis-dim)";
+                            }}
+                          >
+                            {content}
+                          </NavLink>
+                        )}
                       </li>
                     );
                   })}
@@ -191,8 +229,17 @@ export function Sidebar() {
         className="px-4 py-3 border-t text-[10px]"
         style={{ borderColor: "var(--mis-border)", color: "var(--mis-dim)" }}
       >
-        <div>{copy.workspace}: AgentOps Demo</div>
-        <div style={{ color: "var(--mis-muted)" }}>jiwu@agentops.dev</div>
+        {locked ? (
+          <>
+            <div>{copy.productMode}</div>
+            <div style={{ color: "var(--mis-muted)" }}>{copy.lockedNavigation}</div>
+          </>
+        ) : (
+          <>
+            <div>{copy.workspace}: {workspaceLabel}</div>
+            <div style={{ color: "var(--mis-muted)" }}>{accountLabel}</div>
+          </>
+        )}
       </div>
     </aside>
   );

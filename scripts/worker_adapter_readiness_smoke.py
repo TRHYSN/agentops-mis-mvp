@@ -79,7 +79,7 @@ def validate_readiness(payload: dict) -> None:
     daemon_resilience = connection_policy.get("daemon_resilience") or {}
     require(daemon_resilience.get("continue_on_error") is True and daemon_resilience.get("max_errors") == 5, f"daemon resilience policy missing: {connection_policy}")
     adapters = payload.get("adapters") or {}
-    for adapter in ("mock", "hermes", "openclaw"):
+    for adapter in ("mock", "codex", "hermes", "openclaw"):
         item = adapters.get(adapter) or {}
         require(item.get("adapter") == adapter, f"missing adapter {adapter}: {payload}")
         require(item.get("readiness") in {"ready", "review_required", "blocked", "unavailable"}, f"bad {adapter} readiness: {item}")
@@ -88,7 +88,7 @@ def validate_readiness(payload: dict) -> None:
         manifest = item.get("capability_manifest") or {}
         require(manifest.get("schema_version") == "runtime-capability-manifest-v1", f"{adapter} manifest missing schema: {item}")
         require(bool(item.get("capability_policy_hash")), f"{adapter} capability hash missing: {item}")
-        require(item.get("observation_level") in {"structured_ledger", "ledger_summary_only"}, f"{adapter} observation level missing: {item}")
+        require(item.get("observation_level") in {"structured_ledger", "structured_runtime_events", "ledger_summary_only"}, f"{adapter} observation level missing: {item}")
         require(item.get("risk_floor") in {"low", "medium"}, f"{adapter} risk floor missing: {item}")
         require(manifest.get("token_omitted") is True, f"{adapter} manifest token omission proof missing: {manifest}")
         remediation = item.get("remediation") or {}
@@ -99,6 +99,32 @@ def validate_readiness(payload: dict) -> None:
         commands = remediation.get("commands") or []
         require(any(command.get("phase") == "preflight" for command in commands), f"{adapter} remediation preflight missing: {item}")
         require(all(command.get("command") for command in commands), f"{adapter} remediation command missing: {item}")
+    codex = adapters.get("codex") or {}
+    require(codex.get("connector_id") == "rtc_codex_local", f"Codex connector mapping missing: {codex}")
+    require(codex.get("target_resource") == "local://codex/read-only", f"Codex target must omit local path: {codex}")
+    require(codex.get("observation_level") == "structured_runtime_events", f"Codex structured observation missing: {codex}")
+    require(codex.get("commercial_readiness") == "read_only_governed_worker", f"Codex read-only commercial boundary missing: {codex}")
+    require(isinstance(codex.get("workspace_write_ready"), bool), f"Codex workspace-write readiness missing: {codex}")
+    codex_checks = codex.get("checks") or {}
+    require(codex_checks.get("raw_binary_path_omitted") is True, f"Codex path omission proof missing: {codex}")
+    require("binary_path" not in codex_checks, f"Codex checks leaked binary path: {codex}")
+    require("/Applications/ChatGPT.app" not in json.dumps(codex, ensure_ascii=False), f"Codex readiness leaked raw application path: {codex}")
+    codex_plugin = codex.get("client_plugin") or {}
+    require(codex_plugin.get("package_name") == "agentops-mis", f"Codex client plugin package missing: {codex}")
+    require(codex_plugin.get("packaged") is True, f"Codex client plugin not packaged: {codex}")
+    require(codex_plugin.get("skill_available") is True, f"Codex client skill missing: {codex}")
+    require(codex_plugin.get("marketplace_available") is True, f"Codex marketplace entry missing: {codex}")
+    require(codex_plugin.get("mcp_tools_available") is False, f"Codex MCP tools must not be claimed yet: {codex}")
+    require(codex_plugin.get("raw_path_omitted") is True, f"Codex plugin path omission proof missing: {codex}")
+    codex_governance = ((codex.get("capability_manifest") or {}).get("governance") or {})
+    require(codex_governance.get("requires_prepared_action_for_external_write") is True, f"Codex workspace-write governance missing: {codex}")
+    codex_commands = (codex.get("remediation") or {}).get("commands") or []
+    local_codex_command = next((command for command in codex_commands if command.get("phase") == "run_read_only"), {})
+    remote_codex_command = next((command for command in codex_commands if command.get("phase") == "run_remote_scoped"), {})
+    require(local_codex_command.get("confirm_required") is True, f"Codex confirmed read-only command missing: {codex}")
+    require("--use-session" not in str(local_codex_command.get("command") or ""), f"Local Codex loop must not require enrollment session: {codex}")
+    require("--use-session" in str(remote_codex_command.get("command") or ""), f"Remote Codex session command missing: {codex}")
+    require(any(command.get("phase") == "prepare_workspace_write" and command.get("confirm_required") is True for command in codex_commands), f"Codex workspace-write preparation missing: {codex}")
     for adapter in ("hermes", "openclaw"):
         item = adapters.get(adapter) or {}
         require(item.get("observation_level") == "ledger_summary_only", f"{adapter} must disclose summary-only observation: {item}")

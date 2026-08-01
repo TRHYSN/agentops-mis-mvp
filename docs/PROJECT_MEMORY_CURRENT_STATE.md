@@ -237,10 +237,22 @@ has since closed or partially closed several items on the development branch:
   readiness checklist.
 - SQLite long workflow safety is now covered by
   `scripts/sqlite_long_transaction_audit_smoke.py`: it statically audits
-  `server.py` for explicit transaction statements and non-autocommit sqlite
+  `server.py` for unexpected explicit transaction statements outside the single
+  short `sqlite_atomic_write` boundary and for non-autocommit SQLite
   connections, then runs an isolated temp-DB smoke proving a concurrent writer
   can insert a runtime event while the KB-bot workflow is inside a mocked long
   `subprocess.run`.
+- Host authority hardening now binds Agent Plan approvals to an immutable
+  `subject_type` / `subject_id` / `subject_hash`, rejects run/task mismatches,
+  and commits Plan decisions plus their Approval, Runtime Event, and Audit
+  evidence atomically. Human browser sessions can decide Plans without a
+  second machine credential, while bound Agents still cannot self-approve.
+  Tool Call plus Prepared Action composition is also atomic, and legacy local
+  Agent membership backfill excludes Agents with non-local Plan authority;
+  those Plan-only Agents remain visible through the Plan workspace projection.
+- Worker Fleet execution capacity now comes from eligible active Worker
+  Sessions and their session-bound heartbeat observations; revoked, expired,
+  paused, disabled, and error-only observations do not create healthy capacity.
 
 Still do not claim hosted/commercial readiness until the exact release-candidate
 SHA has green required CI, clean-machine install/build evidence, license/SBOM

@@ -2,10 +2,33 @@
 
 > Date: 2026-07-23
 > Canonical: false
+> Recovery verification: 2026-08-01
+> Verified repository base: `main@99ce51d693f1d646ea84acc2f7f376bde1a95a9a`
+> Existing delivery line: Draft PR `#109`, branch `docs/materials-integration-handoff-20260723`
 
 ## Purpose
 
-整合 2026-06-21 至 2026-06-23 项目讨论材料，形成等待 GitHub/Notion freshness reconciliation 的候选交接基线。本文件不声称代表当前项目状态。
+整合 2026-06-21 至 2026-06-23 项目讨论材料，并记录 2026-08-01 的恢复查重结论。本文件是候选 Evidence/Handoff，不声称代表当前项目状态，也不得覆盖当前 Canon 文档。
+
+## Recovery Evidence
+
+- `AgentOps_MIS_跨应用同步执行包_2026-07-25.zip`: `16704704a0e860602067cdaa43248e320e9c77739d0e063b29b98d2c5e2e0d31`
+- `AgentOps_MIS_ChatGPT_Codex统一项目包_2026-07-25.zip`: `0adffc4788b219a630bd0f3abdf3bae8a5d88ecab006eb5105ce71a15b17a6f6`
+- `AgentOps_MIS_Codex项目记忆接入包_2026-07-28.zip`: `40f808203b71d4e43b76cf7f9a130bb2e83c89ce906bcaafb3e762388229288d`
+- PR #109 historical observed head `b45943e287264ca8c4924c890c06b34656b61138` was superseded by later work on the same PR line.
+- The Private Host/Codex bridge and governed context-packet implementation are already represented by merged PR #112 and current `main`; the recovered bundles must not create a parallel implementation claim.
+
+Relationship classification:
+
+```yaml
+updates: existing PR #109 and the existing Project Migration record
+duplicate_of:
+  - AGENTS.md
+  - docs/project/PROJECT_OPERATING_RULES.md
+  - merged Codex bridge/context-packet implementation
+supersedes: direct application of the three historical recovery bundles
+canonical: false
+```
 
 ## Authority
 

@@ -4,7 +4,15 @@ import { Sidebar } from "./Sidebar";
 import { Topbar } from "./Topbar";
 import { usePreferences } from "../../context/PreferencesContext";
 
-export function AppShell({ children }: { children?: ReactNode }) {
+export function AppShell({
+  children,
+  locked = false,
+  lockLabel,
+}: {
+  children?: ReactNode;
+  locked?: boolean;
+  lockLabel?: string;
+}) {
   const { theme } = usePreferences();
 
   return (
@@ -12,10 +20,13 @@ export function AppShell({ children }: { children?: ReactNode }) {
       className={`app-shell theme-${theme} flex h-screen w-screen overflow-hidden`}
       style={{ background: "var(--mis-bg)", color: "var(--mis-text)" }}
     >
-      <Sidebar />
+      <Sidebar locked={locked} />
       <div className="flex flex-col flex-1 min-w-0 overflow-hidden">
-        <Topbar />
-        <main className="app-main flex-1 overflow-y-auto p-4 lg:p-5">
+        <Topbar locked={locked} lockLabel={lockLabel} />
+        <main
+          data-testid={locked ? "locked-workspace-main" : "workspace-main"}
+          className={`app-main ${locked ? "app-main-locked" : ""} flex-1 overflow-y-auto p-4 lg:p-5`}
+        >
           {children ?? <Outlet />}
         </main>
       </div>

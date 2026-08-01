@@ -188,6 +188,10 @@ def main() -> int:
     with tempfile.TemporaryDirectory(prefix="agentops-clean-rc-") as tmp:
         tmp_path = Path(tmp)
         clone_dir = tmp_path / "agentops-mis-mvp"
+        isolated_home = tmp_path / "home"
+        isolated_tmp = tmp_path / "tmp"
+        isolated_home.mkdir(mode=0o700)
+        isolated_tmp.mkdir(mode=0o700)
         clone = run(["git", "clone", "--no-local", source_url, str(clone_dir)], timeout=120)
         require(clone.returncode == 0, f"clean clone failed: {redact(clone.stderr or clone.stdout or '')[-1200:]}", failures)
         if clone.returncode == 0:
@@ -204,7 +208,10 @@ def main() -> int:
             env = os.environ.copy()
             env.update(
                 {
+                    "HOME": str(isolated_home),
+                    "TMPDIR": str(isolated_tmp),
                     "AGENTOPS_DB_PATH": str(tmp_path / "clean_machine_rc.sqlite"),
+                    "AGENTOPS_PIP_SMOKE_BASE_URL": "http://127.0.0.1:1",
                     "AGENTOPS_SKIP_SEED_EXPORTS": "1",
                     "AGENTOPS_DEPLOYMENT_MODE": "local",
                     "HERMES_ALLOW_REAL_RUN": "false",
@@ -255,7 +262,10 @@ def main() -> int:
                 ],
                 "safety": {
                     "temporary_directory": True,
+                    "temporary_home": True,
+                    "temporary_tmpdir": True,
                     "temporary_sqlite": True,
+                    "existing_local_server_ignored": True,
                     "live_execution_performed": False,
                     "external_provider_calls": False,
                     "token_omitted": True,

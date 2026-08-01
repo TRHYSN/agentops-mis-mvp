@@ -1,4 +1,4 @@
-# AgentOps Research Lab — Standalone v0.3.1
+# AgentOps Research Lab — Standalone v0.4.1
 
 A path-isolated, local-first prototype for **asynchronous parallel experiments, remote SSH execution, frozen provenance, and scientific-integrity gates**.
 
@@ -41,6 +41,16 @@ For `confirmatory`, `robustness`, and `reproduction` by default:
 
 External tools remain adapters. MLflow may later track runs/models/datasets; DVC may version data/models; Hydra may compose configs; Slurm/Submitit may schedule jobs; Optuna may suggest search Trials. None of them owns Research Lab protocol approval, Trial identity, deviation review, or claim eligibility.
 
+### v0.4 local execution ledger
+
+- SQLite WAL ledger for Experiment, Trial, JobAttempt, Metric, Artifact and ProtocolDeviation.
+- Dry-run by default; a real subprocess requires explicit `--confirm-run`.
+- Deterministic Experiment/Trial identities and idempotent readback of completed Trials.
+- Bounded Trial concurrency, timeout and retry through `LocalExecutor`.
+- Hash-only stdout/stderr evidence plus content-hashed artifact references.
+- Scientific Claim Gate checks provenance, deviations, seed coverage, primary-metric presence and the optional frozen minimum metric threshold.
+- A dependency-free `2 -> 8 -> 2` MLP example that trains on generated XOR data without downloads or persisted raw samples.
+
 ## Install
 
 ```bash
@@ -59,9 +69,42 @@ research-lab validate-spec --spec examples/confirmatory_experiment.json
 research-lab validate-spec --spec examples/ssh_experiment.json --servers examples/servers.example.json
 ```
 
-This incubator slice is a runnable protocol/provenance and server-profile
-validator. It does not yet expose ledger-backed `init`, `submit`, or `run`
-commands; those belong to the next source slice.
+Plan and execute the local MLP experiment:
+
+```bash
+STATE_DIR="$(mktemp -d)"
+research-lab run-local --spec examples/tiny_mlp_experiment.json --state-dir "$STATE_DIR"
+research-lab run-local --spec examples/tiny_mlp_experiment.json --state-dir "$STATE_DIR" --confirm-run
+research-lab show --experiment-id <experiment_id> --state-dir "$STATE_DIR"
+research-lab sync-mis --experiment-id <experiment_id> --state-dir "$STATE_DIR"
+research-lab sync-mis --experiment-id <experiment_id> --state-dir "$STATE_DIR" --confirm-sync
+```
+
+The first command is a no-execution plan. The confirmed command writes its
+standalone ledger and generated artifacts only under `STATE_DIR`; do not point
+that directory at the Git repository. `sync-mis` is also dry-run by default.
+The confirmed sync supports only a local HTTP AgentOps MIS Host and publishes a
+bounded evidence bundle: protocol/Trial identities, scalar metrics, hashes,
+deviation summaries and the Claim Gate. State paths, logs, artifact bodies,
+credentials and raw model output are omitted.
+
+## BWFormer Fusion v2 smoke
+
+AgentOps MIS includes a bounded adapter for the manifest-packaged Fusion v2
+overlay. Generate its machine-local spec from the repository root:
+
+```bash
+python3 scripts/prepare_bwformer_research_lab_smoke.py \
+  --project-root /path/to/BWformer1-fusion-v2 \
+  --python /path/to/bwformer-cpu/bin/python \
+  --output /path/outside/git/bwformer-smoke.json
+```
+
+The adapter verifies the overlay manifest, runs its config dry-run and
+synthetic CPU component smoke, and emits only scalar metrics, actual conditions
+and a small hash summary. It neither reads Building3D nor runs the full CUDA
+model. Large checkpoints must remain in the training repository; place only a
+small checkpoint manifest under `artifacts_dir()`.
 
 ## Provenance example
 
@@ -117,11 +160,12 @@ python -m compileall -q research_lab examples tests
 python -m unittest discover -s tests -v
 ```
 
-This uploaded slice has 12 deterministic tests. They cover the local CLI,
+This uploaded slice has 19 deterministic tests. They cover the local CLI,
 read-only server profile inspection, deterministic matrix expansion, frozen
 provenance, unsafe reference rejection, strict-stage provenance requirements,
-and checkpoint initialization requirements. A real authorized SSH/GPU target is
-still required for infrastructure dogfood.
+checkpoint initialization, local execution/idempotency, retained failed Attempts, metric thresholds and
+the real dependency-free MLP example. A real authorized SSH/GPU target is still
+required for remote infrastructure dogfood.
 
 ## Repository strategy
 
@@ -137,9 +181,10 @@ agentops-mis-mvp
 
 ## Next lanes
 
-1. Real SSH/GPU dogfood, cancellation, detached polling, and orphan reconciliation.
-2. Optional MLflow tracker adapter with external IDs only.
-3. DVC/Hydra import helpers for provenance capture.
-4. Slurm/Submitit executor with scheduler job and array identities.
-5. Optuna ask/tell search controller; winners must be resubmitted as confirmatory protocols.
-6. Paper Claim Ledger and Paper-to-Protocol / Run-to-Claim consistency.
+1. Idempotent AgentOps MIS evidence adapter and Human Workspace experiment readback.
+2. Real SSH/GPU dogfood, cancellation, detached polling, and orphan reconciliation.
+3. Optional MLflow tracker adapter with external IDs only.
+4. DVC/Hydra import helpers for provenance capture.
+5. Slurm/Submitit executor with scheduler job and array identities.
+6. Optuna ask/tell search controller; winners must be resubmitted as confirmatory protocols.
+7. Paper Claim Ledger and Paper-to-Protocol / Run-to-Claim consistency.
