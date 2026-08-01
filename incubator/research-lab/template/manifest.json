@@ -1,0 +1,91 @@
+{
+  "schema_version": "1.0",
+  "template_id": "research-lab",
+  "template_version": "0.1.0",
+  "template_kind": "embedded_solution",
+  "title": "Research Lab",
+  "canonical": false,
+  "authority_model": {
+    "project_status": "mis",
+    "task_and_run_state": "mis",
+    "approvals": "mis",
+    "delivery_and_audit": "mis",
+    "experiment_metrics_detail": "external_or_imported_evidence",
+    "raw_training_logs": "artifact_or_external",
+    "credentials": "secret_store_only"
+  },
+  "requires_core_capabilities": [
+    "workspaces",
+    "projects",
+    "tasks",
+    "agent_plans",
+    "runs",
+    "approvals",
+    "artifacts",
+    "evaluations",
+    "audit",
+    "external_bases"
+  ],
+  "domain_objects": [
+    {"id": "research_project", "maps_to": ["workspace", "project"]},
+    {"id": "experiment_protocol", "maps_to": ["agent_plan", "artifact"]},
+    {"id": "trial", "maps_to": ["task"]},
+    {"id": "job_attempt", "maps_to": ["run"]},
+    {"id": "dataset_version", "maps_to": ["artifact", "external_base_reference"]},
+    {"id": "environment_snapshot", "maps_to": ["artifact"]},
+    {"id": "metric_snapshot", "maps_to": ["artifact", "evaluation"]},
+    {"id": "checkpoint", "maps_to": ["artifact"]},
+    {"id": "model_version", "maps_to": ["artifact", "approval"]},
+    {"id": "scientific_review", "maps_to": ["evaluation", "approval"]},
+    {"id": "paper_evidence", "maps_to": ["artifact", "knowledge_reference"]},
+    {"id": "server_profile", "maps_to": ["external_base_reference", "worker_capability"]}
+  ],
+  "navigation": [
+    {"id": "research_overview", "route": "/workspaces/:workspaceId/research"},
+    {"id": "research_projects", "route": "/workspaces/:workspaceId/research/projects"},
+    {"id": "experiments", "route": "/workspaces/:workspaceId/research/experiments"},
+    {"id": "datasets", "route": "/workspaces/:workspaceId/research/datasets"},
+    {"id": "models", "route": "/workspaces/:workspaceId/research/models"},
+    {"id": "servers", "route": "/workspaces/:workspaceId/research/servers"},
+    {"id": "papers", "route": "/workspaces/:workspaceId/research/papers"}
+  ],
+  "default_roles": [
+    "research_owner",
+    "researcher",
+    "experiment_manager_agent",
+    "literature_agent",
+    "data_agent",
+    "evaluation_agent",
+    "reproducibility_verifier"
+  ],
+  "workflows": [
+    {
+      "id": "experiment_lifecycle",
+      "steps": ["question", "evidence", "protocol", "approval", "trial", "run", "artifact", "evaluation", "review"]
+    },
+    {
+      "id": "model_promotion",
+      "steps": ["candidate", "evidence_check", "scientific_review", "approval", "promoted_or_rejected"]
+    }
+  ],
+  "connectors": [
+    {"id": "github", "summary_projection": true, "deep_link": true, "side_effects": "approval_required"},
+    {"id": "mlflow", "summary_projection": true, "deep_link": true, "side_effects": "disabled_by_default"},
+    {"id": "wandb", "summary_projection": true, "deep_link": true, "side_effects": "disabled_by_default"},
+    {"id": "jupyter", "summary_projection": true, "deep_link": true, "side_effects": "approval_required"},
+    {"id": "ssh", "summary_projection": true, "deep_link": true, "side_effects": "approval_required"},
+    {"id": "notion", "summary_projection": true, "deep_link": true, "side_effects": "approval_required"}
+  ],
+  "lifecycle": {
+    "installation": "workspace_scoped",
+    "upgrade": "versioned_migration",
+    "disable": "hide_projections_keep_authority_records",
+    "uninstall": "approval_required_non_destructive_default"
+  },
+  "privacy": {
+    "store_credentials": false,
+    "store_raw_prompts_by_default": false,
+    "store_raw_training_logs_in_ledger": false,
+    "external_links_must_be_scoped": true
+  }
+}

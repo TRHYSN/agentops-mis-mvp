@@ -1,0 +1,49 @@
+{
+  "instance_schema_version": "1.0",
+  "template_id": "research-lab",
+  "template_version": "0.1.0",
+  "workspace": {
+    "name": "Building Wireframe Research Lab",
+    "slug": "building-wireframe-lab",
+    "mode": "embedded_mis"
+  },
+  "research_project": {
+    "title": "Building Wireframe Reconstruction",
+    "objective": "Compare representation, geometry reasoning and two-stage fine-tuning protocols under reproducible evidence rules.",
+    "experiment_lines": ["M1", "R1", "R2"],
+    "claim_status": "candidate"
+  },
+  "protocol_defaults": {
+    "required_provenance": [
+      "repository",
+      "git_commit",
+      "dirty_state",
+      "dataset_version",
+      "split_version",
+      "initialization_checkpoint",
+      "trainable_parameter_scope",
+      "seed",
+      "evaluator_version"
+    ],
+    "two_stage_fields": [
+      "stage_1_frozen_modules",
+      "stage_2_unfrozen_modules",
+      "stage_1_checkpoint",
+      "stage_2_optimizer",
+      "stage_2_scheduler"
+    ]
+  },
+  "connectors": {
+    "github": {"configured": false, "url": null},
+    "mlflow": {"configured": false, "url": null},
+    "wandb": {"configured": false, "url": null},
+    "jupyter": {"configured": false, "url": null},
+    "ssh": {"configured": false, "url": null},
+    "notion": {"configured": false, "url": null}
+  },
+  "security": {
+    "contains_credentials": false,
+    "external_write_default": "disabled",
+    "promotion_requires_human_review": true
+  }
+}

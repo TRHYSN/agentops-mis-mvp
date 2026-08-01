@@ -1,0 +1,84 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentops.local/schemas/research-lab-template.schema.json",
+  "title": "AgentOps MIS Research Lab Embedded Template",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "template_id",
+    "template_version",
+    "template_kind",
+    "canonical",
+    "authority_model",
+    "requires_core_capabilities",
+    "domain_objects",
+    "navigation",
+    "connectors",
+    "lifecycle",
+    "privacy"
+  ],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "template_id": {"const": "research-lab"},
+    "template_version": {"type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$"},
+    "template_kind": {"const": "embedded_solution"},
+    "canonical": {"const": false},
+    "requires_core_capabilities": {
+      "type": "array",
+      "minItems": 8,
+      "uniqueItems": true,
+      "items": {"type": "string"}
+    },
+    "domain_objects": {
+      "type": "array",
+      "minItems": 10,
+      "items": {
+        "type": "object",
+        "required": ["id", "maps_to"],
+        "properties": {
+          "id": {"type": "string"},
+          "maps_to": {"type": "array", "minItems": 1, "items": {"type": "string"}}
+        },
+        "additionalProperties": false
+      }
+    },
+    "navigation": {
+      "type": "array",
+      "minItems": 5,
+      "items": {
+        "type": "object",
+        "required": ["id", "route"],
+        "properties": {
+          "id": {"type": "string"},
+          "route": {"type": "string", "pattern": "^/workspaces/:workspaceId/research"}
+        },
+        "additionalProperties": false
+      }
+    },
+    "connectors": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "summary_projection", "deep_link", "side_effects"],
+        "properties": {
+          "id": {"type": "string"},
+          "summary_projection": {"const": true},
+          "deep_link": {"type": "boolean"},
+          "side_effects": {"enum": ["disabled_by_default", "approval_required"]}
+        },
+        "additionalProperties": false
+      }
+    },
+    "privacy": {
+      "type": "object",
+      "required": ["store_credentials", "store_raw_prompts_by_default", "store_raw_training_logs_in_ledger"],
+      "properties": {
+        "store_credentials": {"const": false},
+        "store_raw_prompts_by_default": {"const": false},
+        "store_raw_training_logs_in_ledger": {"const": false},
+        "external_links_must_be_scoped": {"const": true}
+      }
+    }
+  },
+  "additionalProperties": true
+}
