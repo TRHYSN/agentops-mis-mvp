@@ -365,7 +365,7 @@ Add-Type -TypeDefinition (Get-Content -LiteralPath $SourcePath -Raw) -Language C
         encoding="ascii",
     )
     launcher = root / "codex-fixture.exe"
-    powershell = shutil.which("pwsh.exe") or shutil.which("powershell.exe")
+    powershell = shutil.which("powershell.exe") or shutil.which("pwsh.exe")
     require(bool(powershell), "PowerShell is required to compile the isolated Codex acceptance fixture")
     compile_result = subprocess.run(
         [
