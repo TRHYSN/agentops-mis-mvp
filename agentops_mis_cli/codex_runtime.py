@@ -102,6 +102,136 @@ class CodexOutputLimitExceeded(RuntimeError):
     pass
 
 
+class _WindowsKillJob:
+    """Keep a Windows subprocess tree killable after its launcher exits."""
+
+    def __init__(self) -> None:
+        import ctypes
+        from ctypes import wintypes
+
+        class _IoCounters(ctypes.Structure):
+            _fields_ = [
+                ("ReadOperationCount", ctypes.c_ulonglong),
+                ("WriteOperationCount", ctypes.c_ulonglong),
+                ("OtherOperationCount", ctypes.c_ulonglong),
+                ("ReadTransferCount", ctypes.c_ulonglong),
+                ("WriteTransferCount", ctypes.c_ulonglong),
+                ("OtherTransferCount", ctypes.c_ulonglong),
+            ]
+
+        class _BasicLimitInformation(ctypes.Structure):
+            _fields_ = [
+                ("PerProcessUserTimeLimit", ctypes.c_longlong),
+                ("PerJobUserTimeLimit", ctypes.c_longlong),
+                ("LimitFlags", wintypes.DWORD),
+                ("MinimumWorkingSetSize", ctypes.c_size_t),
+                ("MaximumWorkingSetSize", ctypes.c_size_t),
+                ("ActiveProcessLimit", wintypes.DWORD),
+                ("Affinity", ctypes.c_size_t),
+                ("PriorityClass", wintypes.DWORD),
+                ("SchedulingClass", wintypes.DWORD),
+            ]
+
+        class _ExtendedLimitInformation(ctypes.Structure):
+            _fields_ = [
+                ("BasicLimitInformation", _BasicLimitInformation),
+                ("IoInfo", _IoCounters),
+                ("ProcessMemoryLimit", ctypes.c_size_t),
+                ("JobMemoryLimit", ctypes.c_size_t),
+                ("PeakProcessMemoryUsed", ctypes.c_size_t),
+                ("PeakJobMemoryUsed", ctypes.c_size_t),
+            ]
+
+        class _ThreadEntry32(ctypes.Structure):
+            _fields_ = [
+                ("dwSize", wintypes.DWORD),
+                ("cntUsage", wintypes.DWORD),
+                ("th32ThreadID", wintypes.DWORD),
+                ("th32OwnerProcessID", wintypes.DWORD),
+                ("tpBasePri", wintypes.LONG),
+                ("tpDeltaPri", wintypes.LONG),
+                ("dwFlags", wintypes.DWORD),
+            ]
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.CreateJobObjectW.argtypes = [ctypes.c_void_p, wintypes.LPCWSTR]
+        kernel32.CreateJobObjectW.restype = wintypes.HANDLE
+        kernel32.SetInformationJobObject.argtypes = [wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD]
+        kernel32.SetInformationJobObject.restype = wintypes.BOOL
+        kernel32.AssignProcessToJobObject.argtypes = [wintypes.HANDLE, wintypes.HANDLE]
+        kernel32.AssignProcessToJobObject.restype = wintypes.BOOL
+        kernel32.TerminateJobObject.argtypes = [wintypes.HANDLE, wintypes.UINT]
+        kernel32.TerminateJobObject.restype = wintypes.BOOL
+        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+        kernel32.CloseHandle.restype = wintypes.BOOL
+        kernel32.CreateToolhelp32Snapshot.argtypes = [wintypes.DWORD, wintypes.DWORD]
+        kernel32.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
+        kernel32.Thread32First.argtypes = [wintypes.HANDLE, ctypes.POINTER(_ThreadEntry32)]
+        kernel32.Thread32First.restype = wintypes.BOOL
+        kernel32.Thread32Next.argtypes = [wintypes.HANDLE, ctypes.POINTER(_ThreadEntry32)]
+        kernel32.Thread32Next.restype = wintypes.BOOL
+        kernel32.OpenThread.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        kernel32.OpenThread.restype = wintypes.HANDLE
+        kernel32.ResumeThread.argtypes = [wintypes.HANDLE]
+        kernel32.ResumeThread.restype = wintypes.DWORD
+
+        handle = kernel32.CreateJobObjectW(None, None)
+        if not handle:
+            raise OSError(ctypes.get_last_error(), "CreateJobObjectW failed")
+        info = _ExtendedLimitInformation()
+        info.BasicLimitInformation.LimitFlags = 0x00002000  # JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+        if not kernel32.SetInformationJobObject(handle, 9, ctypes.byref(info), ctypes.sizeof(info)):
+            error = ctypes.get_last_error()
+            kernel32.CloseHandle(handle)
+            raise OSError(error, "SetInformationJobObject failed")
+        self._kernel32 = kernel32
+        self._handle = handle
+        self._thread_entry_type = _ThreadEntry32
+
+    def assign(self, proc: subprocess.Popen[bytes]) -> None:
+        import ctypes
+        from ctypes import wintypes
+
+        process_handle = wintypes.HANDLE(int(proc._handle))  # type: ignore[attr-defined]
+        if not self._kernel32.AssignProcessToJobObject(self._handle, process_handle):
+            raise OSError(ctypes.get_last_error(), "AssignProcessToJobObject failed")
+
+    def resume(self, proc: subprocess.Popen[bytes]) -> None:
+        import ctypes
+
+        snapshot = self._kernel32.CreateToolhelp32Snapshot(0x00000004, 0)  # TH32CS_SNAPTHREAD
+        if int(snapshot) == ctypes.c_void_p(-1).value:
+            raise OSError(ctypes.get_last_error(), "CreateToolhelp32Snapshot failed")
+        resumed = False
+        try:
+            entry = self._thread_entry_type()
+            entry.dwSize = ctypes.sizeof(entry)
+            available = self._kernel32.Thread32First(snapshot, ctypes.byref(entry))
+            while available:
+                if int(entry.th32OwnerProcessID) == proc.pid:
+                    thread = self._kernel32.OpenThread(0x0002, False, entry.th32ThreadID)  # THREAD_SUSPEND_RESUME
+                    if thread:
+                        try:
+                            if self._kernel32.ResumeThread(thread) != 0xFFFFFFFF:
+                                resumed = True
+                        finally:
+                            self._kernel32.CloseHandle(thread)
+                available = self._kernel32.Thread32Next(snapshot, ctypes.byref(entry))
+        finally:
+            self._kernel32.CloseHandle(snapshot)
+        if not resumed:
+            raise OSError(ctypes.get_last_error(), "ResumeThread failed")
+
+    def terminate(self) -> None:
+        if self._handle:
+            self._kernel32.TerminateJobObject(self._handle, 1)
+
+    def close(self) -> None:
+        if self._handle:
+            self._kernel32.CloseHandle(self._handle)
+            self._handle = None
+
+
 def _binary_is_executable(path: Path) -> bool:
     if not path.is_file():
         return False
@@ -115,9 +245,10 @@ def _binary_command(binary: Path, arguments: list[str]) -> list[str]:
 
 
 def resolve_codex_binary(configured: str = "") -> Path:
+    explicit = configured.strip() or os.environ.get("CODEX_BIN", "").strip()
+    if explicit:
+        return Path(explicit).expanduser()
     candidates = [
-        configured.strip(),
-        os.environ.get("CODEX_BIN", "").strip(),
         DEFAULT_CODEX_APP_BIN,
         shutil.which("codex") or "",
     ]
@@ -244,10 +375,10 @@ def codex_command(binary: Path, cwd: Path, *, sandbox: str = "read-only") -> lis
     return _binary_command(binary, arguments)
 
 
-def _terminate_process_tree(proc: subprocess.Popen[bytes]) -> None:
-    if proc.poll() is not None:
-        return
+def _terminate_process_tree(proc: subprocess.Popen[bytes], windows_job: _WindowsKillJob | None = None) -> None:
     if os.name == "nt":
+        if windows_job is not None:
+            windows_job.terminate()
         try:
             subprocess.run(
                 ["taskkill", "/PID", str(proc.pid), "/T", "/F"],
@@ -310,22 +441,38 @@ def _write_stdin(
 
 def _run_codex_bounded(*, command: list[str], cwd: Path, prompt: str, timeout: int) -> BoundedProcessResult:
     process_options: dict[str, object] = {}
+    windows_job: _WindowsKillJob | None = None
     if os.name == "nt":
-        process_options["creationflags"] = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+        process_options["creationflags"] = (
+            getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200)
+            | getattr(subprocess, "CREATE_SUSPENDED", 0x00000004)
+        )
+        windows_job = _WindowsKillJob()
     else:
         process_options["start_new_session"] = True
-    proc = subprocess.Popen(
-        command,
-        cwd=cwd,
-        env=codex_subprocess_env(),
-        stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        **process_options,
-    )
+    try:
+        proc = subprocess.Popen(
+            command,
+            cwd=cwd,
+            env=codex_subprocess_env(),
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            **process_options,
+        )
+        if windows_job is not None:
+            windows_job.assign(proc)
+            windows_job.resume(proc)
+    except Exception:
+        if "proc" in locals():
+            _terminate_process_tree(proc, windows_job)
+        if windows_job is not None:
+            windows_job.close()
+        raise
     stdout = bytearray()
     stderr = bytearray()
     started = time.monotonic()
+    deadline = started + max(float(timeout), 0.0)
     output_limit_exceeded = threading.Event()
     stdin_completed = threading.Event()
     stdin_errors: list[Exception] = []
@@ -355,30 +502,33 @@ def _run_codex_bounded(*, command: list[str], cwd: Path, prompt: str, timeout: i
             daemon=True,
         )
         writer.start()
-        while proc.poll() is None:
+        while True:
             if output_limit_exceeded.is_set():
-                _terminate_process_tree(proc)
+                _terminate_process_tree(proc, windows_job)
                 raise CodexOutputLimitExceeded("Codex subprocess output exceeded its bounded capture limit")
             if stdin_errors:
-                _terminate_process_tree(proc)
+                _terminate_process_tree(proc, windows_job)
                 raise RuntimeError("Codex subprocess closed stdin before receiving the bounded prompt")
-            if time.monotonic() - started > timeout:
-                _terminate_process_tree(proc)
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                _terminate_process_tree(proc, windows_job)
                 raise subprocess.TimeoutExpired(command, timeout)
-            time.sleep(0.05)
+            if proc.poll() is not None:
+                break
+            time.sleep(min(0.05, remaining))
         returncode = proc.wait(timeout=5)
         if writer is not None:
-            writer.join(timeout=5)
+            writer.join(timeout=max(deadline - time.monotonic(), 0.0))
             if writer.is_alive() or not stdin_completed.is_set():
-                _terminate_process_tree(proc)
-                raise RuntimeError("Codex subprocess stdin pipe did not close")
+                _terminate_process_tree(proc, windows_job)
+                raise subprocess.TimeoutExpired(command, timeout)
         if stdin_errors:
             raise RuntimeError("Codex subprocess closed stdin before receiving the bounded prompt")
         for reader in readers:
-            reader.join(timeout=5)
+            reader.join(timeout=max(deadline - time.monotonic(), 0.0))
         if any(reader.is_alive() for reader in readers):
-            _terminate_process_tree(proc)
-            raise RuntimeError("Codex subprocess output pipes did not close")
+            _terminate_process_tree(proc, windows_job)
+            raise subprocess.TimeoutExpired(command, timeout)
         if output_limit_exceeded.is_set():
             raise CodexOutputLimitExceeded("Codex subprocess output exceeded its bounded capture limit")
         return BoundedProcessResult(
@@ -387,8 +537,8 @@ def _run_codex_bounded(*, command: list[str], cwd: Path, prompt: str, timeout: i
             stderr=bytes(stderr).decode("utf-8", errors="replace"),
         )
     except Exception:
+        _terminate_process_tree(proc, windows_job)
         if proc.poll() is None:
-            _terminate_process_tree(proc)
             try:
                 proc.wait(timeout=5)
             except subprocess.TimeoutExpired:
@@ -403,6 +553,9 @@ def _run_codex_bounded(*, command: list[str], cwd: Path, prompt: str, timeout: i
         for reader in readers:
             reader.join(timeout=1)
         raise
+    finally:
+        if windows_job is not None:
+            windows_job.close()
 
 
 def _parse_jsonl(stdout: str, *, sandbox: str = "read-only") -> tuple[str, int, dict, list[str], list[str]]:

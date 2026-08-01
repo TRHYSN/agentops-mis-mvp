@@ -204,6 +204,30 @@ def main() -> int:
         else:
             raise AssertionError("blocked Codex stdin fixture did not time out")
         require(time.monotonic() - blocked_stdin_started < 3, "Codex stdin write bypassed the runtime timeout")
+        exited_launcher_bin = temp / "codex-exited-launcher-fixture"
+        exited_launcher_bin.write_text(
+            "#!/usr/bin/env python3\n"
+            "import os, time\n"
+            "if os.fork() == 0:\n"
+            "    time.sleep(30)\n"
+            "    os._exit(0)\n"
+            "os._exit(0)\n",
+            encoding="utf-8",
+        )
+        exited_launcher_bin.chmod(0o700)
+        exited_launcher_started = time.monotonic()
+        try:
+            _run_codex_bounded(
+                command=[str(exited_launcher_bin)],
+                cwd=temp,
+                prompt="bounded child cleanup fixture",
+                timeout=0.5,
+            )
+        except subprocess.TimeoutExpired:
+            pass
+        else:
+            raise AssertionError("exited Codex launcher fixture did not time out")
+        require(time.monotonic() - exited_launcher_started < 3, "exited Codex launcher bypassed the shared deadline")
         preflight = codex_preflight(binary_path=str(fake_bin), cwd=ROOT, timeout=5)
         require(preflight.get("ok") is True, f"Codex preflight failed: {preflight}")
         fixture_attestation = runtime_attestation(SimpleNamespace(adapter="codex", codex_bin=str(fake_bin), confirm_run=True))

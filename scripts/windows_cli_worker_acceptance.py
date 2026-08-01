@@ -326,6 +326,8 @@ def create_fake_codex(root: Path) -> Path:
     source = root / "fake_codex.cs"
     source.write_text(
         r'''using System;
+using System.Diagnostics;
+using System.IO;
 using System.Threading;
 
 public static class AgentOpsCodexFixture
@@ -341,9 +343,20 @@ public static class AgentOpsCodexFixture
             }
             if (argument == "--fixture-no-stdin")
             {
-                Thread.Sleep(5000);
+                Thread.Sleep(30000);
                 return 0;
             }
+        }
+        if (args.Length == 2 && args[0] == "--fixture-exit-with-child")
+        {
+            ProcessStartInfo childInfo = new ProcessStartInfo();
+            childInfo.FileName = Process.GetCurrentProcess().MainModule.FileName;
+            childInfo.Arguments = "--fixture-no-stdin";
+            childInfo.UseShellExecute = false;
+            childInfo.CreateNoWindow = true;
+            Process child = Process.Start(childInfo);
+            File.WriteAllText(args[1], child.Id.ToString());
+            return 0;
         }
         Console.In.ReadToEnd();
         Console.WriteLine("{\"type\":\"thread.started\",\"thread_id\":\"thr_windows_codex_fixture\"}");
@@ -580,6 +593,30 @@ def main() -> int:
                 raise AssertionError("Windows Codex stdin-block fixture did not time out")
             blocked_stdin_elapsed = time.monotonic() - blocked_stdin_started
             require(blocked_stdin_elapsed < 4, f"Windows Codex stdin timeout was not enforced: {blocked_stdin_elapsed:.2f}s")
+            escaped_child_pid = temp_root / "escaped-child.pid"
+            escaped_child_started = time.monotonic()
+            try:
+                _run_codex_bounded(
+                    command=[str(fake_codex), "--fixture-exit-with-child", str(escaped_child_pid)],
+                    cwd=temp_root,
+                    prompt="bounded child cleanup fixture",
+                    timeout=1,
+                )
+            except subprocess.TimeoutExpired:
+                pass
+            else:
+                raise AssertionError("Windows Codex exited-launcher fixture did not time out")
+            require(time.monotonic() - escaped_child_started < 4, "exited Codex launcher bypassed the shared deadline")
+            require(escaped_child_pid.is_file(), "exited Codex launcher did not record its child pid")
+            child_pid = int(escaped_child_pid.read_text(encoding="ascii").strip())
+            child_probe = subprocess.run(
+                ["tasklist.exe", "/FI", f"PID eq {child_pid}", "/FO", "CSV", "/NH"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                check=False,
+            )
+            require(f'"{child_pid}"' not in child_probe.stdout, "exited Codex launcher's child survived timeout cleanup")
             codex_preflight = run(
                 [
                     str(agentops),
@@ -674,6 +711,44 @@ def main() -> int:
             )
 
             codex_service_path = temp_root / "services" / "agentops-codex-worker.xml"
+            rejected_codex_shim = temp_root / "codex-rejected.cmd"
+            rejected_codex_shim.write_text("@echo off\r\nexit /b 0\r\n", encoding="ascii")
+            shim_env = env.copy()
+            shim_env["CODEX_BIN"] = str(fake_codex)
+            rejected_service_install = run(
+                [
+                    str(agentops),
+                    "--base-url",
+                    base_url,
+                    "--workspace-id",
+                    "local-demo",
+                    "worker",
+                    "service-install",
+                    "--manager",
+                    "windows-task",
+                    "--adapter",
+                    "codex",
+                    "--confirm-run",
+                    "--agent-id",
+                    "agt_windows_acceptance",
+                    "--credential-source",
+                    "local_config",
+                    "--config-path",
+                    env["AGENTOPS_CONFIG"],
+                    "--codex-bin",
+                    str(rejected_codex_shim),
+                    "--working-directory",
+                    str(temp_root),
+                    "--service-path",
+                    str(codex_service_path),
+                    "--confirm-install",
+                ],
+                cwd=temp_root,
+                env=shim_env,
+            )
+            rejected_service_payload = json_stdout(rejected_service_install, "rejected Windows Codex shim service install")
+            require(rejected_service_install.returncode != 0 and rejected_service_payload.get("ok") is False, "Windows Codex service accepted a .cmd shim")
+            require(not codex_service_path.exists(), "rejected Windows Codex shim wrote a service file")
             codex_service_install = run(
                 [
                     str(agentops),
@@ -757,6 +832,74 @@ def main() -> int:
             codex_service_check_payload = json_stdout(codex_service_check, "agentops worker service-check --adapter codex")
             require(codex_service_check_payload.get("ok") is True, "Windows Codex service check failed")
             require((codex_service_check_payload.get("runtime_readiness") or {}).get("ready") is True, "Windows Codex service check did not verify the runtime")
+            codex_service_before_rejections = codex_service_path.read_bytes()
+            rejected_service_check = run(
+                [
+                    str(agentops),
+                    "--base-url",
+                    base_url,
+                    "--workspace-id",
+                    "local-demo",
+                    "worker",
+                    "service-check",
+                    "--manager",
+                    "windows-task",
+                    "--adapter",
+                    "codex",
+                    "--confirm-run",
+                    "--agent-id",
+                    "agt_windows_acceptance",
+                    "--credential-source",
+                    "local_config",
+                    "--config-path",
+                    env["AGENTOPS_CONFIG"],
+                    "--codex-bin",
+                    str(rejected_codex_shim),
+                    "--working-directory",
+                    str(temp_root),
+                    "--service-path",
+                    str(codex_service_path),
+                ],
+                cwd=temp_root,
+                env=shim_env,
+            )
+            rejected_check_payload = json_stdout(rejected_service_check, "rejected Windows Codex shim service check")
+            require(rejected_service_check.returncode != 0 and rejected_check_payload.get("ok") is False, "Windows Codex service check accepted a .cmd shim")
+            rejected_service_control = run(
+                [
+                    str(agentops),
+                    "--base-url",
+                    base_url,
+                    "--workspace-id",
+                    "local-demo",
+                    "worker",
+                    "service-control",
+                    "--manager",
+                    "windows-task",
+                    "--action",
+                    "load",
+                    "--adapter",
+                    "codex",
+                    "--confirm-run",
+                    "--agent-id",
+                    "agt_windows_acceptance",
+                    "--credential-source",
+                    "local_config",
+                    "--config-path",
+                    env["AGENTOPS_CONFIG"],
+                    "--codex-bin",
+                    str(rejected_codex_shim),
+                    "--working-directory",
+                    str(temp_root),
+                    "--service-path",
+                    str(codex_service_path),
+                ],
+                cwd=temp_root,
+                env=shim_env,
+            )
+            rejected_control_payload = json_stdout(rejected_service_control, "rejected Windows Codex shim service control")
+            require(rejected_service_control.returncode != 0 and rejected_control_payload.get("ok") is False, "Windows Codex service control accepted a .cmd shim")
+            require(codex_service_path.read_bytes() == codex_service_before_rejections, "rejected Windows Codex shim mutated the service definition")
 
             service_template = run(
                 [
@@ -1034,6 +1177,8 @@ def main() -> int:
                 "codex_task_scheduler_contract": True,
                 "codex_runtime_readiness_checked": True,
                 "codex_blocked_stdin_timeout_enforced": True,
+                "codex_exited_launcher_child_cleanup_enforced": True,
+                "codex_windows_shim_rejected": True,
                 "worker_state_written": True,
                 "evidence_request_order_verified": True,
                 "windows_task_template": True,

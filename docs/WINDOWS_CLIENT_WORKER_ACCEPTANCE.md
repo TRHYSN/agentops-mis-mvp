@@ -58,6 +58,10 @@ OS gate. On `windows-2022` it must:
 - run a complete one-shot Worker protocol against the bounded fake Gateway;
 - compile and execute a native Windows `.exe` Codex fixture through stdin/JSONL and verify the
   Codex task-to-ledger evidence chain;
+- enforce one shared process/stdin/stdout deadline and terminate inherited child
+  processes even when the Codex launcher exits first;
+- reject explicit `.cmd`/`.bat` service bindings without falling back to a
+  different runtime discovered from `PATH` or `CODEX_BIN`;
 - bind the exact Codex launcher into a credential-free Task Scheduler action
   and verify service definition plus runtime readiness;
 - verify config and service XML DACLs;

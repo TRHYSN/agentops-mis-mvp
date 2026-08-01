@@ -3375,10 +3375,10 @@ def service_env_values(args) -> dict[str, str]:
 
 
 def normalize_service_codex_bin(value: object) -> str:
-    binary = resolve_codex_binary(str(value or ""))
+    configured = str(value or "").strip()
+    binary = Path(configured).expanduser() if configured else resolve_codex_binary("")
     executable = binary.is_file() and (
-        is_windows() and binary.suffix.lower() == ".exe"
-        or os.access(binary, os.X_OK)
+        binary.suffix.lower() == ".exe" if is_windows() else os.access(binary, os.X_OK)
     )
     if not executable:
         raise WorkerServiceConfigError("codex_binary_unavailable")
@@ -3569,7 +3569,7 @@ def build_service_template_parser() -> argparse.ArgumentParser:
     parser.add_argument("--config-path", default=str(DEFAULT_CONFIG_PATH))
     parser.add_argument("--worker-command", default="", help="Worker executable command for service templates. Defaults to installed agentops-worker or python -m fallback.")
     parser.add_argument("--hermes-gateway-url", default=os.environ.get("HERMES_GATEWAY_URL", ""), help="Persist an explicit credential-free Hermes HTTP(S) base URL for a Hermes service.")
-    parser.add_argument("--codex-bin", default=os.environ.get("CODEX_BIN", ""), help="Persist the exact local Codex executable or Windows command shim for a Codex service.")
+    parser.add_argument("--codex-bin", default=os.environ.get("CODEX_BIN", ""), help="Persist the exact local Codex executable; Windows requires a native .exe.")
     return parser
 
 
@@ -3870,7 +3870,10 @@ def check_service_installation(args) -> dict:
     label = args.label or service_label(args.agent_id)
     service_path = Path(args.service_path).expanduser() if args.service_path else default_service_path(args.manager, args.agent_id, label)
     exists, content = read_service_file(service_path)
-    windows_contract = inspect_windows_task(content, args) if args.manager == "windows-task" and exists else {}
+    try:
+        windows_contract = inspect_windows_task(content, args) if args.manager == "windows-task" and exists else {}
+    except WorkerServiceConfigError as exc:
+        windows_contract = {"valid": False, "error": str(exc)}
     inspection_content = content + "\n" + str(windows_contract.get("_arguments") or "")
     token_like_detected = bool(re.search(r"(agtok_|agtsess_|sk-|ntn_)", inspection_content))
     placeholder_present = args.api_key_placeholder in inspection_content if exists else False
@@ -4233,7 +4236,7 @@ def build_service_install_parser() -> argparse.ArgumentParser:
     parser.add_argument("--config-path", default=str(DEFAULT_CONFIG_PATH))
     parser.add_argument("--worker-command", default="", help="Worker executable command for service templates. Defaults to installed agentops-worker or python -m fallback.")
     parser.add_argument("--hermes-gateway-url", default=os.environ.get("HERMES_GATEWAY_URL", ""), help="Persist an explicit credential-free Hermes HTTP(S) base URL for a Hermes service.")
-    parser.add_argument("--codex-bin", default=os.environ.get("CODEX_BIN", ""), help="Persist the exact local Codex executable or Windows command shim for a Codex service.")
+    parser.add_argument("--codex-bin", default=os.environ.get("CODEX_BIN", ""), help="Persist the exact local Codex executable; Windows requires a native .exe.")
     parser.add_argument("--service-path", default="")
     parser.add_argument("--confirm-install", action="store_true", help="Write the service file. Default is dry-run.")
     parser.add_argument("--overwrite", action="store_true", help="Replace an existing service file after local review.")

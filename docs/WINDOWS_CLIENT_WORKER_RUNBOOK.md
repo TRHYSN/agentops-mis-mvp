@@ -139,7 +139,11 @@ agentops worker preflight --adapter codex --codex-bin "$CodexBin"
 The Worker intentionally rejects `.cmd` and `.bat` shims because their
 `cmd.exe` quoting can reinterpret paths or arguments. Point `--codex-bin` at
 the native `codex.exe` installed by the Codex distribution. This restriction
-does not affect interactive use of a `codex.cmd` launcher in PowerShell.
+does not affect interactive use of a `codex.cmd` launcher in PowerShell. An
+explicit `--codex-bin` is an exact binding: the service will fail closed rather
+than silently fall back to another Codex installation. The bounded runtime also
+owns the complete Windows process tree so timeout cleanup still works if a
+launcher exits before a child process.
 
 Process one assigned task through the independent Codex Worker path:
 
