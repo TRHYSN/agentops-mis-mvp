@@ -41,8 +41,9 @@ runtimes:
 
 - Hermes: `run_gw_59f2c78ea541`
 - OpenClaw: `run_gw_44916a0aae34`
+- Codex official ChatGPT bundle: `run_gw_b3572673c358`
 
-Both executions entered the MIS Run Ledger and produced runtime, evaluation,
+All three executions entered the MIS Run Ledger and produced runtime, evaluation,
 audit, plan-evidence, and bounded output-summary records. Credentials, raw
 prompts, raw responses, and full transcripts were omitted. These runs prove
 the real adapter-to-ledger closure; they do not substitute for Windows OS
@@ -72,12 +73,14 @@ OS gate. On `windows-2022` it must:
 
 Windows OS acceptance evidence:
 
-- Commit: `48530f26fefb1531e86cb6713329cc05211a2013`
-- Workflow run: [Windows CLI and Worker Acceptance #30658614146](https://github.com/geogejoy107-jpg/agentops-mis-mvp/actions/runs/30658614146)
+- Commit: `27c6b7eb6c40250f1d7921eb98e5cb551a3f50d6`
+- Workflow runs: [Windows CLI and Worker Acceptance #30683239307](https://github.com/geogejoy107-jpg/agentops-mis-mvp/actions/runs/30683239307)
+  and [independent duplicate #30683237648](https://github.com/geogejoy107-jpg/agentops-mis-mvp/actions/runs/30683237648)
 - Result: passed on `windows-2022`, including the installed CLI/Worker flow,
   both `agentops` and `agentops-worker` service-management entry points, the
-  real Task Scheduler lifecycle, atomic ACL failure checks, and the complete
-  PowerShell install/reinstall/uninstall lifecycle.
+  native Codex process-tree/deadline and shim-rejection gates, real Task
+  Scheduler lifecycle, atomic ACL failure checks, and the complete PowerShell
+  install/reinstall/uninstall lifecycle.
 
 ## Physical Windows acceptance
 
