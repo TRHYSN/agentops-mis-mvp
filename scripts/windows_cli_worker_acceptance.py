@@ -20,6 +20,7 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 from agentops_mis_cli.platform_paths import windows_private_file_is_acceptable
+from agentops_mis_cli.worker import parse_windows_command_line
 
 
 DIST_NAME = "agentops-mis-cli"
@@ -662,7 +663,15 @@ def main() -> int:
             _codex_service_command, codex_service_arguments = task_action(codex_service_xml)
             require("--adapter codex" in codex_service_arguments, "Windows Codex service did not bind the adapter")
             require("--confirm-run" in codex_service_arguments, "Windows Codex service omitted the confirmation gate")
-            require(str(fake_codex) in codex_service_arguments, "Windows Codex service did not bind the exact runtime")
+            codex_service_argv = parse_windows_command_line(codex_service_arguments)
+            require("--codex-bin" in codex_service_argv, "Windows Codex service omitted the runtime binding")
+            codex_bin_index = codex_service_argv.index("--codex-bin")
+            require(codex_bin_index + 1 < len(codex_service_argv), "Windows Codex service runtime binding is incomplete")
+            bound_codex = Path(codex_service_argv[codex_bin_index + 1]).resolve()
+            require(
+                os.path.normcase(str(bound_codex)) == os.path.normcase(str(fake_codex.resolve())),
+                "Windows Codex service did not bind the exact runtime",
+            )
 
             codex_service_check = run(
                 [
