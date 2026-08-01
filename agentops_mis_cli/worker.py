@@ -3377,7 +3377,7 @@ def service_env_values(args) -> dict[str, str]:
 def normalize_service_codex_bin(value: object) -> str:
     binary = resolve_codex_binary(str(value or ""))
     executable = binary.is_file() and (
-        is_windows() and binary.suffix.lower() in {".bat", ".cmd", ".exe"}
+        is_windows() and binary.suffix.lower() == ".exe"
         or os.access(binary, os.X_OK)
     )
     if not executable:

@@ -56,7 +56,7 @@ OS gate. On `windows-2022` it must:
 - build and install the dependency-free wheel;
 - execute `agentops` and `agentops-worker` from the isolated installation;
 - run a complete one-shot Worker protocol against the bounded fake Gateway;
-- execute a Windows `.cmd` Codex fixture through stdin/JSONL and verify the
+- compile and execute a native Windows `.exe` Codex fixture through stdin/JSONL and verify the
   Codex task-to-ledger evidence chain;
 - bind the exact Codex launcher into a credential-free Task Scheduler action
   and verify service definition plus runtime readiness;

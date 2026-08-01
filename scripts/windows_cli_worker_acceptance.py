@@ -8,6 +8,7 @@ import email
 import importlib.metadata
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -20,6 +21,7 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 from agentops_mis_cli.platform_paths import windows_private_file_is_acceptable
+from agentops_mis_cli.codex_runtime import _run_codex_bounded
 from agentops_mis_cli.worker import parse_windows_command_line
 
 
@@ -321,38 +323,72 @@ def executable(name: str) -> Path:
 
 
 def create_fake_codex(root: Path) -> Path:
-    fixture = root / "fake_codex.py"
-    fixture.write_text(
-        """import json
-import sys
+    source = root / "fake_codex.cs"
+    source.write_text(
+        r'''using System;
+using System.Threading;
 
-if \"--version\" in sys.argv:
-    print(\"codex-cli windows-acceptance-fixture\")
-    raise SystemExit(0)
-
-_prompt = sys.stdin.read()
-events = [
-    {\"type\": \"thread.started\", \"thread_id\": \"thr_windows_codex_fixture\"},
-    {\"type\": \"turn.started\"},
+public static class AgentOpsCodexFixture
+{
+    public static int Main(string[] args)
     {
-        \"type\": \"item.completed\",
-        \"item\": {
-            \"id\": \"item_windows_codex_fixture\",
-            \"type\": \"agent_message\",
-            \"text\": \"Windows Codex read-only worker completed the bounded fixture.\",
-        },
-    },
-    {\"type\": \"turn.completed\", \"usage\": {\"output_tokens\": 12}},
-]
-for event in events:
-    print(json.dumps(event, separators=(\",\", \":\")))
-""",
-        encoding="utf-8",
+        foreach (string argument in args)
+        {
+            if (argument == "--version")
+            {
+                Console.WriteLine("codex-cli windows-acceptance-fixture");
+                return 0;
+            }
+            if (argument == "--fixture-no-stdin")
+            {
+                Thread.Sleep(5000);
+                return 0;
+            }
+        }
+        Console.In.ReadToEnd();
+        Console.WriteLine("{\"type\":\"thread.started\",\"thread_id\":\"thr_windows_codex_fixture\"}");
+        Console.WriteLine("{\"type\":\"turn.started\"}");
+        Console.WriteLine("{\"type\":\"item.completed\",\"item\":{\"id\":\"item_windows_codex_fixture\",\"type\":\"agent_message\",\"text\":\"Windows Codex read-only worker completed the bounded fixture.\"}}");
+        Console.WriteLine("{\"type\":\"turn.completed\",\"usage\":{\"output_tokens\":12}}");
+        return 0;
+    }
+}
+''',
+        encoding="ascii",
     )
-    launcher = root / "codex-fixture.cmd"
-    launcher.write_text(
-        f'@echo off\r\n"{sys.executable}" "{fixture}" %*\r\n',
-        encoding="utf-8",
+    compiler_script = root / "compile_fake_codex.ps1"
+    compiler_script.write_text(
+        """param([string]$SourcePath, [string]$OutputPath)
+$ErrorActionPreference = "Stop"
+Add-Type -TypeDefinition (Get-Content -LiteralPath $SourcePath -Raw) -Language CSharp -OutputAssembly $OutputPath -OutputType ConsoleApplication
+""",
+        encoding="ascii",
+    )
+    launcher = root / "codex-fixture.exe"
+    powershell = shutil.which("pwsh.exe") or shutil.which("powershell.exe")
+    require(bool(powershell), "PowerShell is required to compile the isolated Codex acceptance fixture")
+    compile_result = subprocess.run(
+        [
+            str(powershell),
+            "-NoLogo",
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            str(compiler_script),
+            str(source),
+            str(launcher),
+        ],
+        cwd=root,
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+    require(
+        compile_result.returncode == 0 and launcher.is_file(),
+        f"failed to compile native Codex fixture: {compile_result.stderr[-1200:]}",
     )
     return launcher
 
@@ -530,6 +566,20 @@ def main() -> int:
             )
 
             fake_codex = create_fake_codex(temp_root)
+            blocked_stdin_started = time.monotonic()
+            try:
+                _run_codex_bounded(
+                    command=[str(fake_codex), "--fixture-no-stdin"],
+                    cwd=temp_root,
+                    prompt="x" * 1_000_000,
+                    timeout=1,
+                )
+            except subprocess.TimeoutExpired:
+                pass
+            else:
+                raise AssertionError("Windows Codex stdin-block fixture did not time out")
+            blocked_stdin_elapsed = time.monotonic() - blocked_stdin_started
+            require(blocked_stdin_elapsed < 4, f"Windows Codex stdin timeout was not enforced: {blocked_stdin_elapsed:.2f}s")
             codex_preflight = run(
                 [
                     str(agentops),
@@ -983,6 +1033,7 @@ def main() -> int:
                 "codex_worker_once_offline_fixture": True,
                 "codex_task_scheduler_contract": True,
                 "codex_runtime_readiness_checked": True,
+                "codex_blocked_stdin_timeout_enforced": True,
                 "worker_state_written": True,
                 "evidence_request_order_verified": True,
                 "windows_task_template": True,

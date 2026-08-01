@@ -131,10 +131,15 @@ After installing and signing in to the Codex CLI on Windows, bind the exact
 local launcher and run a read-only preflight:
 
 ```powershell
-$CodexBin = (Get-Command codex).Source
-codex --version
+$CodexBin = (Get-Command codex.exe).Source
+& $CodexBin --version
 agentops worker preflight --adapter codex --codex-bin "$CodexBin"
 ```
+
+The Worker intentionally rejects `.cmd` and `.bat` shims because their
+`cmd.exe` quoting can reinterpret paths or arguments. Point `--codex-bin` at
+the native `codex.exe` installed by the Codex distribution. This restriction
+does not affect interactive use of a `codex.cmd` launcher in PowerShell.
 
 Process one assigned task through the independent Codex Worker path:
 

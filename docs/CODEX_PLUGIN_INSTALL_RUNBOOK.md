@@ -79,8 +79,13 @@ agentops login `
   --prompt-api-key
 
 agentops status
-agentops worker preflight --adapter codex --codex-bin (Get-Command codex).Source
+agentops worker preflight --adapter codex --codex-bin (Get-Command codex.exe).Source
 ```
+
+The independent Codex Worker requires the native `codex.exe`; it rejects
+`.cmd`/`.bat` shims so command-shell quoting cannot change the bounded runtime
+arguments. The interactive plugin commands above may still use the ordinary
+`codex` command exposed by the installed Codex distribution.
 
 ## Governed Codex-Side Loop
 

@@ -18,7 +18,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from agentops_mis_cli.codex_runtime import codex_preflight, execute_codex_read_only
+from agentops_mis_cli.codex_runtime import _run_codex_bounded, codex_preflight, execute_codex_read_only
 from agentops_mis_cli.worker import adapter_capability_profile, worker_external_write_intent
 from scripts.remote_agent_token_worker_smoke import runtime_attestation
 
@@ -188,6 +188,22 @@ def main() -> int:
         recovered_bin = temp / "codex-recovered-fixture"
         recovered_bin.write_text(FAKE_CODEX_RECOVERED, encoding="utf-8")
         recovered_bin.chmod(0o700)
+        blocked_stdin_bin = temp / "codex-blocked-stdin-fixture"
+        blocked_stdin_bin.write_text("#!/usr/bin/env python3\nimport time\ntime.sleep(5)\n", encoding="utf-8")
+        blocked_stdin_bin.chmod(0o700)
+        blocked_stdin_started = time.monotonic()
+        try:
+            _run_codex_bounded(
+                command=[str(blocked_stdin_bin)],
+                cwd=temp,
+                prompt="x" * 1_000_000,
+                timeout=0.5,
+            )
+        except subprocess.TimeoutExpired:
+            pass
+        else:
+            raise AssertionError("blocked Codex stdin fixture did not time out")
+        require(time.monotonic() - blocked_stdin_started < 3, "Codex stdin write bypassed the runtime timeout")
         preflight = codex_preflight(binary_path=str(fake_bin), cwd=ROOT, timeout=5)
         require(preflight.get("ok") is True, f"Codex preflight failed: {preflight}")
         fixture_attestation = runtime_attestation(SimpleNamespace(adapter="codex", codex_bin=str(fake_bin), confirm_run=True))

@@ -105,17 +105,13 @@ class CodexOutputLimitExceeded(RuntimeError):
 def _binary_is_executable(path: Path) -> bool:
     if not path.is_file():
         return False
-    if os.name == "nt" and path.suffix.lower() in {".bat", ".cmd", ".exe"}:
-        return True
+    if os.name == "nt":
+        return path.suffix.lower() == ".exe"
     return os.access(path, os.X_OK)
 
 
 def _binary_command(binary: Path, arguments: list[str]) -> list[str]:
-    invocation = [str(binary), *arguments]
-    if os.name == "nt" and binary.suffix.lower() in {".bat", ".cmd"}:
-        command_processor = os.environ.get("COMSPEC") or shutil.which("cmd.exe") or "cmd.exe"
-        return [command_processor, "/d", "/s", "/c", subprocess.list2cmdline(invocation)]
-    return invocation
+    return [str(binary), *arguments]
 
 
 def resolve_codex_binary(configured: str = "") -> Path:
@@ -268,8 +264,9 @@ def _terminate_process_tree(proc: subprocess.Popen[bytes]) -> None:
         return
     try:
         os.killpg(proc.pid, signal.SIGKILL)
-    except ProcessLookupError:
-        pass
+    except OSError:
+        if proc.poll() is None:
+            proc.kill()
 
 
 def _capture_stream(
@@ -293,6 +290,24 @@ def _capture_stream(
         stream.close()
 
 
+def _write_stdin(
+    stream,
+    prompt: bytes,
+    errors: list[Exception],
+    completed: threading.Event,
+) -> None:
+    try:
+        stream.write(prompt)
+        stream.flush()
+    except Exception as exc:
+        errors.append(exc)
+    finally:
+        try:
+            stream.close()
+        finally:
+            completed.set()
+
+
 def _run_codex_bounded(*, command: list[str], cwd: Path, prompt: str, timeout: int) -> BoundedProcessResult:
     process_options: dict[str, object] = {}
     if os.name == "nt":
@@ -312,12 +327,14 @@ def _run_codex_bounded(*, command: list[str], cwd: Path, prompt: str, timeout: i
     stderr = bytearray()
     started = time.monotonic()
     output_limit_exceeded = threading.Event()
+    stdin_completed = threading.Event()
+    stdin_errors: list[Exception] = []
+    readers: list[threading.Thread] = []
+    writer: threading.Thread | None = None
 
     try:
         if proc.stdin is None or proc.stdout is None or proc.stderr is None:
             raise RuntimeError("Codex subprocess pipes were not created")
-        proc.stdin.write(prompt.encode("utf-8"))
-        proc.stdin.close()
         readers = [
             threading.Thread(
                 target=_capture_stream,
@@ -332,15 +349,31 @@ def _run_codex_bounded(*, command: list[str], cwd: Path, prompt: str, timeout: i
         ]
         for reader in readers:
             reader.start()
+        writer = threading.Thread(
+            target=_write_stdin,
+            args=(proc.stdin, prompt.encode("utf-8"), stdin_errors, stdin_completed),
+            daemon=True,
+        )
+        writer.start()
         while proc.poll() is None:
             if output_limit_exceeded.is_set():
                 _terminate_process_tree(proc)
                 raise CodexOutputLimitExceeded("Codex subprocess output exceeded its bounded capture limit")
+            if stdin_errors:
+                _terminate_process_tree(proc)
+                raise RuntimeError("Codex subprocess closed stdin before receiving the bounded prompt")
             if time.monotonic() - started > timeout:
                 _terminate_process_tree(proc)
                 raise subprocess.TimeoutExpired(command, timeout)
             time.sleep(0.05)
         returncode = proc.wait(timeout=5)
+        if writer is not None:
+            writer.join(timeout=5)
+            if writer.is_alive() or not stdin_completed.is_set():
+                _terminate_process_tree(proc)
+                raise RuntimeError("Codex subprocess stdin pipe did not close")
+        if stdin_errors:
+            raise RuntimeError("Codex subprocess closed stdin before receiving the bounded prompt")
         for reader in readers:
             reader.join(timeout=5)
         if any(reader.is_alive() for reader in readers):
@@ -360,6 +393,15 @@ def _run_codex_bounded(*, command: list[str], cwd: Path, prompt: str, timeout: i
                 proc.wait(timeout=5)
             except subprocess.TimeoutExpired:
                 pass
+        if writer is not None:
+            writer.join(timeout=1)
+        if proc.stdin is not None and not proc.stdin.closed:
+            try:
+                proc.stdin.close()
+            except OSError:
+                pass
+        for reader in readers:
+            reader.join(timeout=1)
         raise
 
 
@@ -994,6 +1036,9 @@ def codex_preflight(*, binary_path: str, cwd: Path, timeout: int) -> dict:
         "binary_path": str(binary),
         "binary_exists": exists,
         "binary_executable": executable,
+        "windows_batch_shim_unsupported": bool(
+            os.name == "nt" and exists and binary.suffix.lower() in {".bat", ".cmd"}
+        ),
         "version_ok": version_ok,
         "version_summary": version_summary,
         "execution_contract": {
