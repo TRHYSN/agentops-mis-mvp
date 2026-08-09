@@ -1,0 +1,78 @@
+{
+  "schema_version": "research_edition_lane_receipt_v1",
+  "lane": "L03",
+  "title": "Native research domain foundation final Phase B",
+  "status": "pass_with_conditions",
+  "canonical": false,
+  "authority_class": "candidate",
+  "git": {
+    "repository": "geogejoy107-jpg/agentops-mis-mvp",
+    "base_sha": "ceed92756e527e2580290db78d5513d09e40b389",
+    "branch": "codex/research-v05-domain-foundation",
+    "head_sha": "44a6d8ff94dfb4d2dc7b74ba930abd02358ca174",
+    "commit_count": 8,
+    "merge_commit_count": 0,
+    "changed_file_count": 5,
+    "draft_pr": 121,
+    "draft_pr_base": "codex/research-v05-reconcile",
+    "exact_head_ci": "FAIL_RELAY_WHEEL_ALLOWLIST_INTEGRATION_PERMISSION_REQUIRED"
+  },
+  "mis": {
+    "workspace_id": "local-demo",
+    "task_id": "tsk_re_v05_l03_postreview",
+    "agent_plan_id": "plan_c3a1bc2cea3e2f12",
+    "plan_hash": "c96220b6544352dc28b1ce5701766a0bb26bc15d1d2e34d60c920a15593fa7ae",
+    "run_id": "run_gw_30889b1ffa9b"
+  },
+  "execution": {
+    "implementation_agent": "/root/research_domain_impl",
+    "independent_verifiers": [
+      "/root/l03_final_verify",
+      "/root/l03_second_final_verify"
+    ],
+    "visible_thread_id": "019fe558-7fd2-7433-aae6-05eb995caa9f",
+    "visible_thread_final_status": "UNAVAILABLE_AFTER_PRIOR_STRICT_FAIL_FINDINGS",
+    "superseded_audit_history": [
+      "dd8e0c82265bf4c419dfb54984cb123649a38795",
+      "138e6abc487b2e6639a63ef165c80ae1c6738c2f",
+      "aabbf0addc35726a467efc3ac6338e3bb76b3242",
+      "f90ff07694c8a1001c9193fbec2e797966d79e3a",
+      "30d239c09fdd589d1f6e2061645c70d88ffb4002",
+      "c52c2244df1c12d2fbdd5158637fd11dbcbd8056",
+      "18537df2cfc5bd21fc0db2b12e8dc3e73bfa0925"
+    ]
+  },
+  "verification": {
+    "domain_contract_smoke": "PASS",
+    "domain_migration_smoke": "PASS",
+    "research_lab_tests": "PASS_20_OF_20",
+    "research_api_smoke": "PASS",
+    "experiment_cli_smoke": "PASS",
+    "bwformer_cpu_smoke": "PASS_FIXTURE_ONLY_CLAIM_INELIGIBLE",
+    "sqlite_concurrency": "PASS_100_READS_20_WRITES_0_ERRORS",
+    "independent_phase_b_reviews": "PASS_2_OF_2",
+    "secret_scan": "PASS_946_FILES_0_FINDINGS",
+    "syntax_compile": "PASS",
+    "exact_head_clean_ancestry_no_merge_diff_path": "PASS"
+  },
+  "independent_verdict": {
+    "result": "PASS_WITH_CONDITIONS",
+    "blocking_findings": [],
+    "conditions": [
+      "Claim-to-valid-EvidenceEdge authority and hash closure remains explicitly deferred to L05.",
+      "Exact-head Relay release CI requires a separately authorized allowlist integration outside the L03 path lease."
+    ]
+  },
+  "safety": {
+    "user_database_migrated": false,
+    "network_execution_performed": false,
+    "live_gpu_uat": "NOT_RUN",
+    "external_runtime": "NOT_RUN_UNKNOWN",
+    "credentials_used": false,
+    "merge_performed": false,
+    "release_performed": false,
+    "canonical_state_changed": false,
+    "raw_prompt_omitted": true,
+    "raw_response_omitted": true
+  }
+}
