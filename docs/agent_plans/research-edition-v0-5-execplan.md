@@ -104,6 +104,13 @@ Wave 1 contains two non-overlapping candidate slices after G2:
 1. L02 compatibility harness: dependency manifest, license/NOTICE boundary, narrow runtime protocol, fake worker contract tests, and an optional real agent-core execution only after its network/install action is separately reviewed.
 2. L03 domain foundation: pure state/hash contracts and additive migration design with legacy preflight. It must not yet change API/UI or launch jobs.
 
+Wave 1 bindings:
+
+| Lane | Branch | MIS Task | Verified Agent Plan | Run |
+|---|---|---|---|---|
+| L02 | `codex/research-v05-openjiuwen-spike` | `tsk_re_v05_l02_openjiuwen` | `plan_21c9c79c9588e3ab` / `09caa226…` | `run_gw_ddb3915b002a` |
+| L03 | `codex/research-v05-domain-foundation` | `tsk_re_v05_l03_domain` | `plan_b802370e7c5eb757` / `20998223…` | `run_gw_c7c6e0a62419` |
+
 ## Verification
 
 At minimum for every branch:
