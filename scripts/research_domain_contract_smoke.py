@@ -31,7 +31,7 @@ def authority_fixture(conn: sqlite3.Connection, artifact_hashes: dict[str, str])
         CREATE TABLE runs(run_id TEXT PRIMARY KEY,workspace_id TEXT NOT NULL);
         CREATE TABLE agent_plans(
           plan_id TEXT PRIMARY KEY,workspace_id TEXT NOT NULL,status TEXT NOT NULL,
-          plan_hash TEXT,verified_at TEXT
+          plan_hash TEXT,verified_at TEXT,approval_required INTEGER NOT NULL
         );
         CREATE TABLE artifacts(
           artifact_id TEXT PRIMARY KEY,task_id TEXT,run_id TEXT,content_hash TEXT,
@@ -45,10 +45,12 @@ def authority_fixture(conn: sqlite3.Connection, artifact_hashes: dict[str, str])
     conn.executemany("INSERT INTO tasks VALUES(?,?)", [("task_1", "ws_1"), ("task_other", "ws_other")])
     conn.executemany("INSERT INTO runs VALUES(?,?)", [(f"run_{i}", "ws_1") for i in range(1, 4)] + [("run_other", "ws_other")])
     conn.executemany(
-        "INSERT INTO agent_plans VALUES(?,?,?,?,?)",
-        [("plan_1", "ws_1", "submitted", "a" * 64, "2026-08-09T00:00:00+00:00"),
-         ("plan_unverified", "ws_1", "draft", None, None),
-         ("plan_draft_forged", "ws_1", "draft", "b" * 64, "2026-08-09T00:00:00+00:00")],
+        "INSERT INTO agent_plans VALUES(?,?,?,?,?,?)",
+        [("plan_1", "ws_1", "approved", "a" * 64, "2026-08-09T00:00:00+00:00", 1),
+         ("plan_unverified", "ws_1", "draft", None, None, 0),
+         ("plan_draft_forged", "ws_1", "draft", "b" * 64, "2026-08-09T00:00:00+00:00", 0),
+         ("plan_submitted_low", "ws_1", "submitted", "c" * 64, "2026-08-09T00:00:00+00:00", 0),
+         ("plan_submitted_high", "ws_1", "submitted", "d" * 64, "2026-08-09T00:00:00+00:00", 1)],
     )
     rows = []
     for artifact_id, content_hash in artifact_hashes.items():
@@ -83,6 +85,16 @@ def main() -> int:
     try:
         canonical_hash({"bad": float("nan")})
         failures.append("non-finite canonical JSON was accepted")
+    except ResearchDomainError:
+        pass
+    try:
+        ResearchContract(
+            contract_id="contract_bytes", version=1, workspace_id="ws_1",
+            project_ref="project_1", goal_ref="goal_1", requirement_ref="requirement_1",
+            agent_plan_id="plan_1", contract_artifact_id="art_1",
+            payload_json=b"\xff", content_hash="0" * 64,  # type: ignore[arg-type]
+        )
+        failures.append("bytes Contract payload_json leaked through validation")
     except ResearchDomainError:
         pass
     for malformed in ({"x": "\ud800"}, {"\ud800": "x"}):
@@ -197,6 +209,8 @@ def main() -> int:
             "art_6": canonical_hash(atomic_conflict_payload), "art_7": canonical_hash(atomic_v2_payload),
             "art_8": canonical_hash({"unverified": True}), "art_cross": canonical_hash(payload_a),
             "art_9": canonical_hash({"forged": True}), "art_mismatch": "f" * 64,
+            "art_10": canonical_hash({"submitted": "low"}),
+            "art_11": canonical_hash({"submitted": "high"}),
         }
         authority_fixture(conn, artifact_hashes)
         conn.isolation_level = None
@@ -211,6 +225,20 @@ def main() -> int:
             failures.append("cross-workspace contract Artifact was accepted")
         except RepositoryConflict:
             pass
+        for plan_id, artifact_id, payload in (
+            ("plan_submitted_low", "art_10", {"submitted": "low"}),
+            ("plan_submitted_high", "art_11", {"submitted": "high"}),
+        ):
+            try:
+                repo.add_contract(ResearchContract.create(
+                    contract_id=f"contract_{plan_id}", version=1, workspace_id="ws_1",
+                    project_ref="project_1", goal_ref="goal_1", requirement_ref="requirement_1",
+                    agent_plan_id=plan_id, contract_artifact_id=artifact_id,
+                    payload=payload, status="active",
+                ))
+                failures.append(f"submitted Plan authorized active Contract: {plan_id}")
+            except RepositoryConflict:
+                pass
         try:
             repo.add_contract(ResearchContract.create(
                 contract_id="contract_mismatch", version=1, workspace_id="ws_1",

@@ -118,7 +118,7 @@ class SQLiteResearchRepository:
             plan_status = plan[0] if plan else None
             plan_hash = plan[1] if plan else None
             verified_at = plan[2] if plan else None
-            if not (plan_status in {"submitted", "approved"}
+            if not (plan_status == "approved"
                     and isinstance(plan_hash, str) and len(plan_hash) == 64
                     and all(char in "0123456789abcdefABCDEF" for char in plan_hash)
                     and isinstance(verified_at, str) and verified_at.strip()):

@@ -210,9 +210,11 @@ class ResearchContract:
         _positive_version(self.state_version, "state_version")
         if self.status not in CONTRACT_TRANSITIONS:
             raise ResearchDomainError("unsupported contract status")
+        if not isinstance(self.payload_json, str):
+            raise ResearchDomainError("contract payload_json must be a canonical JSON string")
         try:
             parsed = json.loads(self.payload_json)
-        except (TypeError, json.JSONDecodeError) as exc:
+        except (TypeError, UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise ResearchDomainError("contract payload_json must be a canonical JSON object") from exc
         if not isinstance(parsed, dict):
             raise ResearchDomainError("contract payload must be a JSON object")
