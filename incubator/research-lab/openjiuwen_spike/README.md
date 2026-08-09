@@ -8,9 +8,10 @@ AgentOps MIS.
 The upstream candidate is pinned as metadata in
 `dependency-manifest.json`: `agent-core` commit
 `bf0a3eb2c70fcbae404403530519ca02e7fc4692`, Python `>=3.11,<3.14`,
-Apache-2.0 with upstream `NOTICE`. A later distribution must retain the exact
-pinned upstream license, notice, attribution, and applicable third-party
-notices. No upstream code or notice body is copied here.
+Apache-2.0 with upstream `Open_Source_Software_Notice.txt`. A later
+distribution must retain the exact pinned `LICENSE`, software-notice file,
+attribution, and applicable third-party notices. No upstream code or notice
+body is copied here.
 
 ## Contract
 
@@ -24,6 +25,9 @@ notices. No upstream code or notice body is copied here.
 - ordered event application plus exact duplicate detection;
 - in-memory idempotency receipts: same key and effect payload replays the
   original receipt, while changed content fails;
+- hard store limits of three events per receipt, 64 receipts/request streams,
+  and 192 event identities; exhaustion fails closed, and a new worker process
+  starts a new stream;
 - explicit read-only `ALLOW`, protected-action `ASK`, and unknown/default
   `DENY`. `ASK` creates a permission request only; it is never approval;
 - cancellation/resume *protocol receipts* with `effect_performed=false`.

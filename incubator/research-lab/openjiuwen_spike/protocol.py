@@ -22,6 +22,11 @@ MAX_LINE_BYTES = 16_384
 MAX_TOTAL_BYTES = 65_536
 MAX_MESSAGES = 64
 MAX_PAYLOAD_BYTES = 8_192
+MAX_IDEMPOTENCY_RECEIPTS = MAX_MESSAGES
+MAX_REQUEST_IDENTITIES = MAX_MESSAGES
+MAX_EVENT_IDENTITIES = MAX_MESSAGES * 3
+MAX_EVENT_STREAMS = MAX_MESSAGES
+MAX_RECEIPT_EVENTS = 3
 MAX_ID_CHARS = 128
 MAX_KEY_CHARS = 64
 MAX_STRING_CHARS = 2_048
@@ -157,21 +162,20 @@ def canonical_digest(value: Any) -> str:
 
 
 def decode_line(raw: bytes | str) -> dict[str, Any]:
-    """Decode exactly one bounded JSONL record and validate its schema."""
+    """Decode one exact canonical, newline-terminated JSONL record."""
 
     encoded = raw.encode("utf-8") if isinstance(raw, str) else bytes(raw)
     if len(encoded) > MAX_LINE_BYTES:
         raise ProtocolError("line_too_large", "JSONL record exceeds the byte limit")
-    if encoded.endswith(b"\n"):
-        encoded = encoded[:-1]
-        if encoded.endswith(b"\r"):
-            encoded = encoded[:-1]
-    if b"\n" in encoded or b"\r" in encoded:
+    if not encoded.endswith(b"\n"):
+        raise ProtocolError("partial_record", "JSONL record must end with a newline")
+    body = encoded[:-1]
+    if b"\n" in body or b"\r" in body:
         raise ProtocolError("multiple_records", "decode_line accepts exactly one record")
-    if not encoded:
+    if not body:
         raise ProtocolError("empty_record", "JSONL record is empty")
     try:
-        text = encoded.decode("utf-8", errors="strict")
+        text = body.decode("utf-8", errors="strict")
     except UnicodeDecodeError as exc:
         raise ProtocolError("invalid_utf8", "JSONL record is not valid UTF-8") from exc
     try:
@@ -186,7 +190,14 @@ def decode_line(raw: bytes | str) -> dict[str, Any]:
         raise ProtocolError("invalid_json", "JSONL record is not valid JSON") from exc
     if not isinstance(value, dict):
         raise ProtocolError("non_object", "top-level JSONL record must be an object")
-    return validate_message(value)
+    validated = validate_message(value)
+    canonical_record = (canonical_json(validated) + "\n").encode("utf-8")
+    if encoded != canonical_record:
+        raise ProtocolError(
+            "noncanonical_encoding",
+            "JSONL record must exactly match its canonical UTF-8 encoding",
+        )
+    return validated
 
 
 def decode_stream(raw: bytes) -> list[dict[str, Any]]:
@@ -251,7 +262,18 @@ def event_message(
 class IdempotencyStore:
     """In-memory receipt store; it is not durable MIS or runtime state."""
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        max_receipts: int = MAX_IDEMPOTENCY_RECEIPTS,
+        max_request_ids: int = MAX_REQUEST_IDENTITIES,
+    ) -> None:
+        self._max_receipts = _validate_store_limit(
+            max_receipts, MAX_IDEMPOTENCY_RECEIPTS, "max_receipts"
+        )
+        self._max_request_ids = _validate_store_limit(
+            max_request_ids, MAX_REQUEST_IDENTITIES, "max_request_ids"
+        )
         self._by_key: dict[str, StoredReceipt] = {}
         self._request_fingerprints: dict[str, str] = {}
         self._request_keys: dict[str, str] = {}
@@ -272,6 +294,16 @@ class IdempotencyStore:
                 "idempotency_conflict",
                 "idempotency_key was reused with changed operation or payload",
             )
+        if prior_request is None and len(self._request_fingerprints) >= self._max_request_ids:
+            raise ProtocolError(
+                "store_capacity_exceeded",
+                "idempotency request identity capacity is exhausted",
+            )
+        if receipt is None and len(self._by_key) >= self._max_receipts:
+            raise ProtocolError(
+                "store_capacity_exceeded",
+                "idempotency receipt capacity is exhausted",
+            )
         if receipt is not None:
             self._request_fingerprints[request_id] = fingerprint
             self._request_keys[request_id] = key
@@ -279,10 +311,34 @@ class IdempotencyStore:
 
     def commit(self, request: Mapping[str, Any], events: Iterable[Mapping[str, Any]]) -> StoredReceipt:
         validated = validate_message(dict(request))
-        key = validated["payload"]["idempotency_key"]
-        if key in self._by_key:
+        if self.lookup(validated) is not None:
             raise ProtocolError("idempotency_already_committed", "receipt already exists")
-        copied_events = tuple(validate_message(dict(event)) for event in events)
+        key = validated["payload"]["idempotency_key"]
+        if len(self._by_key) >= self._max_receipts:
+            raise ProtocolError("store_capacity_exceeded", "idempotency receipt capacity is exhausted")
+        if (
+            validated["request_id"] not in self._request_fingerprints
+            and len(self._request_fingerprints) >= self._max_request_ids
+        ):
+            raise ProtocolError(
+                "store_capacity_exceeded",
+                "idempotency request identity capacity is exhausted",
+            )
+        copied_event_list: list[dict[str, Any]] = []
+        for index, event in enumerate(events):
+            if index >= MAX_RECEIPT_EVENTS:
+                raise ProtocolError("receipt_too_large", "receipt exceeds the event limit")
+            validated_event = validate_message(dict(event))
+            if validated_event["kind"] != "event":
+                raise ProtocolError("event_required", "receipt entries must be events")
+            if validated_event["request_id"] != validated["request_id"]:
+                raise ProtocolError("receipt_request_mismatch", "receipt event request_id is not bound")
+            if validated_event["sequence"] != index:
+                raise ProtocolError("receipt_sequence_mismatch", "receipt events must be contiguous")
+            copied_event_list.append(validated_event)
+        if not copied_event_list:
+            raise ProtocolError("empty_receipt", "receipt must contain at least one event")
+        copied_events = tuple(copied_event_list)
         receipt = StoredReceipt(
             fingerprint=request_fingerprint(validated),
             request_id=validated["request_id"],
@@ -297,7 +353,14 @@ class IdempotencyStore:
 class EventSequenceStore:
     """Reject duplicate, conflicting, and out-of-order event application."""
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        max_events: int = MAX_EVENT_IDENTITIES,
+        max_requests: int = MAX_EVENT_STREAMS,
+    ) -> None:
+        self._max_events = _validate_store_limit(max_events, MAX_EVENT_IDENTITIES, "max_events")
+        self._max_requests = _validate_store_limit(max_requests, MAX_EVENT_STREAMS, "max_requests")
         self._next_sequence: dict[str, int] = {}
         self._event_fingerprints: dict[str, str] = {}
 
@@ -313,6 +376,10 @@ class EventSequenceStore:
                 raise ProtocolError("event_id_conflict", "event_id was reused with changed content")
             return EventApplyResult(applied=False, duplicate=True)
         request_id = validated["request_id"]
+        if len(self._event_fingerprints) >= self._max_events:
+            raise ProtocolError("store_capacity_exceeded", "event identity capacity is exhausted")
+        if request_id not in self._next_sequence and len(self._next_sequence) >= self._max_requests:
+            raise ProtocolError("store_capacity_exceeded", "event stream capacity is exhausted")
         expected = self._next_sequence.get(request_id, 0)
         if validated["sequence"] != expected:
             raise ProtocolError(
@@ -444,6 +511,12 @@ def _validate_event_payload(event_type: str, payload: dict[str, Any]) -> None:
         if not isinstance(decision, str) or decision not in {item.value for item in PermissionDecision}:
             raise ProtocolError("invalid_permission", "permission decision must be allow, ask, or deny")
         _validate_identifier(payload["reason_code"], "reason_code")
+        classified = classify_permission(payload["action_type"])
+        if decision != classified.decision.value or payload["reason_code"] != classified.reason_code:
+            raise ProtocolError(
+                "permission_classifier_mismatch",
+                "permission decision and reason must match the fail-closed classifier",
+            )
     if "reason_code" in payload:
         _validate_identifier(payload["reason_code"], "reason_code")
     if "result_summary" in payload and not isinstance(payload["result_summary"], str):
@@ -516,7 +589,33 @@ def _is_sensitive_key(key: str) -> bool:
         "token",
         "transcript",
     }
-    return normalized in _SENSITIVE_KEYS or bool(components & sensitive_components)
+    joined = "".join(normalized.split("_"))
+    sensitive_compounds = (
+        "apikey",
+        "accesskey",
+        "clientsecret",
+        "privatekey",
+        "secretkey",
+    )
+    return (
+        normalized in _SENSITIVE_KEYS
+        or bool(components & sensitive_components)
+        or any(compound in joined for compound in sensitive_compounds)
+    )
+
+
+def _validate_store_limit(value: Any, hard_maximum: int, field: str) -> int:
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, int)
+        or value < 1
+        or value > hard_maximum
+    ):
+        raise ProtocolError(
+            "invalid_store_limit",
+            f"{field} must be between 1 and the protocol hard maximum",
+        )
+    return value
 
 
 def _object_without_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:

@@ -18,7 +18,8 @@ dependency action.
 The pin is `openJiuwen-ai/agent-core@bf0a3eb2c70fcbae404403530519ca02e7fc4692`
 (2026-08-08). Official metadata observed for this decision records GitHub
 release `v0.1.16`, PyPI version `0.1.16.post2`, Python
-`>=3.11,<3.14`, and Apache-2.0 plus upstream third-party `NOTICE`.
+`>=3.11,<3.14`, and Apache-2.0 plus upstream
+`Open_Source_Software_Notice.txt`.
 Commit-to-PyPI equivalence, transitive dependencies, installability, callback
 order, and real runtime semantics remain `UNKNOWN` or `NOT_RUN`.
 
@@ -46,6 +47,14 @@ an exact retry replays the original receipt; changed content fails. Cancel and
 resume receipts are intentionally labelled no-effect. The parent must not
 interpret them as a stopped process or restored runtime snapshot.
 
+The wire decoder accepts only its exact canonical UTF-8 encoding with one
+terminal LF; alternate key order, whitespace, escapes, CRLF, or a partial
+record fail closed. A worker stream holds at most 64 idempotency receipts, 64
+request/event streams, three contiguous events per receipt, and 192 event
+identities. It does not evict or silently forget authority-relevant
+deduplication state: exhaustion fails closed, and a new managed worker process
+begins a new bounded stream.
+
 Raw prompts, model responses, transcripts, messages, credentials, secrets,
 tokens, private keys, or checkpoint bodies are forbidden on this boundary.
 Only bounded identifiers, summaries, references, decisions, hashes, and
@@ -60,9 +69,9 @@ accepted from an untrusted protocol peer or treated as MIS evidence.
 This harness copies no upstream code and does not install a distribution. If a
 later approved slice vendors, packages, or distributes `agent-core`, it must
 retrieve the exact pinned source, retain its Apache-2.0 `LICENSE`, upstream
-`NOTICE`, attribution, and applicable third-party notices, then verify those
-bytes in release/SBOM evidence. Metadata in the manifest is not a substitute
-for carrying the required notice files.
+`Open_Source_Software_Notice.txt`, attribution, and applicable third-party
+notices, then verify those bytes in release/SBOM evidence. Metadata in the
+manifest is not a substitute for carrying the required notice files.
 
 ## Verified upstream reference surface
 

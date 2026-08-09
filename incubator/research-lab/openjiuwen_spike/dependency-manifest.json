@@ -14,9 +14,9 @@
     "license": "Apache-2.0",
     "notice_files": [
       "LICENSE",
-      "NOTICE"
+      "Open_Source_Software_Notice.txt"
     ],
-    "notice_boundary": "Before any distribution or source copy, retain the exact pinned upstream LICENSE, NOTICE, attribution, and applicable third-party notices. This no-install harness copies no upstream code or notice body."
+    "notice_boundary": "Before any distribution or source copy, retain the exact pinned upstream LICENSE and Open_Source_Software_Notice.txt, attribution, and applicable third-party notices. This no-install harness copies no upstream code or notice body."
   },
   "planned_composition": {
     "mode": "managed_python_3_11_subprocess",
