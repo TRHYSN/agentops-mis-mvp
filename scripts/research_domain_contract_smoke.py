@@ -89,6 +89,17 @@ def main() -> int:
         pass
     try:
         ResearchContract(
+            contract_id="contract_deep_text", version=1, workspace_id="ws_1",
+            project_ref="project_1", goal_ref="goal_1", requirement_ref="requirement_1",
+            agent_plan_id="plan_1", contract_artifact_id="art_1",
+            payload_json=('{' + '"x":') * 2000 + 'null' + ('}' * 2000),
+            content_hash="0" * 64,
+        )
+        failures.append("overdeep persisted JSON text leaked through validation")
+    except ResearchDomainError:
+        pass
+    try:
+        ResearchContract(
             contract_id="contract_bytes", version=1, workspace_id="ws_1",
             project_ref="project_1", goal_ref="goal_1", requirement_ref="requirement_1",
             agent_plan_id="plan_1", contract_artifact_id="art_1",
