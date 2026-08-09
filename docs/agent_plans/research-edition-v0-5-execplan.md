@@ -97,7 +97,7 @@ Only one integration owner may edit `server.py` at a time. L03 owns research sch
 - G0 Current State: `PASS_WITH_CONDITIONS`.
 - G1 Plan: `PASS`; Task and 100/100 verified Agent Plan were read back with exact hashes.
 - G2 Dogfood: `PASS_WITH_CONDITIONS`; a plan-bound Run was read back. Commander Project/Goal remains unavailable to this agent because that route requires a Human Session, so no Project/Goal ID was fabricated.
-- G3 openJiuwen Spike: `PASS_WITH_CONDITIONS`; exact SHA `71cc411`, two independent final reviews, Draft PR `#122`, focused 25/25, full 45/45, and independent raw-field matrices 10,008/10,008 and 4,465/4,465. Real openJiuwen installation/import/runtime remains `NOT_RUN/UNKNOWN`.
+- G3 openJiuwen Spike: `PASS_WITH_CONDITIONS`; exact SHA `71cc411`, two independent final reviews, Draft PR `#122`, focused 25/25, full 45/45, independent raw-field matrices 10,008/10,008 and 4,465/4,465, Artifact `art_re_v05_l02_71cc411e`, Evaluation `eval_gw_run_gw_ddb3915b002a_rule`, and verified manifest `pem_re_v05_l02_71cc411e`. Real openJiuwen installation/import/runtime remains `NOT_RUN/UNKNOWN`.
 - G4 Domain: `PASS_WITH_CONDITIONS`; exact SHA `44a6d8f`, two independent final reviews, Draft PR `#121`, Artifact `art_re_v05_l03_44a6d8ff`, Evaluation `eval_gw_run_gw_30889b1ffa9b_rule`, and verified manifest `pem_re_v05_l03_44a6d8ff`. EvidenceEdge-backed Claim readiness/invalidation remains deferred to L05. Relay exact-wheel CI remains blocked on a separately scoped three-module allowlist integration.
 - G5 Durability through G12 Final: `NOT_RUN`.
 
