@@ -93,9 +93,11 @@ printf '%s\n' "$image" |
 
 manifest_image=$(sed -n 's/^  "image": "\([^"]*\)",$/\1/p' "$manifest_file")
 source_revision=$(sed -n 's/^  "source_revision": "\([0-9a-f]*\)",$/\1/p' "$manifest_file")
+manifest_platform=$(sed -n 's/^  "platform": "\([^"]*\)",$/\1/p' "$manifest_file")
 [ "$manifest_image" = "$image" ] || fail "release_image_manifest_mismatch"
 printf '%s\n' "$source_revision" | grep -Eq '^[0-9a-f]{40}$' ||
   fail "release_source_revision_invalid"
+[ "$manifest_platform" = "linux/amd64" ] || fail "release_platform_invalid"
 
 grep -Eq '^[[:space:]]+build:' "$compose_file" &&
   fail "release_compose_build_forbidden"
@@ -112,6 +114,12 @@ command -v docker >/dev/null 2>&1 || fail "docker_required"
 docker compose version >/dev/null 2>&1 || fail "docker_compose_required"
 command -v openssl >/dev/null 2>&1 || fail "openssl_required"
 command -v curl >/dev/null 2>&1 || fail "curl_required"
+host_platform=$(docker info --format '{{.OSType}}/{{.Architecture}}') ||
+  fail "docker_platform_unavailable"
+case "$host_platform" in
+  linux/amd64|linux/x86_64) ;;
+  *) fail "customer_host_platform_unsupported" ;;
+esac
 
 mkdir "$lock_directory" 2>/dev/null || fail "install_in_progress"
 stack_start_attempted=false
@@ -234,5 +242,5 @@ rm -f "$health_receipt"
 health_receipt=
 install_complete=true
 
-printf '{"ok":true,"contract":"agentops_byoc_customer_install_v1","operation":"install","source_revision":"%s","image_digest_verified":true,"repository_checkout_required":false,"compose_build_performed":false,"control_plane":"typescript_postgres","schema_ready":true,"credentials_omitted":true}\n' \
+printf '{"ok":true,"contract":"agentops_byoc_customer_install_v1","operation":"install","source_revision":"%s","image_digest_verified":true,"host_platform_verified":true,"repository_checkout_required":false,"compose_build_performed":false,"control_plane":"typescript_postgres","schema_ready":true,"credentials_omitted":true}\n' \
   "$source_revision"

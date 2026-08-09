@@ -2261,6 +2261,10 @@ async function cleanup(context, values) {
 }
 
 export async function runLifecycle(arguments_, options = {}) {
+  const nodeMajor = Number.parseInt(process.versions.node.split(".")[0], 10);
+  if (!Number.isInteger(nodeMajor) || nodeMajor < 20) {
+    throw new LifecycleError("lifecycle_node_20_required", "preflight");
+  }
   const parsed = parseArguments(arguments_);
   const environment = { ...process.env, ...(options.environment || {}) };
   const repositoryRoot = resolve(options.repositoryRoot || defaultRepositoryRoot);

@@ -214,12 +214,14 @@ As of 2026-07-31:
   cleanup-on-failure behavior, catalog fingerprint verification, and
   supply-chain gates. The top-level `BYOC Customer Release Acceptance` runs for
   exact commercial integration branch pushes, publishes two exact-source
-  immutable OCI images, and transfers a
-  checksum-manifested source-free customer bundle to a separate no-checkout
-  runner. It contains no Dockerfile, application source, package-manager input,
-  Git metadata, or credentials. Using only that bundle plus immutable image
-  digests, the consumer executes packaged install, committed backup, isolated
-  restore, retained-volume same-schema apply, and backup-authoritative rollback.
+  immutable OCI images, signs the release archive with GitHub OIDC/Sigstore
+  provenance, and transfers a checksum-manifested source-free customer bundle to
+  a separate no-checkout runner. It contains no Dockerfile, application source,
+  package-manager input, Git metadata, or credentials. The consumer verifies the
+  independent signed provenance before extraction, then uses only that bundle,
+  immutable image digests, and declared host runtimes to execute packaged
+  install, committed backup, isolated restore, retained-volume same-schema
+  apply, and backup-authoritative rollback.
   A separate workflow covers historical v9-to-v11 forward migration with
   backup-authoritative rollback.
   Each promotion candidate must still pass all three BYOC evidence lanes,

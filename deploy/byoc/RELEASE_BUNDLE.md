@@ -11,7 +11,12 @@ lifecycle tools, `release-image.env`, a bounded manifest, `SHA256SUMS`, and the
 
 The release is bound to the exact source commit and the application image's
 immutable registry digest. A release build fails when any selected input is
-untracked or differs from that commit. Verify without starting containers:
+untracked or differs from that commit. The package's `SHA256SUMS` proves internal
+integrity, not publisher authenticity. Before extraction, require the signed
+GitHub artifact attestation and verify it against the expected repository,
+signer workflow, source ref, and source digest. The authoritative customer
+workflow performs this check with `gh attestation verify`. Then verify the
+extracted bundle without starting containers:
 
 ```sh
 ./install.sh --verify-only
@@ -38,8 +43,15 @@ preserving its containers, named volumes, and logs for diagnosis and retry.
 The current bundle platform is `linux/amd64`. The release manifest records that
 platform, the producer builds explicitly with `--platform linux/amd64`, and the
 release gate rejects an image whose inspected OS/architecture is not
-`linux/amd64`. ARM64 and multi-architecture customer hosts are not supported by
-this bundle yet.
+`linux/amd64`. The installer checks the Docker daemon before creating `.env` or
+secret files and rejects non-Linux or non-amd64 hosts. ARM64 and
+multi-architecture customer hosts are not supported by this bundle yet.
+
+The clean installer requires no host Node.js. Packaged `backup.sh` and
+`retained-data-lifecycle.mjs` operations require Node.js 20 or newer; their
+preflight fails before publishing a backup or mutating lifecycle state when the
+runtime is absent or too old. Restore uses the committed backup contract and the
+same immutable application image boundary.
 
 Edit the generated `deploy/byoc/.env` routing values for the customer's trusted
 HTTPS origin before exposing the service beyond loopback. Never place
@@ -48,10 +60,12 @@ credentials in the release manifest, image reference, or support receipt.
 `.github/workflows/byoc-customer-release-acceptance.yml` is the authoritative
 clean-customer gate. Its producer job may checkout the exact source and publish
 two exact-source immutable images; its separate consumer job has no repository
-checkout and receives only the downloaded release archive plus immutable image
-digests. That consumer performs the real installation, committed backup,
-isolated restore, same-schema image apply, and backup-authoritative rollback
-using only the tools in this bundle. It verifies that pre-backup authority
-survives, post-apply data is removed by rollback, and source image, PostgreSQL
-volume, cluster identity, schema readiness, and TypeScript/PostgreSQL health are
+checkout and receives the downloaded release archive plus immutable image
+digests. It independently verifies the archive's signed provenance through the
+GitHub attestation service before extraction. That consumer performs the real
+installation, committed backup, isolated restore, same-schema image apply, and
+backup-authoritative rollback using only the tools in this bundle plus the
+declared host runtimes. It verifies that pre-backup authority survives,
+post-apply data is removed by rollback, and source image, PostgreSQL volume,
+cluster identity, schema readiness, and TypeScript/PostgreSQL health are
 restored.

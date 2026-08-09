@@ -208,7 +208,13 @@ def validate_sources(texts: dict[Path, str], failures: list[str]) -> None:
         "codex/commercial-control-plane-main-integration",
         "packages: write",
         "Install without checkout or repository state",
+        "actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6",
         "actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093",
+        "gh attestation verify",
+        "--signer-workflow",
+        "--source-digest",
+        "host_platform_verified == true",
+        "Verify declared customer operations runtime",
         "repository_checkout_required == false",
         "compose_build_performed == false",
     ):

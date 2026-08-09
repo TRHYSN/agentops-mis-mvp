@@ -9,6 +9,8 @@ on:
 permissions:
   contents: read
   packages: write
+  id-token: write
+  attestations: write
 
 concurrency:
   group: agentops-byoc-customer-release-${{ github.workflow }}-${{ github.ref }}
@@ -23,6 +25,7 @@ jobs:
       image: ${{ steps.release.outputs.image }}
       target_image: ${{ steps.release.outputs.target_image }}
       artifact: ${{ steps.release.outputs.artifact }}
+      archive_sha256: ${{ steps.release.outputs.archive_sha256 }}
     steps:
       - name: Checkout exact release source
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -115,13 +118,21 @@ jobs:
             -cf - -C "${release_parent}" "${release_name}" |
             gzip -n -9 > "${archive}"
           test -s "${archive}"
+          archive_sha256="$(sha256sum "${archive}" | awk 'NR == 1 { print $1 }')"
+          [[ "${archive_sha256}" =~ ^[0-9a-f]{64}$ ]]
           artifact="agentops-byoc-customer-release-${GITHUB_SHA}"
           {
             printf 'image=%s\n' "${image}"
             printf 'target_image=%s\n' "${target_image}"
             printf 'artifact=%s\n' "${artifact}"
             printf 'archive=%s\n' "${archive}"
+            printf 'archive_sha256=%s\n' "${archive_sha256}"
           } >> "${GITHUB_OUTPUT}"
+
+      - name: Sign source-free release provenance
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
+        with:
+          subject-path: ${{ steps.release.outputs.archive }}
 
       - name: Upload exact customer release bundle
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -137,8 +148,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 40
     permissions:
-      contents: none
+      contents: read
       packages: read
+      attestations: read
     env:
       COMPOSE_PROJECT_NAME: agentops-customer-${{ github.run_id }}-${{ github.run_attempt }}
     steps:
@@ -150,6 +162,23 @@ jobs:
         with:
           name: ${{ needs.publish-release.outputs.artifact }}
           path: ${{ runner.temp }}/customer-download
+
+      - name: Verify signed release provenance
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          archive="$({ find "${RUNNER_TEMP}/customer-download" -maxdepth 1 -type f -name '*.tar.gz'; } | head -n 1)"
+          test -n "${archive}"
+          test "$(sha256sum "${archive}" | awk 'NR == 1 { print $1 }')" = \
+            "${{ needs.publish-release.outputs.archive_sha256 }}"
+          gh attestation verify "${archive}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --signer-workflow "${GITHUB_REPOSITORY}/.github/workflows/byoc-customer-release-acceptance.yml" \
+            --source-ref "${GITHUB_REF}" \
+            --source-digest "${GITHUB_SHA}" \
+            --deny-self-hosted-runners \
+            > "${RUNNER_TEMP}/customer-attestation.json"
 
       - name: Extract bounded release artifact
         run: |
@@ -192,12 +221,19 @@ jobs:
             and .operation == "install"
             and .source_revision == $source
             and .image_digest_verified == true
+            and .host_platform_verified == true
             and .repository_checkout_required == false
             and .compose_build_performed == false
             and .control_plane == "typescript_postgres"
             and .schema_ready == true
             and .credentials_omitted == true
           ' "${receipt}" >/dev/null
+
+      - name: Verify declared customer operations runtime
+        run: |
+          set -euo pipefail
+          node_major="$(node -p 'process.versions.node.split(".")[0]')"
+          test "${node_major}" -ge 20
 
       - name: Verify image, mounts, and restart persistence
         run: |
@@ -414,6 +450,7 @@ jobs:
           rm -rf -- \
             "${RUNNER_TEMP}/customer" \
             "${RUNNER_TEMP}/customer-download" \
+            "${RUNNER_TEMP}/customer-attestation.json" \
             "${RUNNER_TEMP}/customer-install-receipt.json" \
             "${RUNNER_TEMP}/customer-backup.bundle" \
             "${RUNNER_TEMP}/customer-backup.json" \

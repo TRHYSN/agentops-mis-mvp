@@ -20,8 +20,12 @@ node deploy/byoc/build-release-bundle.mjs build \
 The customer receives that bundle, not the repository. It contains the release
 Compose model and operational backup, restore, and retained-data lifecycle
 tools, but no Dockerfile, application source, package-manager input, Git
-metadata, credentials, customer data, or source-side builder. Verify the bundle
-with the packaged installer before preparing private configuration:
+metadata, credentials, customer data, or source-side builder. The producer signs
+the release archive with a GitHub OIDC/Sigstore build-provenance attestation; the
+no-checkout consumer verifies that independent signature against the exact
+repository, workflow, ref, and source SHA before extraction. After provenance
+verification, verify the extracted bundle's internal integrity before preparing
+private configuration:
 
 ```bash
 cd /private/path/agentops-byoc-release
@@ -34,8 +38,13 @@ publication.
 
 The current customer release is explicitly `linux/amd64`; it is not a
 multi-architecture or ARM64 release. The producer and manifest bind that
-platform, and customer promotion evidence verifies the published image's OS and
-architecture before packaging.
+platform, customer promotion evidence verifies the published image's OS and
+architecture before packaging, and the installer rejects an unsupported Docker
+daemon before creating customer secrets.
+
+Clean installation itself does not require host Node.js. Packaged backup and
+retained-data lifecycle operations currently require Node.js 20 or newer and
+fail before creating output or state when that runtime is unavailable.
 
 ## Prepare
 

@@ -47,6 +47,22 @@ if [ -e "$output" ] || [ -L "$output" ]; then
   exit 1
 fi
 
+if ! command -v node >/dev/null 2>&1; then
+  printf '%s\n' "backup_node_20_required" >&2
+  exit 1
+fi
+node_major=$(node -p 'process.versions.node.split(".")[0]')
+case "$node_major" in
+  ""|*[!0-9]*)
+    printf '%s\n' "backup_node_20_required" >&2
+    exit 1
+    ;;
+esac
+if [ "$node_major" -lt 20 ]; then
+  printf '%s\n' "backup_node_20_required" >&2
+  exit 1
+fi
+
 compose_file=${AGENTOPS_BYOC_COMPOSE_FILE:-deploy/byoc/compose.yaml}
 env_file=${AGENTOPS_BYOC_ENV_FILE:-deploy/byoc/.env}
 bundle_owned=false

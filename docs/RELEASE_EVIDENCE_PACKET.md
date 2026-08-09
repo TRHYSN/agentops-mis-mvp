@@ -46,9 +46,12 @@ python3 scripts/merge_readiness_status_smoke.py --require-ready-to-merge
   commercial integration branch, supports later manual reruns, and is not part
   of arbitrary pull-request CI because its producer needs package-write
   permission. Its separate consumer job has package-read permission and no
-  repository checkout. That consumer must complete packaged install, committed
-  backup, isolated restore, same-schema apply, and backup-authoritative rollback
-  while retaining PostgreSQL volume and cluster identity.
+  repository checkout. Before extraction it must verify the release archive's
+  GitHub OIDC/Sigstore provenance against the exact repository, signer workflow,
+  source ref and source SHA. That consumer must then complete packaged install,
+  committed backup, isolated restore, same-schema apply, and
+  backup-authoritative rollback while retaining PostgreSQL volume and cluster
+  identity.
 
 ### Release Freeze And Required Checks
 

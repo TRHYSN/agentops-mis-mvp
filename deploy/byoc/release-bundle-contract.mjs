@@ -112,6 +112,8 @@ function assertStaticCustomerBoundary() {
     || !installer.includes("stack_start_attempted=true")
     || !installer.includes("stop --timeout 10")
     || !installer.includes('[ "$install_complete" = false ]')
+    || !installer.includes('host_platform=$(docker info --format')
+    || !installer.includes('fail "customer_host_platform_unsupported"')
   ) {
     fail("release_installer_failure_cleanup_contract_missing");
   }
@@ -134,7 +136,12 @@ function assertStaticCustomerBoundary() {
     !consumer.includes(
       "actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093",
     )
-    || !/contents: none[\s\S]*packages: read/.test(consumer)
+    || !/contents: read[\s\S]*packages: read[\s\S]*attestations: read/.test(consumer)
+    || !consumer.includes("gh attestation verify")
+    || !consumer.includes("--signer-workflow")
+    || !consumer.includes("--source-ref")
+    || !consumer.includes("--source-digest")
+    || !consumer.includes("--deny-self-hosted-runners")
     || !consumer.includes("repository_checkout_required == false")
     || !consumer.includes("compose_build_performed == false")
   ) {
@@ -151,6 +158,16 @@ function assertStaticCustomerBoundary() {
     || !consumer.includes('test "$(audit_count "${probe_id}"')
   ) {
     fail("release_consumer_lifecycle_contract_missing");
+  }
+  if (
+    !workflow.includes(
+      "actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6",
+    )
+    || !workflow.includes("id-token: write")
+    || !workflow.includes("attestations: write")
+    || !workflow.includes("archive_sha256")
+  ) {
+    fail("release_signed_provenance_contract_missing");
   }
   if (
     !workflow.includes("docker build --pull --platform linux/amd64")
@@ -176,6 +193,18 @@ function assertStaticCustomerBoundary() {
     || (composeWorkflow.match(/'\{\{\.Architecture\}\}'/g) || []).length < 2
   ) {
     fail("compose_release_platform_binding_missing");
+  }
+
+  const backup = readFileSync(join(moduleDirectory, "backup.sh"), "utf8");
+  const lifecycle = readFileSync(
+    join(moduleDirectory, "retained-data-lifecycle.mjs"),
+    "utf8",
+  );
+  if (
+    !backup.includes("backup_node_20_required")
+    || !lifecycle.includes("lifecycle_node_20_required")
+  ) {
+    fail("release_operator_node_preflight_missing");
   }
 }
 
@@ -277,6 +306,7 @@ try {
     `#!/bin/sh
 set -eu
 case " $* " in
+  *" info --format "*) printf '%s\\n' "\${AGENTOPS_FAKE_PLATFORM:-linux/amd64}" ;;
   *" image inspect "*) printf '%s\\n' "$AGENTOPS_FAKE_REVISION" ;;
   *" stop --timeout 10 "*) printf '%s\\n' "stop" >> "$AGENTOPS_FAKE_DOCKER_LOG" ;;
 esac
@@ -289,6 +319,40 @@ exit 0
     "#!/bin/sh\nexit 1\n",
     { encoding: "utf8", mode: 0o700 },
   );
+  const unsupportedHost = runWithEnvironment(
+    join(output, "install.sh"),
+    [],
+    output,
+    {
+      ...process.env,
+      PATH: `${fakeBin}:${process.env.PATH || ""}`,
+      AGENTOPS_FAKE_PLATFORM: "linux/arm64",
+      AGENTOPS_FAKE_REVISION: revision,
+      AGENTOPS_FAKE_DOCKER_LOG: dockerLog,
+    },
+    [0, 1],
+  );
+  if (
+    unsupportedHost.status === 0
+    || !unsupportedHost.stderr.includes("customer_host_platform_unsupported")
+    || files(output).some((path) => path === "deploy/byoc/.env"
+      || path.startsWith("deploy/byoc/secrets/"))
+  ) fail("release_unsupported_host_guard_missing");
+
+  const missingNodeOutput = join(temporaryRoot, "missing-node.bundle");
+  const missingNode = runWithEnvironment(
+    "/bin/sh",
+    [join(output, "deploy/byoc/backup.sh"), missingNodeOutput],
+    output,
+    { ...process.env, PATH: fakeBin },
+    [0, 1],
+  );
+  if (
+    missingNode.status === 0
+    || !missingNode.stderr.includes("backup_node_20_required")
+    || files(temporaryRoot).some((path) => path.startsWith("missing-node.bundle/"))
+  ) fail("release_backup_node_preflight_missing");
+
   const failedHealth = runWithEnvironment(
     join(output, "install.sh"),
     [],
@@ -353,6 +417,9 @@ exit 0
     overwrite_refused: true,
     dirty_input_refused: true,
     unmanifested_file_refused: true,
+    unsupported_host_refused: true,
+    signed_provenance_required: true,
+    node_20_operator_preflight_required: true,
     failed_health_stack_stopped: true,
     tamper_refused: true,
     credentials_omitted: true,
