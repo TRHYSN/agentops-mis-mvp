@@ -6,6 +6,7 @@ Plan ID: `RE-V05-PLAN-001`
 Base: `origin/main@99ce51d693f1d646ea84acc2f7f376bde1a95a9a`
 Branch: `codex/research-v05-reconcile`
 Worktree: `agentops-mis-research-v05-reconcile`
+Draft PR: `#120` (`codex/research-v05-reconcile` → `main`)
 Updated: 2026-08-09
 
 MIS binding: Task `tsk_re_v05_l00_99ce51d`; Agent Plan `plan_336c6f572cdcd906`; Run `run_gw_e5fcd972a353`; verified MIS plan hash `e2a9bdd8339e10e16bd169a4f1ff32d61fc8aa2e5a092875e8f057a2e7cb0d6f`.
@@ -137,3 +138,4 @@ Stop and request direction for: main moving before branch integration; unexplain
 - 2026-08-09: Gate 0 synthesized from four read-only reports. Architecture decisions frozen for candidate planning. No canonical state changed.
 - 2026-08-09: G1/G2 bound to live MIS. Two earlier Agent Plan submissions remain as audit history: one exposed date-path over-redaction and one exposed installed-repository reference resolution. Replacement plan `plan_336c6f572cdcd906` passed all checks with quality 100/100.
 - 2026-08-09: The uploaded ZIP was fully unpacked into the workspace-local `.codex-inputs` directory and its bundled validator passed all 39 manifest entries. Codex goal mode was activated with the candidate-scope completion and stop conditions above.
+- 2026-08-09: Draft PR `#120` published the docs/evidence-only control branch. It remains Proposal/canonical=false and is the intended review base for independently verified Wave 1 implementation PRs.

@@ -44,6 +44,7 @@ This board tracks candidate delivery facts. It does not replace MIS or the revie
 - `canonical_state_changed=false`
 - `live_gpu_uat=NOT_RUN`
 - `openjiuwen_real_install=NOT_RUN`
-- `draft_pr=NOT_CREATED`
+- `control_draft_pr=120`
+- `implementation_draft_prs=NOT_CREATED_PHASE_B_BLOCKED`
 
 L02 exact SHA `fe045c3` failed independent Phase B on canonical JSON enforcement, camel-case secret keys, permission-authority consistency, and an inaccurate upstream notice filename; remediation is in progress and the failed SHA remains audit history. L03 remediation SHA `138e6ab` is under fresh independent Phase B. Candidate integration remains blocked until both lanes pass. This reconciliation branch remains docs/evidence-only.
