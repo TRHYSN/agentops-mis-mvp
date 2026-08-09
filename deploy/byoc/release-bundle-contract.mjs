@@ -123,6 +123,8 @@ function assertStaticCustomerBoundary() {
     || ownerService.includes("entitlement_operator_password")
     || ownerService.includes("human_session_hmac_key")
     || !ownerOperator.includes("--password-stdin")
+    || !ownerOperator.includes("--pull never")
+    || ownerOperator.includes("--no-build")
     || !ownerOperator.includes("set +x")
     || /openssl|rand\b/.test(ownerOperator)
     || !ownerEntrypoint.includes("PGPASSFILE")

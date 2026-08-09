@@ -102,6 +102,8 @@ printf '%s\n' '{"ok":true,"operation":"commercial_owner_bootstrap","user":{"user
   assert.equal(executed.stderr.includes(password), false);
   assert.match(capturedArguments, /owner-bootstrap-entrypoint\.mjs/);
   assert.match(capturedArguments, /--password-stdin/);
+  assert.match(capturedArguments, /--pull\nnever/);
+  assert.doesNotMatch(capturedArguments, /--no-build/);
   assert.doesNotMatch(capturedArguments, /entitlement-admin/);
 
   rmSync(join(captureRoot, "argv"));

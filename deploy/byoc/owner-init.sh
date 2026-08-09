@@ -92,7 +92,7 @@ printf '%s\n' "$password" | docker compose \
   --env-file "$env_file" \
   -f "$compose_file" \
   --profile owner-bootstrap \
-  run --rm --no-deps --no-build --pull never -T owner-bootstrap \
+  run --rm --no-deps --pull never -T owner-bootstrap \
   node /usr/local/lib/agentops/owner-bootstrap-entrypoint.mjs \
   "${owner_arguments[@]}"
 
