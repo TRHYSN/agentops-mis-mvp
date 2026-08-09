@@ -113,14 +113,16 @@ class SQLiteResearchRepository:
             raise RepositoryConflict("contract Artifact content_hash does not match immutable Contract payload")
         if contract.status in {"approved", "active"}:
             plan = self.conn.execute(
-                "SELECT plan_hash,verified_at FROM agent_plans WHERE plan_id=?", (contract.agent_plan_id,),
+                "SELECT status,plan_hash,verified_at FROM agent_plans WHERE plan_id=?", (contract.agent_plan_id,),
             ).fetchone()
-            plan_hash = plan[0] if plan else None
-            verified_at = plan[1] if plan else None
-            if not (isinstance(plan_hash, str) and len(plan_hash) == 64
+            plan_status = plan[0] if plan else None
+            plan_hash = plan[1] if plan else None
+            verified_at = plan[2] if plan else None
+            if not (plan_status in {"submitted", "approved"}
+                    and isinstance(plan_hash, str) and len(plan_hash) == 64
                     and all(char in "0123456789abcdefABCDEF" for char in plan_hash)
                     and isinstance(verified_at, str) and verified_at.strip()):
-                raise RepositoryConflict("approved/active Contract requires a verified immutable Agent Plan")
+                raise RepositoryConflict("approved/active Contract requires an executable verified Agent Plan")
 
     @contextmanager
     def _revision_transaction(self):

@@ -47,7 +47,8 @@ def authority_fixture(conn: sqlite3.Connection, artifact_hashes: dict[str, str])
     conn.executemany(
         "INSERT INTO agent_plans VALUES(?,?,?,?,?)",
         [("plan_1", "ws_1", "submitted", "a" * 64, "2026-08-09T00:00:00+00:00"),
-         ("plan_unverified", "ws_1", "draft", None, None)],
+         ("plan_unverified", "ws_1", "draft", None, None),
+         ("plan_draft_forged", "ws_1", "draft", "b" * 64, "2026-08-09T00:00:00+00:00")],
     )
     rows = []
     for artifact_id, content_hash in artifact_hashes.items():
@@ -76,11 +77,38 @@ def main() -> int:
     atomic_v2_payload = {"protocol": "v2"}
     require(canonical_json(payload_a) == canonical_json(payload_b), "canonical JSON ordering drift", failures)
     require(canonical_hash(payload_a) == canonical_hash(payload_b), "canonical hash ordering drift", failures)
+    astral = {"symbol": "research-\U0001f52c-\U0001d538"}
+    require(canonical_hash(astral) == canonical_hash({"symbol": "research-\U0001f52c-\U0001d538"}),
+            "valid astral Unicode hash drift", failures)
     try:
         canonical_hash({"bad": float("nan")})
         failures.append("non-finite canonical JSON was accepted")
     except ResearchDomainError:
         pass
+    for malformed in ({"x": "\ud800"}, {"\ud800": "x"}):
+        try:
+            ResearchContract.create(
+                contract_id="contract_surrogate", version=1, workspace_id="ws_1",
+                project_ref="project_1", goal_ref="goal_1", requirement_ref="requirement_1",
+                agent_plan_id="plan_1", contract_artifact_id="art_1", payload=malformed,
+            )
+            failures.append("non-encodable surrogate Contract payload was accepted")
+        except ResearchDomainError:
+            pass
+    cyclic_dict: dict[str, object] = {}
+    cyclic_dict["self"] = cyclic_dict
+    cyclic_list: list[object] = []
+    cyclic_list.append(cyclic_list)
+    for malformed in (cyclic_dict, {"nested": cyclic_list}):
+        try:
+            ResearchContract.create(
+                contract_id="contract_cycle", version=1, workspace_id="ws_1",
+                project_ref="project_1", goal_ref="goal_1", requirement_ref="requirement_1",
+                agent_plan_id="plan_1", contract_artifact_id="art_1", payload=malformed,
+            )
+            failures.append("cyclic Contract payload was accepted")
+        except ResearchDomainError:
+            pass
     for bad_payload in ([], "text", None):
         try:
             ResearchContract.create(
@@ -132,6 +160,16 @@ def main() -> int:
 
     immutable = contract(payload_a)
     try:
+        immutable.revision(payload={"x": "\ud800"})
+        failures.append("non-encodable Contract revision was accepted")
+    except ResearchDomainError:
+        pass
+    try:
+        immutable.revision(payload=cyclic_dict)
+        failures.append("cyclic Contract revision was accepted")
+    except ResearchDomainError:
+        pass
+    try:
         immutable.revision(payload=["not", "object"])  # type: ignore[arg-type]
         failures.append("non-object Contract revision was accepted")
     except ResearchDomainError:
@@ -158,7 +196,7 @@ def main() -> int:
             "art_4": canonical_hash(atomic_v1_payload), "art_5": canonical_hash(revised_payload),
             "art_6": canonical_hash(atomic_conflict_payload), "art_7": canonical_hash(atomic_v2_payload),
             "art_8": canonical_hash({"unverified": True}), "art_cross": canonical_hash(payload_a),
-            "art_mismatch": "f" * 64,
+            "art_9": canonical_hash({"forged": True}), "art_mismatch": "f" * 64,
         }
         authority_fixture(conn, artifact_hashes)
         conn.isolation_level = None
@@ -240,6 +278,16 @@ def main() -> int:
             pass
         require(repo.get_contract("contract_unverified", 1).status == "review_pending",
                 "failed Plan verification gate mutated Contract", failures)
+        try:
+            repo.add_contract(ResearchContract.create(
+                contract_id="contract_forged_plan", version=1, workspace_id="ws_1",
+                project_ref="project_1", goal_ref="goal_1", requirement_ref="requirement_1",
+                agent_plan_id="plan_draft_forged", contract_artifact_id="art_9",
+                payload={"forged": True}, status="active",
+            ))
+            failures.append("draft Agent Plan with forged verification fields activated Contract")
+        except RepositoryConflict:
+            pass
 
         trial = Trial("trial_1", "contract_1", 2, "task_1")
         repo.add_trial(trial)

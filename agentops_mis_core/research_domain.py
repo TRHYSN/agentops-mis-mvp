@@ -32,6 +32,8 @@ class StaleStateVersion(ResearchDomainError):
 
 def canonical_json(value: Any) -> str:
     """Return deterministic JSON and reject non-finite/non-JSON values."""
+    active_containers: set[int] = set()
+
     def validate(item: Any, path: str = "$") -> None:
         if item is None or isinstance(item, (str, bool, int)):
             return
@@ -40,26 +42,44 @@ def canonical_json(value: Any) -> str:
                 raise ResearchDomainError(f"{path} must be finite")
             return
         if isinstance(item, list):
-            for index, child in enumerate(item):
-                validate(child, f"{path}[{index}]")
+            marker = id(item)
+            if marker in active_containers:
+                raise ResearchDomainError("value must not contain cyclic JSON containers")
+            active_containers.add(marker)
+            try:
+                for index, child in enumerate(item):
+                    validate(child, f"{path}[{index}]")
+            finally:
+                active_containers.remove(marker)
             return
         if isinstance(item, dict):
-            for key, child in item.items():
-                if not isinstance(key, str):
-                    raise ResearchDomainError(f"{path} mapping keys must be strings")
-                validate(child, f"{path}.{key}")
+            marker = id(item)
+            if marker in active_containers:
+                raise ResearchDomainError("value must not contain cyclic JSON containers")
+            active_containers.add(marker)
+            try:
+                for key, child in item.items():
+                    if not isinstance(key, str):
+                        raise ResearchDomainError(f"{path} mapping keys must be strings")
+                    validate(child, f"{path}[value]")
+            finally:
+                active_containers.remove(marker)
             return
         raise ResearchDomainError(f"{path} contains unsupported JSON type")
-    validate(value)
     try:
-        return json.dumps(
+        validate(value)
+        encoded = json.dumps(
             value,
             ensure_ascii=False,
             sort_keys=True,
             separators=(",", ":"),
             allow_nan=False,
         )
-    except (TypeError, ValueError) as exc:
+        encoded.encode("utf-8")
+        return encoded
+    except ResearchDomainError:
+        raise
+    except (TypeError, ValueError, UnicodeEncodeError, RecursionError) as exc:
         raise ResearchDomainError("value must be finite JSON data") from exc
 
 
