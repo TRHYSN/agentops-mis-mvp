@@ -24,7 +24,8 @@ body is copied here.
 - byte, record, identifier, string, collection, nesting, and payload limits;
 - rejection of unpaired Unicode surrogates before canonical encoding;
 - recursive rejection of prompt, response, transcript, secret and
-  credential-shaped fields/values;
+  credential-shaped fields/values, including camel/delimiter compounds with
+  trailing descriptors;
 - ordered event application plus exact duplicate detection;
 - in-memory idempotency receipts: same key and effect payload replays the
   original receipt, while changed content fails;

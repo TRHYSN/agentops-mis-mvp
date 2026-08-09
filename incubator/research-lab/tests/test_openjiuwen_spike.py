@@ -281,6 +281,15 @@ class ProtocolValidationTests(unittest.TestCase):
             "author/ization",
             "cred-ential",
             "cred.ential",
+            "passWordHash",
+            "pass-word-hash",
+            "pass.word.hash",
+            "author-ization-header",
+            "author/ization/header",
+            "apiKeyValue",
+            "api-key-value",
+            "privateKeyPem",
+            "private-key-pem",
         ):
             request = action_request(arguments={field: "ordinary-looking-value"})
             self.assert_protocol_error("sensitive_key_forbidden", lambda: validate_message(request))

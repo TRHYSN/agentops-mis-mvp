@@ -71,6 +71,12 @@ trusted pickle-backed SQLite/Shelve (with a Redis extension) and warns against
 concurrent execution of one session; therefore checkpoint bytes must never be
 accepted from an untrusted protocol peer or treated as MIS evidence.
 
+Sensitive field names are split at camel-case and arbitrary delimiters. Every
+contiguous token range is checked against exact known compounds, so trailing
+descriptors cannot hide an API key, password, authorization, credential, or
+private-key field. Matching exact token compounds avoids rejecting unrelated
+words such as `passage`, `author`, `credentialing`, or `secretary`.
+
 ## License and notice boundary
 
 This harness copies no upstream code and does not install a distribution. If a

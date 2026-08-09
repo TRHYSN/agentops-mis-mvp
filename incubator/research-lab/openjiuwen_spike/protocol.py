@@ -686,9 +686,11 @@ def _validate_tree(value: Any, *, path: str, depth: int) -> None:
 
 
 def _is_sensitive_key(key: str) -> bool:
-    snake = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", key)
-    normalized = re.sub(r"[^a-z0-9]+", "_", snake.lower()).strip("_")
-    components = set(normalized.split("_"))
+    acronym_split = re.sub(r"([A-Z]+)([A-Z][a-z])", r"\1_\2", key)
+    camel_split = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", acronym_split)
+    normalized = re.sub(r"[^a-z0-9]+", "_", camel_split.lower()).strip("_")
+    tokens = tuple(token for token in normalized.split("_") if token)
+    components = set(tokens)
     sensitive_components = {
         "authorization",
         "cookie",
@@ -703,8 +705,7 @@ def _is_sensitive_key(key: str) -> bool:
         "token",
         "transcript",
     }
-    joined = "".join(normalized.split("_"))
-    sensitive_suffixes = (
+    sensitive_compounds = {
         "apikey",
         "accesskey",
         "accesskeyid",
@@ -715,12 +716,16 @@ def _is_sensitive_key(key: str) -> bool:
         "password",
         "privatekey",
         "secretkey",
-    )
-    return (
-        normalized in _SENSITIVE_KEYS
-        or bool(components & sensitive_components)
-        or any(joined.endswith(compound) for compound in sensitive_suffixes)
-    )
+    }
+    if normalized in _SENSITIVE_KEYS or components & sensitive_components:
+        return True
+    for start in range(len(tokens)):
+        candidate = ""
+        for token in tokens[start:]:
+            candidate += token
+            if candidate in sensitive_compounds:
+                return True
+    return False
 
 
 def _reject_surrogates(value: str) -> None:
