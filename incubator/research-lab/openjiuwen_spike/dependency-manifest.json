@@ -1,0 +1,82 @@
+{
+  "schema_version": "openjiuwen_dependency_manifest_v1",
+  "status": "compatibility_harness_only",
+  "canonical": false,
+  "openjiuwen": {
+    "repository": "https://github.com/openJiuwen-ai/agent-core",
+    "component": "agent-core",
+    "source_commit": "bf0a3eb2c70fcbae404403530519ca02e7fc4692",
+    "source_commit_date": "2026-08-08",
+    "github_release": "v0.1.16",
+    "pypi_project": "openjiuwen",
+    "pypi_version_observed": "0.1.16.post2",
+    "python_requires": ">=3.11,<3.14",
+    "license": "Apache-2.0",
+    "notice_files": [
+      "LICENSE",
+      "NOTICE"
+    ],
+    "notice_boundary": "Before any distribution or source copy, retain the exact pinned upstream LICENSE, NOTICE, attribution, and applicable third-party notices. This no-install harness copies no upstream code or notice body."
+  },
+  "planned_composition": {
+    "mode": "managed_python_3_11_subprocess",
+    "transport": "bounded_jsonl_stdio",
+    "mis_authority": "first_party_only",
+    "runtime_checkpoint_authority": "runtime_private_noncanonical",
+    "root_dependency_change": false,
+    "fork": "NONE",
+    "patches": []
+  },
+  "execution": {
+    "installed": false,
+    "imported": false,
+    "network_used": false,
+    "live_model_used": false,
+    "real_runtime": "NOT_RUN",
+    "minimal_agent": "NOT_RUN",
+    "tool_callbacks": "NOT_RUN",
+    "permission_host": "NOT_RUN",
+    "checkpoint_restore": "NOT_RUN",
+    "cancel_interrupt": "NOT_RUN"
+  },
+  "verified_upstream_capabilities": [
+    "ReActAgent.configure",
+    "tool_decorator",
+    "Runner.resource_mgr.add_tool",
+    "Runner_ability_registration",
+    "Runner.run_agent",
+    "agent.invoke",
+    "tool_start_completion_error_stream_parse_invoke_events",
+    "TOOL_AUTH_event",
+    "allow_ask_deny_permission_engine",
+    "ToolPermissionHost",
+    "trusted_pickle_backed_SQLite_or_Shelve_checkpoints",
+    "Redis_checkpoint_extension",
+    "same_session_not_concurrent",
+    "CancelledError_and_unexpected_exception_context_persistence_fix_at_pin"
+  ],
+  "unknowns": {
+    "commit_pypi_equivalence": "UNKNOWN",
+    "transitive_dependencies": "UNKNOWN",
+    "actual_callback_order": "UNKNOWN",
+    "installability_in_managed_environment": "NOT_RUN",
+    "runtime_semantics": "NOT_RUN",
+    "in_process_compatibility": "NOT_RUN",
+    "upstream_notice_bytes_at_distribution_time": "NOT_COPIED"
+  },
+  "excluded": {
+    "jiuwenswarm": "NOT_INTEGRATED",
+    "agent_studio": "NOT_INTEGRATED",
+    "openjiuwen_internal_state_as_mis_authority": false
+  },
+  "official_sources": [
+    "https://github.com/openJiuwen-ai/agent-core/tree/bf0a3eb2c70fcbae404403530519ca02e7fc4692",
+    "https://github.com/openJiuwen-ai/agent-core/releases/tag/v0.1.16",
+    "https://pypi.org/project/openjiuwen/",
+    "https://github.com/openJiuwen-ai/agent-core/blob/bf0a3eb2c70fcbae404403530519ca02e7fc4692/docs/en/2.Development%20Guide/Agents/Building%20ReActAgent.md",
+    "https://github.com/openJiuwen-ai/agent-core/blob/bf0a3eb2c70fcbae404403530519ca02e7fc4692/docs/en/2.Development%20Guide/Basic%20Functions/Custom%20Tools.md",
+    "https://github.com/openJiuwen-ai/agent-core/blob/bf0a3eb2c70fcbae404403530519ca02e7fc4692/docs/en/2.Development%20Guide/Basic%20Functions/Tool%20permissions%20and%20host%20integration.md",
+    "https://github.com/openJiuwen-ai/agent-core/blob/bf0a3eb2c70fcbae404403530519ca02e7fc4692/docs/en/2.Development%20Guide/Advanced%20Usage/Checkpointer%20Checkpoint%20Mechanism.md",
+    "https://github.com/openJiuwen-ai/agent-core/blob/bf0a3eb2c70fcbae404403530519ca02e7fc4692/openjiuwen/core/runner/callback/events.py"
+  ]
+}
