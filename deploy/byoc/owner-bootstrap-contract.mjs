@@ -5,6 +5,7 @@ import { spawnSync } from "node:child_process";
 import {
   chmodSync,
   copyFileSync,
+  existsSync,
   mkdtempSync,
   mkdirSync,
   readFileSync,
@@ -106,6 +107,26 @@ printf '%s\n' '{"ok":true,"operation":"commercial_owner_bootstrap","user":{"user
   rmSync(join(captureRoot, "argv"));
   rmSync(join(captureRoot, "env"));
   rmSync(join(captureRoot, "stdin"));
+  const multiline = spawnSync(
+    join(releaseRoot, "owner-init.sh"),
+    [
+      "--workspace-id", "ws_fixture",
+      "--username", "fixture-owner",
+      "--password-stdin",
+    ],
+    {
+      encoding: "utf8",
+      env: environment,
+      input: `${password}\nsecond-line-without-final-newline`,
+    },
+  );
+  assert.notEqual(multiline.status, 0);
+  assert.match(multiline.stderr, /owner_password_stdin_multiple_lines/);
+  assert.equal(multiline.stderr.includes(password), false);
+  assert.equal(existsSync(join(captureRoot, "argv")), false);
+  assert.equal(existsSync(join(captureRoot, "env")), false);
+  assert.equal(existsSync(join(captureRoot, "stdin")), false);
+
   const forbidden = spawnSync(
     join(releaseRoot, "owner-init.sh"),
     [
@@ -122,9 +143,10 @@ printf '%s\n' '{"ok":true,"operation":"commercial_owner_bootstrap","user":{"user
   process.stdout.write(`${JSON.stringify({
     ok: true,
     contract: "agentops_byoc_owner_bootstrap_packaging_v1",
-    source_free_operator_command: true,
+    source_free_operator_boundary_static_verified: true,
     hidden_prompt_default: true,
     password_stdin_only: true,
+    unterminated_second_line_refused: true,
     password_argv_omitted: true,
     password_environment_omitted: true,
     password_receipt_omitted: true,

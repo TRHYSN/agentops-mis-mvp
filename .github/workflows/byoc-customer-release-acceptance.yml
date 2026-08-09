@@ -229,6 +229,87 @@ jobs:
             and .credentials_omitted == true
           ' "${receipt}" >/dev/null
 
+      - name: Initialize first Owner through the source-free customer command
+        run: |
+          set -euo pipefail
+          set +x
+          owner_receipt="${RUNNER_TEMP}/customer-owner-bootstrap.json"
+          duplicate_receipt="${RUNNER_TEMP}/customer-owner-duplicate.json"
+          owner_password="$(openssl rand -hex 32)"
+          if ! printf '%s\n' "${owner_password}" |
+            "${AGENTOPS_CUSTOMER_RELEASE_ROOT}/owner-init.sh" \
+              --workspace-id ws_customer_acceptance \
+              --username customer-owner \
+              --display-name "Customer Owner" \
+              --password-stdin > "${owner_receipt}"; then
+            owner_password=
+            exit 1
+          fi
+          ! grep -Fq -- "${owner_password}" "${owner_receipt}"
+          owner_password=
+          jq -e '
+            .ok == true
+            and .operation == "commercial_owner_bootstrap"
+            and .user.user_id != null
+            and .membership.workspace_id == "ws_customer_acceptance"
+            and .membership.role == "owner"
+            and .membership.status == "active"
+            and .credential_omitted == true
+            and .password_omitted == true
+            and .python_started == false
+          ' "${owner_receipt}" >/dev/null
+
+          compose_file="${AGENTOPS_CUSTOMER_RELEASE_ROOT}/deploy/byoc/compose.yaml"
+          env_file="${AGENTOPS_CUSTOMER_RELEASE_ROOT}/deploy/byoc/.env"
+          compose=(docker compose --env-file "${env_file}" -f "${compose_file}")
+          owner_state="$("${compose[@]}" exec -T postgres sh -ceu \
+            'psql --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" --no-psqlrc --tuples-only --no-align --set=ON_ERROR_STOP=1' <<'SQL'
+          SELECT json_build_object(
+            'owners', (
+              SELECT COUNT(*) FROM workspace_memberships
+              WHERE workspace_id='ws_customer_acceptance'
+                AND role='owner' AND status='active'
+            ),
+            'credentials', (
+              SELECT COUNT(*) FROM human_login_credentials
+              WHERE username='customer-owner' AND status='active'
+            ),
+            'audits', (
+              SELECT COUNT(*) FROM audit_logs
+              WHERE workspace_id='ws_customer_acceptance'
+                AND action='human_auth.owner_bootstrap'
+            )
+          )::text;
+          SQL
+          )"
+          printf '%s\n' "${owner_state}" |
+            jq -e '.owners == 1 and .credentials == 1 and .audits == 1' >/dev/null
+
+          duplicate_password="$(openssl rand -hex 32)"
+          set +e
+          printf '%s\n' "${duplicate_password}" |
+            "${AGENTOPS_CUSTOMER_RELEASE_ROOT}/owner-init.sh" \
+              --workspace-id ws_customer_acceptance \
+              --username second-customer-owner \
+              --display-name "Second Customer Owner" \
+              --password-stdin > "${duplicate_receipt}" 2>&1
+          duplicate_status=$?
+          set -e
+          ! grep -Fq -- "${duplicate_password}" "${duplicate_receipt}"
+          duplicate_password=
+          test "${duplicate_status}" -eq 2
+          jq -e '
+            .ok == false
+            and .error == "owner_already_initialized"
+            and .credential_omitted == true
+            and .password_omitted == true
+            and .python_started == false
+          ' "${duplicate_receipt}" >/dev/null
+          duplicate_count="$("${compose[@]}" exec -T postgres sh -ceu \
+            'psql --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" --no-psqlrc --tuples-only --no-align --set=ON_ERROR_STOP=1 --command "SELECT COUNT(*) FROM human_login_credentials WHERE username='"'"'second-customer-owner'"'"'"' |
+            tr -d '[:space:]')"
+          test "${duplicate_count}" = "0"
+
       - name: Verify declared customer operations runtime
         run: |
           set -euo pipefail

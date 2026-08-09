@@ -19,23 +19,11 @@ import { fileURLToPath } from "node:url";
 const moduleDirectory = dirname(fileURLToPath(import.meta.url));
 const sourceRepository = resolve(moduleDirectory, "../..");
 const image = `ghcr.io/example/agentops-mis-byoc@sha256:${"a".repeat(64)}`;
-const releaseInputs = [
-  "deploy/byoc/build-release-bundle.mjs",
-  "deploy/byoc/Dockerfile",
-  "deploy/byoc/owner-bootstrap-contract.mjs",
-  "deploy/byoc/owner-bootstrap-entrypoint.mjs",
-  "deploy/byoc/release-bundle-contract.mjs",
-  "deploy/byoc/compose.release.yaml",
-  "deploy/byoc/.env.example",
-  "deploy/byoc/RELEASE_BUNDLE.md",
-  "deploy/byoc/install.sh",
-  "deploy/byoc/owner-init.sh",
-  "deploy/byoc/backup.sh",
-  "deploy/byoc/restore-drill.sh",
-  "deploy/byoc/postgres-destructive-database.sh",
-  "deploy/byoc/postgres-restore-guardian.sh",
-  "deploy/byoc/retained-data-lifecycle.mjs",
-  "deploy/byoc/retained-data-lifecycle-state.mjs",
+const releaseInputRoots = [
+  ".dockerignore",
+  "deploy/byoc",
+  "migrations/postgres",
+  "ui/next-app",
 ];
 
 function fail(code) {
@@ -72,6 +60,12 @@ function runWithEnvironment(
   }
   return result;
 }
+
+const releaseInputs = run(
+  "git",
+  ["ls-files", "-z", "--", ...releaseInputRoots],
+  sourceRepository,
+).stdout.split("\0").filter(Boolean).sort();
 
 function files(root, directory = root) {
   return readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {
@@ -175,6 +169,10 @@ function assertStaticCustomerBoundary() {
     || !consumer.includes("--deny-self-hosted-runners")
     || !consumer.includes("repository_checkout_required == false")
     || !consumer.includes("compose_build_performed == false")
+    || !consumer.includes("/owner-init.sh")
+    || !consumer.includes('and .operation == "commercial_owner_bootstrap"')
+    || !consumer.includes('and .error == "owner_already_initialized"')
+    || !consumer.includes("human_auth.owner_bootstrap")
   ) {
     fail("release_consumer_contract_missing");
   }
@@ -421,7 +419,9 @@ exit 0
     fail("release_overwrite_guard_missing");
   }
 
-  appendFileSync(join(repository, "deploy/byoc/RELEASE_BUNDLE.md"), "dirty\n", "utf8");
+  const releaseReadmePath = join(repository, "deploy/byoc/RELEASE_BUNDLE.md");
+  const releaseReadme = readFileSync(releaseReadmePath);
+  appendFileSync(releaseReadmePath, "dirty\n", "utf8");
   const dirty = run(process.execPath, [
     builder,
     "build",
@@ -432,6 +432,24 @@ exit 0
   if (dirty.status === 0 || !dirty.stderr.includes("release_inputs_not_committed")) {
     fail("release_dirty_input_guard_missing");
   }
+  writeFileSync(releaseReadmePath, releaseReadme);
+
+  appendFileSync(
+    join(repository, "ui/next-app/scripts/bootstrap-owner.ts"),
+    "// dirty owner runtime dependency\n",
+    "utf8",
+  );
+  const dirtyOwnerRuntime = run(process.execPath, [
+    builder,
+    "build",
+    "--output", join(temporaryRoot, "dirty-owner-runtime-release"),
+    "--image", image,
+    "--source-revision", revision,
+  ], repository, [0, 1]);
+  if (
+    dirtyOwnerRuntime.status === 0
+    || !dirtyOwnerRuntime.stderr.includes("release_inputs_not_committed")
+  ) fail("release_owner_runtime_dirty_input_guard_missing");
 
   appendFileSync(join(output, "README.md"), "tampered\n", "utf8");
   const tampered = run(
@@ -458,6 +476,8 @@ exit 0
     signed_provenance_required: true,
     node_20_operator_preflight_required: true,
     owner_bootstrap_operator_packaged: true,
+    owner_bootstrap_real_customer_acceptance_required: true,
+    owner_bootstrap_runtime_inputs_revision_bound: true,
     owner_bootstrap_password_stdin_only: true,
     owner_bootstrap_entitlement_boundary_unchanged: true,
     failed_health_stack_stopped: true,

@@ -41,14 +41,10 @@ const INPUTS = [
   ["deploy/byoc/retained-data-lifecycle-state.mjs", "deploy/byoc/retained-data-lifecycle-state.mjs", 0o600],
 ];
 const RELEASE_INPUTS = [
-  ...new Set([
-    "deploy/byoc/build-release-bundle.mjs",
-    "deploy/byoc/Dockerfile",
-    "deploy/byoc/owner-bootstrap-contract.mjs",
-    "deploy/byoc/owner-bootstrap-entrypoint.mjs",
-    "deploy/byoc/release-bundle-contract.mjs",
-    ...INPUTS.map(([sourcePath]) => sourcePath),
-  ]),
+  ".dockerignore",
+  "deploy/byoc",
+  "migrations/postgres",
+  "ui/next-app",
 ].sort();
 
 function fail(code) {

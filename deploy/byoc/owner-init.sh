@@ -55,7 +55,7 @@ trap restore_tty EXIT HUP INT TERM
 
 if [ "$password_stdin" = true ]; then
   IFS= read -r password || [ -n "$password" ] || fail "owner_password_stdin_empty"
-  if IFS= read -r confirmation; then
+  if IFS= read -r confirmation || [ -n "$confirmation" ]; then
     fail "owner_password_stdin_multiple_lines"
   fi
 else
