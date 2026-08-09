@@ -17,8 +17,10 @@ const repositoryRoot = resolve(process.cwd(), "../..");
 const historicalRevision = "f55def1233403a503a39d9af92371a71770c23f7";
 const oldManifestHash =
   "8cf59998821a27c37b949bcdb94897ad3b61ce4341b79f37cc0e93365d750838";
-const packageLockHash =
+const historicalPackageLockHash =
   "22ae9970d43e8a9896ee61b71de9834fb1512f42c770d80784191b5dad2caaba";
+const currentPackageLockHash =
+  "46806d690b935840411c10ef8466faa505ce2e3103eb8c49c486685350a4b2cc";
 
 function sha256(value: string | Buffer) {
   return createHash("sha256").update(value).digest("hex");
@@ -107,7 +109,7 @@ assert.deepEqual(identity, {
   schema_readiness_file_sha256:
     "947a414c3c7e1411e71168a29604b7a195773b876a76418245c36c56fe734ccd",
   build_compatibility_patch: "migration_root_runtime_resolution_v1",
-  package_lock_sha256: packageLockHash,
+  package_lock_sha256: historicalPackageLockHash,
 });
 
 git("cat-file", "-e", `${historicalRevision}^{commit}`);
@@ -125,12 +127,12 @@ const oldReadiness = git(
   `${historicalRevision}:ui/next-app/src/server/controlPlane/schemaReadiness.ts`,
 );
 assert.equal(sha256(oldManifest), oldManifestHash);
-assert.equal(sha256(oldLock), packageLockHash);
+assert.equal(sha256(oldLock), historicalPackageLockHash);
 assert.equal(
   sha256(oldReadiness),
   "947a414c3c7e1411e71168a29604b7a195773b876a76418245c36c56fe734ccd",
 );
-assert.equal(sha256(currentLock), packageLockHash);
+assert.equal(sha256(currentLock), currentPackageLockHash);
 assert.match(oldManifest, /agentops_commercial_postgres_v9/);
 assert.match(oldManifest, /objectCount:\s*745/);
 assert.equal((oldManifest.match(/^    component:/gm) || []).length, 10);
@@ -186,6 +188,8 @@ assert.doesNotMatch(historicalCompose, /AGENTOPS_POSTGRES_RUNTIME_USER/);
 assert.doesNotMatch(historicalCompose, /build:/);
 
 assert.match(workflow, new RegExp(historicalRevision));
+assert.match(workflow, new RegExp(historicalPackageLockHash));
+assert.match(workflow, new RegExp(currentPackageLockHash));
 assert.match(workflow, /workflow_dispatch:\s*\n\s*workflow_call:/);
 assert.match(workflow, /workflow_call:\s*\n\s*push:/);
 assert.match(workflow, /path:\s*historical-source/);

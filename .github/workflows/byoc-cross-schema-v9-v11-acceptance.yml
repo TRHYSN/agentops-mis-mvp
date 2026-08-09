@@ -69,7 +69,7 @@ jobs:
           )" = "8cf59998821a27c37b949bcdb94897ad3b61ce4341b79f37cc0e93365d750838"
           test "$(
             sha256sum ui/next-app/package-lock.json | awk '{print $1}'
-          )" = "22ae9970d43e8a9896ee61b71de9834fb1512f42c770d80784191b5dad2caaba"
+          )" = "46806d690b935840411c10ef8466faa505ce2e3103eb8c49c486685350a4b2cc"
 
       - name: Verify cross-schema packaging contract
         working-directory: ui/next-app
