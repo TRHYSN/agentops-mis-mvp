@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
+UI_ROOT = ROOT / "ui" / "start-building-app"
 SPATIAL_ROOT = ROOT / "ui" / "start-building-app" / "src" / "app" / "spatial"
 MANIFEST_ROOT = SPATIAL_ROOT / "manifests"
 APP_PATH = ROOT / "ui" / "start-building-app" / "src" / "app" / "App.tsx"
@@ -105,16 +106,16 @@ def validate_art_kit(art_kit: dict[str, Any]) -> None:
     require(required_kinds <= {asset.get("kind") for asset in assets}, "art kit does not cover a complete game-art module")
 
     for asset in assets:
+        require(asset.get("status") == "ready", f"commercial asset slot is not ready: {asset.get('id')}")
         require(
-            asset.get("provenance") in {"first_party", "generated_first_party", "planned_first_party"},
+            asset.get("provenance") == "first_party",
             f"forbidden asset provenance: {asset.get('id')}",
         )
-        require(
-            asset.get("license") in {"PROJECT_OWNED", "PROJECT_GENERATED"},
-            f"forbidden asset license: {asset.get('id')}",
-        )
+        require(asset.get("license") == "PROJECT_OWNED", f"forbidden asset license: {asset.get('id')}")
         source_path = str(asset.get("sourcePath", ""))
+        require(bool(source_path), f"ready asset source missing: {asset.get('id')}")
         require(not re.match(r"https?://", source_path, flags=re.IGNORECASE), f"remote asset URL forbidden: {asset.get('id')}")
+        require((UI_ROOT / source_path).is_file(), f"ready asset source does not exist: {asset.get('id')}")
 
     serialized = json.dumps(art_kit, ensure_ascii=False).lower()
     for forbidden_reference in ("stardew", "star-office", "envato", "paid tileset"):

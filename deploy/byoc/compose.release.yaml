@@ -1,0 +1,200 @@
+name: agentops-mis-byoc
+
+services:
+  postgres:
+    image: postgres:16-alpine@sha256:57c72fd2a128e416c7fcc499958864df5301e940bca0a56f58fddf30ffc07777
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: "${AGENTOPS_POSTGRES_DATABASE:-agentops}"
+      POSTGRES_USER: "${AGENTOPS_POSTGRES_MIGRATOR_USER:-agentops_migrator}"
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_migrator_password
+    secrets:
+      - postgres_migrator_password
+    healthcheck:
+      test: [CMD-SHELL, 'pg_isready -U "$${POSTGRES_USER}" -d "$${POSTGRES_DB}"']
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    volumes:
+      - agentops_postgres_data:/var/lib/postgresql/data
+    networks:
+      - control_plane
+
+  migrate:
+    image: "${AGENTOPS_IMAGE:?set AGENTOPS_IMAGE to the immutable AgentOps release digest}"
+    restart: "no"
+    user: "0:0"
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - DAC_OVERRIDE
+      - SETGID
+      - SETUID
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /run/agentops-runtime-secrets:rw,noexec,nosuid,size=1m,mode=0700,uid=1000,gid=1000
+    entrypoint:
+      - node
+      - /usr/local/lib/agentops/node-secret-entrypoint.mjs
+      - --postgres-migrator
+      - --runtime-role-password
+      - --entitlement-admin-password
+      - --
+    command:
+      - npm
+      - run
+      - migrate:postgres
+    environment: &control_plane_database_environment
+      AGENTOPS_DEPLOYMENT_MODE: production
+      AGENTOPS_CONTROL_PLANE_MODE: postgres
+      AGENTOPS_POSTGRES_SCHEMA: public
+      AGENTOPS_POSTGRES_RUNTIME_API_SCHEMA: agentops_runtime_api
+      AGENTOPS_POSTGRES_RUNTIME_ROLE: "${AGENTOPS_POSTGRES_RUNTIME_USER:-agentops_runtime}"
+      AGENTOPS_POSTGRES_ENTITLEMENT_ADMIN_ROLE: "${AGENTOPS_POSTGRES_ENTITLEMENT_ADMIN_USER:-agentops_entitlement_admin}"
+      AGENTOPS_POSTGRES_SSL: "false"
+      AGENTOPS_POSTGRES_MIGRATOR_HOST: postgres
+      AGENTOPS_POSTGRES_MIGRATOR_PORT: "5432"
+      AGENTOPS_POSTGRES_MIGRATOR_DATABASE: "${AGENTOPS_POSTGRES_DATABASE:-agentops}"
+      AGENTOPS_POSTGRES_MIGRATOR_USER: "${AGENTOPS_POSTGRES_MIGRATOR_USER:-agentops_migrator}"
+      AGENTOPS_POSTGRES_MIGRATOR_PASSWORD_SOURCE_FILE: /run/secrets/postgres_migrator_password
+      AGENTOPS_POSTGRES_RUNTIME_PASSWORD_SOURCE_FILE: /run/secrets/postgres_runtime_password
+      AGENTOPS_POSTGRES_ENTITLEMENT_ADMIN_PASSWORD_SOURCE_FILE: /run/secrets/postgres_entitlement_admin_password
+    secrets:
+      - postgres_migrator_password
+      - postgres_runtime_password
+      - postgres_entitlement_admin_password
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - control_plane
+
+  entitlement-admin:
+    profiles: [entitlement-admin]
+    image: "${AGENTOPS_IMAGE:?set AGENTOPS_IMAGE to the immutable AgentOps release digest}"
+    restart: "no"
+    user: "0:0"
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - DAC_OVERRIDE
+      - SETGID
+      - SETUID
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /run/agentops-runtime-secrets:rw,noexec,nosuid,size=1m,mode=0700,uid=1000,gid=1000
+    entrypoint:
+      - node
+      - /usr/local/lib/agentops/node-secret-entrypoint.mjs
+      - --postgres-entitlement-admin
+      - --entitlement-operator
+      - --
+      - npm
+      - run
+      - configure:workspace-entitlement
+      - --
+    command: []
+    environment:
+      AGENTOPS_DEPLOYMENT_MODE: production
+      AGENTOPS_CONTROL_PLANE_MODE: postgres
+      AGENTOPS_ENTITLEMENT_CONTROL_PLANE_URL: "${AGENTOPS_ENTITLEMENT_CONTROL_PLANE_URL:?set AGENTOPS_ENTITLEMENT_CONTROL_PLANE_URL to the externally trusted HTTPS origin}"
+      AGENTOPS_ENTITLEMENT_CONTROL_PLANE_ORIGIN: "${AGENTOPS_ENTITLEMENT_CONTROL_PLANE_ORIGIN:-}"
+      AGENTOPS_ENTITLEMENT_OPERATOR_USERNAME: "${AGENTOPS_ENTITLEMENT_OPERATOR_USERNAME:?set AGENTOPS_ENTITLEMENT_OPERATOR_USERNAME}"
+      AGENTOPS_POSTGRES_SCHEMA: public
+      AGENTOPS_POSTGRES_SSL: "false"
+      AGENTOPS_POSTGRES_ENTITLEMENT_ADMIN_HOST: postgres
+      AGENTOPS_POSTGRES_ENTITLEMENT_ADMIN_PORT: "5432"
+      AGENTOPS_POSTGRES_ENTITLEMENT_ADMIN_DATABASE: "${AGENTOPS_POSTGRES_DATABASE:-agentops}"
+      AGENTOPS_POSTGRES_ENTITLEMENT_ADMIN_USER: "${AGENTOPS_POSTGRES_ENTITLEMENT_ADMIN_USER:-agentops_entitlement_admin}"
+      AGENTOPS_POSTGRES_ENTITLEMENT_ADMIN_PASSWORD_SOURCE_FILE: /run/secrets/postgres_entitlement_admin_password
+      AGENTOPS_ENTITLEMENT_OPERATOR_PASSWORD_SOURCE_FILE: /run/secrets/entitlement_operator_password
+    secrets:
+      - postgres_entitlement_admin_password
+      - entitlement_operator_password
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      control-plane:
+        condition: service_healthy
+    networks:
+      - control_plane
+
+  control-plane:
+    image: "${AGENTOPS_IMAGE:?set AGENTOPS_IMAGE to the immutable AgentOps release digest}"
+    restart: unless-stopped
+    user: "0:0"
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - DAC_OVERRIDE
+      - SETGID
+      - SETUID
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /run/agentops-runtime-secrets:rw,noexec,nosuid,size=1m,mode=0700,uid=1000,gid=1000
+    entrypoint:
+      - node
+      - /usr/local/lib/agentops/node-secret-entrypoint.mjs
+      - --postgres-runtime
+      - --human-session
+      - --
+    command: [node, scripts/start.mjs]
+    environment:
+      <<: *control_plane_database_environment
+      AGENTOPS_POSTGRES_HOST: postgres
+      AGENTOPS_POSTGRES_PORT: "5432"
+      AGENTOPS_POSTGRES_DATABASE: "${AGENTOPS_POSTGRES_DATABASE:-agentops}"
+      AGENTOPS_POSTGRES_USER: "${AGENTOPS_POSTGRES_RUNTIME_USER:-agentops_runtime}"
+      AGENTOPS_POSTGRES_PASSWORD_SOURCE_FILE: /run/secrets/postgres_runtime_password
+      AGENTOPS_POSTGRES_MIGRATOR_HOST: ""
+      AGENTOPS_POSTGRES_MIGRATOR_PORT: ""
+      AGENTOPS_POSTGRES_MIGRATOR_DATABASE: ""
+      AGENTOPS_POSTGRES_MIGRATOR_USER: ""
+      AGENTOPS_POSTGRES_MIGRATOR_PASSWORD_SOURCE_FILE: ""
+      AGENTOPS_POSTGRES_RUNTIME_PASSWORD_SOURCE_FILE: ""
+      AGENTOPS_POSTGRES_ENTITLEMENT_ADMIN_PASSWORD_SOURCE_FILE: ""
+      AGENTOPS_HUMAN_SESSION_HMAC_KEY_SOURCE_FILE: /run/secrets/human_session_hmac_key
+      AGENTOPS_ALLOWED_ORIGINS: "${AGENTOPS_ALLOWED_ORIGINS:?set AGENTOPS_ALLOWED_ORIGINS}"
+      AGENTOPS_NEXT_HOST: 0.0.0.0
+      AGENTOPS_NEXT_PORT: "3001"
+    secrets:
+      - postgres_runtime_password
+      - human_session_hmac_key
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: [CMD, node, /usr/local/lib/agentops/node-healthcheck.mjs]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+    ports:
+      - "${AGENTOPS_BIND_ADDRESS:-127.0.0.1}:${AGENTOPS_PORT:-3001}:3001"
+    networks:
+      - control_plane
+
+volumes:
+  agentops_postgres_data:
+
+networks:
+  control_plane:
+    driver: bridge
+
+secrets:
+  postgres_migrator_password:
+    file: "${AGENTOPS_POSTGRES_MIGRATOR_PASSWORD_FILE:?set AGENTOPS_POSTGRES_MIGRATOR_PASSWORD_FILE}"
+  postgres_runtime_password:
+    file: "${AGENTOPS_POSTGRES_RUNTIME_PASSWORD_FILE:?set AGENTOPS_POSTGRES_RUNTIME_PASSWORD_FILE}"
+  postgres_entitlement_admin_password:
+    file: "${AGENTOPS_POSTGRES_ENTITLEMENT_ADMIN_PASSWORD_FILE:?set AGENTOPS_POSTGRES_ENTITLEMENT_ADMIN_PASSWORD_FILE}"
+  entitlement_operator_password:
+    file: "${AGENTOPS_ENTITLEMENT_OPERATOR_PASSWORD_FILE:?set AGENTOPS_ENTITLEMENT_OPERATOR_PASSWORD_FILE}"
+  human_session_hmac_key:
+    file: "${AGENTOPS_HUMAN_SESSION_HMAC_KEY_FILE:?set AGENTOPS_HUMAN_SESSION_HMAC_KEY_FILE}"

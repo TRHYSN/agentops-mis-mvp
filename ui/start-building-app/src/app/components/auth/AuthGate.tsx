@@ -10,17 +10,20 @@ import {
   RefreshCw,
 } from "lucide-react";
 import {
-  bootstrapHuman,
-  completeHumanPasswordRecovery,
   getHumanAuthStatus,
   HUMAN_AUTH_UNAUTHORIZED_EVENT,
+  HUMAN_SESSION_REQUIRED,
   loginHuman,
   logoutHuman,
-  pairHuman,
   setHumanAuthCsrf,
-  startHumanPasswordRecovery,
   type HumanAuthStatus,
 } from "../../data/liveApi";
+import {
+  bootstrapHuman,
+  completeHumanPasswordRecovery,
+  pairHuman,
+  startHumanPasswordRecovery,
+} from "@agentops-human-auth-local";
 import { HumanAuthContext } from "../../context/HumanAuthContext";
 import { pick, usePreferences } from "../../context/PreferencesContext";
 import { AppShell } from "../layout/AppShell";
@@ -66,8 +69,12 @@ export function AuthGate({ children }: { children: ReactNode }) {
   const [gate, setGate] = useState<GateState>("checking");
   const [status, setStatus] = useState<HumanAuthStatus | null>(null);
   const [username, setUsername] = useState("");
-  const [initialPairingHandoff] = useState(consumePairingHandoff);
-  const [initialSetupHandoff] = useState(consumeOwnerSetupHandoff);
+  const [initialPairingHandoff] = useState(() => HUMAN_SESSION_REQUIRED
+    ? { seen: false, value: "" }
+    : consumePairingHandoff());
+  const [initialSetupHandoff] = useState(() => HUMAN_SESSION_REQUIRED
+    ? { seen: false, value: "" }
+    : consumeOwnerSetupHandoff());
   const [password, setPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
   const [pairingSecret, setPairingSecret] = useState(initialPairingHandoff.value);
@@ -90,7 +97,7 @@ export function AuthGate({ children }: { children: ReactNode }) {
     try {
       const next = await getHumanAuthStatus();
       setStatus(next);
-      if (pairingHandoffActive) {
+      if (!HUMAN_SESSION_REQUIRED && pairingHandoffActive) {
         setError(pairingSecret ? "" : authErrorMessage("invalid_pairing_secret", locale));
         setGate("pairing");
       }
@@ -107,6 +114,7 @@ export function AuthGate({ children }: { children: ReactNode }) {
   }, [refresh]);
 
   useEffect(() => {
+    if (HUMAN_SESSION_REQUIRED) return;
     const handleSetupHandoff = () => {
       const pairing = consumePairingHandoff();
       if (pairing.seen) {
@@ -177,8 +185,8 @@ export function AuthGate({ children }: { children: ReactNode }) {
         required: true,
         authenticated: true,
         bootstrap_required: false,
-        password_recovery_available: true,
-        password_recovery_local_only: true,
+        password_recovery_available: !HUMAN_SESSION_REQUIRED,
+        password_recovery_local_only: !HUMAN_SESSION_REQUIRED,
         user: session.user,
       });
       setPassword("");
@@ -355,7 +363,9 @@ export function AuthGate({ children }: { children: ReactNode }) {
             meta={(
               <p data-testid="human-auth-host-boundary" className="mt-3 flex items-center gap-1.5 text-[11px]" style={{ color: "var(--mis-muted)" }}>
                 <LockKeyhole size={11} aria-hidden="true" />
-                {pick(locale, { zh: "账户与运行数据仅保留在主机", en: "Account and runtime data stay on the host" })}
+                {HUMAN_SESSION_REQUIRED
+                  ? pick(locale, { zh: "账户与运行数据保留在客户控制平面", en: "Account and runtime data stay in the customer control plane" })
+                  : pick(locale, { zh: "账户与运行数据仅保留在主机", en: "Account and runtime data stay on the host" })}
               </p>
             )}
           >

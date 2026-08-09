@@ -2,15 +2,9 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { Ban, CheckCircle2, Copy, KeyRound, LoaderCircle, LogOut, Monitor, Power, RefreshCw, ShieldCheck, Smartphone, UserPlus, X } from "lucide-react";
 import {
   confirmHostRelayTransition,
-  createHumanPairingInvitation,
+  HUMAN_SESSION_REQUIRED,
   loadHostRelay,
-  loadHumanBrowserSessions,
-  loadHumanPairedDevices,
-  loadHumanPairingInvitations,
   prepareHostRelayTransition,
-  revokeHumanBrowserSession,
-  revokeHumanPairedDevice,
-  revokeHumanPairingInvitation,
   type HostRelayAction,
   type HostRelayDisplayState,
   type HostRelayStatusPayload,
@@ -21,6 +15,15 @@ import {
   type HumanPairingInvitationsPayload,
   type HumanPairingRole,
 } from "../../data/liveApi";
+import {
+  createHumanPairingInvitation,
+  loadHumanBrowserSessions,
+  loadHumanPairedDevices,
+  loadHumanPairingInvitations,
+  revokeHumanBrowserSession,
+  revokeHumanPairedDevice,
+  revokeHumanPairingInvitation,
+} from "@agentops-human-auth-local";
 import { useHumanAuth } from "../../context/HumanAuthContext";
 import { pick, usePreferences } from "../../context/PreferencesContext";
 import { WorkspaceSettingsPage, WorkspaceSettingsSection } from "../shared/WorkspaceSettings";
@@ -249,8 +252,8 @@ export function AccountSecurity() {
     },
   });
 
-  const canManageSessions = required && user?.role === "owner";
-  const canManageRelay = required && user?.role === "owner";
+  const canManageSessions = !HUMAN_SESSION_REQUIRED && required && user?.role === "owner";
+  const canManageRelay = !HUMAN_SESSION_REQUIRED && required && user?.role === "owner";
 
   const refreshRelay = useCallback(async () => {
     if (!canManageRelay) {
@@ -464,8 +467,21 @@ export function AccountSecurity() {
             </div>
           ))}
         </dl>
+        {HUMAN_SESSION_REQUIRED && required && (
+          <div className="flex justify-end pt-4">
+            <button
+              type="button"
+              onClick={() => void logout()}
+              className="inline-flex h-8 items-center gap-1.5 rounded border px-2.5 text-xs"
+              style={{ borderColor: "var(--mis-border)", color: "var(--mis-dim)", background: "var(--mis-surface)" }}
+            >
+              <LogOut size={14} /> {copy.signOut}
+            </button>
+          </div>
+        )}
       </WorkspaceSettingsSection>
 
+      {!HUMAN_SESSION_REQUIRED && (<>
       <WorkspaceSettingsSection
         title={copy.relayTitle}
         description={copy.relayHint}
@@ -812,6 +828,7 @@ export function AccountSecurity() {
           </div>
         </div>
       </WorkspaceSettingsSection>
+      </>)}
     </WorkspaceSettingsPage>
   );
 }

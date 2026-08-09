@@ -10,6 +10,9 @@ ROOT = Path(__file__).resolve().parents[1]
 AUTH = ROOT / "ui" / "start-building-app" / "src" / "app" / "components" / "auth" / "AuthGate.tsx"
 ACCOUNT = ROOT / "ui" / "start-building-app" / "src" / "app" / "components" / "pages" / "AccountSecurity.tsx"
 API = ROOT / "ui" / "start-building-app" / "src" / "app" / "data" / "liveApi.ts"
+LOCAL_AUTH_API = (
+    ROOT / "ui" / "start-building-app" / "src" / "app" / "data" / "humanAuthLocalApi.ts"
+)
 
 
 def require(condition: bool, message: str, failures: list[str]) -> None:
@@ -22,6 +25,7 @@ def main() -> int:
     auth = AUTH.read_text(encoding="utf-8")
     account = ACCOUNT.read_text(encoding="utf-8")
     api = API.read_text(encoding="utf-8")
+    local_auth_api = LOCAL_AUTH_API.read_text(encoding="utf-8")
 
     require('params.get("pair")' in auth, "AuthGate does not consume #pair", failures)
     require(
@@ -98,9 +102,11 @@ def main() -> int:
         '"/human-auth/devices"',
         '"/human-auth/pair"',
     ):
-        require(route in api, f"frontend API contract missing {route}", failures)
+        require(route in local_auth_api, f"Free Local API contract missing {route}", failures)
     require(
-        "HumanAuthRequestError" in api and "boundedHumanAuthErrorCode" in api,
+        "HumanAuthRequestError" in api
+        and "boundedHumanAuthErrorCode" in api
+        and "humanAuthJson" in local_auth_api,
         "pairing API errors are not reduced to bounded codes",
         failures,
     )

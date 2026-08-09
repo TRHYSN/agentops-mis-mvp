@@ -228,6 +228,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
+          timeout 120s node deploy/byoc/release-bundle-contract.mjs
           timeout 120s python3 scripts/redaction_policy_smoke.py
           timeout 120s python3 scripts/sqlite_pragmas_smoke.py
           timeout 120s python3 scripts/sqlite_connection_lifecycle_smoke.py
@@ -606,6 +607,9 @@ jobs:
         run: >-
           timeout 180s python3
           scripts/byoc_restore_guardian_real_postgres_smoke.py
+
+      - name: Verify source-free BYOC customer release contract
+        run: node deploy/byoc/release-bundle-contract.mjs
 
       - name: Verify TypeScript control-plane mode
         working-directory: ui/next-app

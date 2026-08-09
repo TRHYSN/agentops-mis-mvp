@@ -2,7 +2,7 @@ import { Link, useParams } from "react-router";
 import { CheckCircle, Download, FileText, ShieldCheck, Users } from "lucide-react";
 import { StatusBadge } from "../shared/StatusBadge";
 import { RiskBadge } from "../shared/RiskBadge";
-import { loadAgents, loadDashboard, loadTaskDetail, useLiveData } from "../../data/liveApi";
+import { apiResourceUrl, HUMAN_SESSION_REQUIRED, loadAgents, loadDashboard, loadTaskDetail, useLiveData } from "../../data/liveApi";
 import { pick, usePreferences } from "../../context/PreferencesContext";
 
 export function TaskDetail() {
@@ -426,10 +426,10 @@ export function TaskDetail() {
                 <p className="text-[11px] leading-relaxed mt-2" style={{ color: "var(--mis-dim)" }}>{artifact.summary}</p>
                 <div className="mt-2 flex items-center justify-between gap-2">
                   <div className="text-[10px]" style={{ color: "var(--mis-muted)" }}>{new Date(artifact.created_at).toLocaleString(locale === "zh" ? "zh-CN" : "en-US")}</div>
-                  {hasApprovedDelivery && (
+                  {!HUMAN_SESSION_REQUIRED && hasApprovedDelivery && (
                     <a
                       data-testid="approved-artifact-download"
-                      href={`/mis-api/artifacts/${encodeURIComponent(artifact.artifact_id)}/download`}
+                      href={apiResourceUrl(`/artifacts/${encodeURIComponent(artifact.artifact_id)}/download`)}
                       download
                       title={copy.downloadApproved}
                       aria-label={copy.downloadApproved}

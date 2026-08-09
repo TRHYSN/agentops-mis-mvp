@@ -29,11 +29,15 @@ or mutating any ledger.
   appear, token-like material appears, or commercial packet docs embed a stale
   hard-coded SHA.
 - [x] The command is wired into CI and the release evidence command manifest.
+- [x] The shared CI readback treats top-level `BYOC Customer Release Acceptance`
+  as required exact-SHA promotion evidence. It runs on the commercial
+  integration branch push without wiring package-write permission into
+  pull-request CI.
 
 ## Known Limitations
 
 - This is a current-evidence status packet only. It does not create promotion,
   receipt or rerun packets.
-- Strict promotion readiness may remain false on local branches until the exact
-  branch head has green CI and the working tree is clean.
-
+- Strict promotion readiness remains false until the exact branch head has green
+  CI, all required BYOC workflow evidence including customer release is green,
+  and the working tree is clean.

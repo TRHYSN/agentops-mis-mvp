@@ -17,7 +17,21 @@ ACCOUNT_SECURITY = UI_COMPONENTS / "pages" / "AccountSecurity.tsx"
 WORKSPACE_SETTINGS = UI_COMPONENTS / "shared" / "WorkspaceSettings.tsx"
 PREFERENCES = ROOT / "ui" / "start-building-app" / "src" / "app" / "context" / "PreferencesContext.tsx"
 LIVE_API = ROOT / "ui" / "start-building-app" / "src" / "app" / "data" / "liveApi.ts"
-FILES = (INDEX_HTML, AUTH_GATE, APP_SHELL, SIDEBAR, TOPBAR, ACCOUNT_SECURITY, WORKSPACE_SETTINGS, PREFERENCES, LIVE_API)
+LOCAL_AUTH_API = (
+    ROOT / "ui" / "start-building-app" / "src" / "app" / "data" / "humanAuthLocalApi.ts"
+)
+FILES = (
+    INDEX_HTML,
+    AUTH_GATE,
+    APP_SHELL,
+    SIDEBAR,
+    TOPBAR,
+    ACCOUNT_SECURITY,
+    WORKSPACE_SETTINGS,
+    PREFERENCES,
+    LIVE_API,
+    LOCAL_AUTH_API,
+)
 
 
 def load_source(path: Path, failures: list[str]) -> str:
@@ -57,6 +71,7 @@ def main() -> int:
     workspace_settings = sources[WORKSPACE_SETTINGS]
     preferences = sources[PREFERENCES]
     live_api = sources[LIVE_API]
+    local_auth_api = sources[LOCAL_AUTH_API]
     checks: dict[str, bool] = {}
 
     record(
@@ -338,7 +353,7 @@ def main() -> int:
     record(
         checks,
         "setup_code_remains_required_authority",
-        "setup_code: string;" in live_api,
+        "setup_code: string;" in local_auth_api,
     )
     record(
         checks,
@@ -346,10 +361,10 @@ def main() -> int:
         "startHumanPasswordRecovery" in auth_gate
         and "startHumanPasswordRecovery(setupCode)" in auth_gate
         and "completeHumanPasswordRecovery" in auth_gate
-        and '"/human-auth/password-recovery/start"' in live_api
-        and "JSON.stringify({ setup_code: setupCode })" in live_api
-        and '"/human-auth/password-recovery/complete"' in live_api
-        and "recovery_authority: string;" in live_api,
+        and '"/human-auth/password-recovery/start"' in local_auth_api
+        and "JSON.stringify({ setup_code: setupCode })" in local_auth_api
+        and '"/human-auth/password-recovery/complete"' in local_auth_api
+        and "recovery_authority: string;" in local_auth_api,
     )
     record(
         checks,

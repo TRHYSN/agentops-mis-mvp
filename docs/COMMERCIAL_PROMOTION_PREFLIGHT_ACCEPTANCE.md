@@ -24,18 +24,23 @@ python3 scripts/commercial_promotion_preflight_smoke.py --require-promotable
 ## Expected Behavior
 
 - The default command passes when wiring and safety checks are valid.
-- `promotion_ready` remains `false` while CI is missing, pending, failed, or not
-  matched to the exact current HEAD.
+- `promotion_ready` remains `false` while any required workflow is missing,
+  pending, failed, or not matched to the exact current HEAD.
 - `promotion_ready` is only `true` when the working tree is clean, the branch is
-  not behind upstream, exact-head CI is completed successfully, and no safety
-  failures are present.
+  not behind upstream, all four exact-head workflow lanes are completed
+  successfully, and no safety failures are present.
+- The required lanes are `AgentOps MIS CI`, its `BYOC Docker Compose Acceptance`
+  reusable job, `BYOC Cross-Schema v9 to v11 Acceptance`, and the top-level
+  `BYOC Customer Release Acceptance` workflow triggered by the exact commercial
+  integration branch push or a later manual rerun.
 - `--require-promotable` fails until the same strict conditions are true.
 
 ## Evidence Shape
 
 The packet emits `commercial_promotion_preflight` evidence with explicit
-`blocking_reasons`. A clean packet with pending CI is still useful review input,
-but it is not promotable until `blocking_reasons` is empty.
+`promotion_workflows` and `blocking_reasons`. A clean packet with pending CI is
+still useful review input, but it is not promotable until `blocking_reasons` is
+empty.
 
 ## Safety Boundaries
 

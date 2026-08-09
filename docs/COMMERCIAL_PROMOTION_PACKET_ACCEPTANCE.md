@@ -24,19 +24,22 @@ python3 scripts/commercial_promotion_packet_smoke.py --require-ready
 ## Expected Behavior
 
 - The default command passes when packet wiring and safety checks are valid.
-- `promotion_packet_ready` remains `false` while exact-head CI is missing,
-  pending, failed, or not matched to the current HEAD.
+- `promotion_packet_ready` remains `false` while any required exact-head
+  workflow is missing, pending, failed, or not matched to the current HEAD.
 - `promotion_packet_ready` is only `true` when the working tree is clean, the
-  branch is not behind upstream, exact-head CI is completed successfully, and
-  no safety failures are present.
+  branch is not behind upstream, all four required workflow lanes are completed
+  successfully, and no safety failures are present.
+- The required lanes include the top-level `BYOC Customer Release Acceptance`.
+  It runs for commercial integration branch pushes and stays outside
+  pull-request CI, so package write is not granted to arbitrary PR runs.
 - `--require-ready` fails until the same strict conditions are true.
 
 ## Evidence Shape
 
 The packet includes `included_packets` for current evidence status, release
 evidence, commercial handoff status, and promotion preflight. It also emits
-`evidence_refs` that point reviewers to the source commands and docs instead of
-copying rendered packet snapshots.
+`promotion_workflows` plus `evidence_refs` that point reviewers to the source
+commands and docs instead of copying rendered packet snapshots.
 
 ## Safety Boundaries
 

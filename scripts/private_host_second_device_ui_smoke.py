@@ -25,7 +25,10 @@ SECRET_PATTERNS = [
 EXPECTED = {
     "route_import": (APP, 'import { PrivateHostAcceptance } from "./components/pages/PrivateHostAcceptance";'),
     "route_path": (APP, 'path="/admin/private-host-acceptance" element={<PrivateHostAcceptance />}'),
+    "route_local_only": (APP, "!HUMAN_SESSION_REQUIRED"),
     "sidebar_path": (SIDEBAR, 'path: "/admin/private-host-acceptance"'),
+    "sidebar_local_only": (SIDEBAR, "localOnly: true"),
+    "sidebar_local_filter": (SIDEBAR, "!item.localOnly || !HUMAN_SESSION_REQUIRED"),
     "sidebar_en": (SIDEBAR, 'privateHostAcceptance: "Private Host Acceptance"'),
     "sidebar_zh": (SIDEBAR, 'privateHostAcceptance: "私有主机验收"'),
     "page_boundary_en": (PAGE, "Non-authoritative browser checklist"),
@@ -54,7 +57,7 @@ EXPECTED = {
     "authority_hash_validation": (LIVE_API, "/^[a-f0-9]{64}$/"),
     "authority_section": (PAGE, 'data-testid="private-host-authority-receipt"'),
     "authority_owner_gate": (PAGE, 'user?.role !== "owner"'),
-    "authority_download": (PAGE, '/mis-api/host/acceptance-receipts/${encodeURIComponent(authorityReceipt.receipt_id)}/download'),
+    "authority_download": (PAGE, 'apiResourceUrl(`/host/acceptance-receipts/${encodeURIComponent(authorityReceipt.receipt_id)}/download`)'),
     "authority_en": (PAGE, 'authorityTitle: "Owner authority receipt"'),
     "authority_zh": (PAGE, 'authorityTitle: "Owner 权威回执"'),
 }

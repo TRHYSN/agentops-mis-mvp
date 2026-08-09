@@ -1,0 +1,73 @@
+{
+  "schemaVersion": "agentops-pixel-office-asset-pack/v1",
+  "id": "agentops-pixel-office-code-rendered-v1",
+  "version": "1.0.0",
+  "provenance": "first_party",
+  "license": "PROJECT_OWNED",
+  "distribution": "source_rendered",
+  "ownershipScope": "custom_visual_primitives_only",
+  "thirdPartyAssets": [],
+  "runtimeCodeDependencies": [
+    {
+      "package": "react",
+      "license": "MIT",
+      "classification": "runtime_code_not_art_asset"
+    },
+    {
+      "package": "lucide-react",
+      "license": "ISC",
+      "classification": "icon_code_dependency_not_art_asset"
+    }
+  ],
+  "sourceDependencyClosure": [
+    "ui/start-building-app/src/app/components/pixel/AgentSprite.tsx",
+    "ui/start-building-app/src/app/components/pixel/PixelOperatingMap.tsx",
+    "ui/start-building-app/src/app/components/pixel/PixelZone.tsx",
+    "ui/start-building-app/src/app/components/pixel/TaskCardSprite.tsx",
+    "ui/start-building-app/src/app/components/pixel/ZoneInspector.tsx",
+    "ui/start-building-app/src/app/components/pixel/pixelModel.ts",
+    "ui/start-building-app/src/app/components/pixel/pixelOfficeTheme.ts",
+    "ui/start-building-app/src/app/components/pixel/pixelOfficeThemePacks.ts",
+    "ui/start-building-app/src/app/components/shared/RiskBadge.tsx",
+    "ui/start-building-app/src/app/components/shared/StatusBadge.tsx",
+    "ui/start-building-app/src/app/context/PreferencesContext.tsx",
+    "ui/start-building-app/src/app/data/liveApi.ts",
+    "ui/start-building-app/src/app/data/mockData.ts",
+    "ui/start-building-app/src/app/spatial/contracts.ts",
+    "ui/start-building-app/src/app/spatial/researchDistrictSemanticContract.ts"
+  ],
+  "sources": [
+    {
+      "path": "ui/start-building-app/src/app/components/pixel/PixelOperatingMap.tsx",
+      "roles": ["terrain", "effects", "scene-composition"]
+    },
+    {
+      "path": "ui/start-building-app/src/app/components/pixel/PixelZone.tsx",
+      "roles": ["buildings", "interiors", "room-materials"]
+    },
+    {
+      "path": "ui/start-building-app/src/app/components/pixel/TaskCardSprite.tsx",
+      "roles": ["props", "task-markers"]
+    },
+    {
+      "path": "ui/start-building-app/src/app/components/pixel/AgentSprite.tsx",
+      "roles": ["avatars", "agent-state-silhouettes"]
+    },
+    {
+      "path": "ui/start-building-app/src/app/components/pixel/ZoneInspector.tsx",
+      "roles": ["zone-inspection-composition"]
+    },
+    {
+      "path": "ui/start-building-app/src/app/components/pixel/pixelModel.ts",
+      "roles": ["scene-model", "zone-layout", "display-copy"]
+    },
+    {
+      "path": "ui/start-building-app/src/app/components/pixel/pixelOfficeTheme.ts",
+      "roles": ["hud", "materials", "theme-contract"]
+    },
+    {
+      "path": "ui/start-building-app/src/app/components/pixel/pixelOfficeThemePacks.ts",
+      "roles": ["palettes", "materials", "character-variants"]
+    }
+  ]
+}

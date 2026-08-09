@@ -1,7 +1,7 @@
 {
   "schemaVersion": "spatial-art-kit/v0",
   "id": "warm-research-v0",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "label": {
     "en": "Warm Research Village",
     "zh": "温暖研究村"
@@ -51,58 +51,58 @@
     {
       "id": "terrain.research-garden",
       "kind": "terrain-tileset",
-      "status": "planned",
-      "provenance": "planned_first_party",
+      "status": "ready",
+      "provenance": "first_party",
       "license": "PROJECT_OWNED",
-      "sourcePath": "src/assets/spatial/warm-research/terrain.png"
+      "sourcePath": "src/app/components/pixel/PixelOperatingMap.tsx"
     },
     {
       "id": "buildings.research-campus",
       "kind": "building-tileset",
-      "status": "planned",
-      "provenance": "planned_first_party",
+      "status": "ready",
+      "provenance": "first_party",
       "license": "PROJECT_OWNED",
-      "sourcePath": "src/assets/spatial/warm-research/buildings.png"
+      "sourcePath": "src/app/components/pixel/PixelZone.tsx"
     },
     {
       "id": "interiors.ai-papers-house",
       "kind": "interior-tileset",
-      "status": "planned",
-      "provenance": "planned_first_party",
+      "status": "ready",
+      "provenance": "first_party",
       "license": "PROJECT_OWNED",
-      "sourcePath": "src/assets/spatial/warm-research/interiors.png"
+      "sourcePath": "src/app/components/pixel/PixelZone.tsx"
     },
     {
       "id": "props.research-tools",
       "kind": "prop-atlas",
-      "status": "planned",
-      "provenance": "planned_first_party",
+      "status": "ready",
+      "provenance": "first_party",
       "license": "PROJECT_OWNED",
-      "sourcePath": "src/assets/spatial/warm-research/props.png"
+      "sourcePath": "src/app/components/pixel/TaskCardSprite.tsx"
     },
     {
       "id": "avatars.research-agents",
       "kind": "avatar-atlas",
-      "status": "planned",
-      "provenance": "planned_first_party",
+      "status": "ready",
+      "provenance": "first_party",
       "license": "PROJECT_OWNED",
-      "sourcePath": "src/assets/spatial/warm-research/agents.png"
+      "sourcePath": "src/app/components/pixel/AgentSprite.tsx"
     },
     {
       "id": "effects.research-signals",
       "kind": "effect-atlas",
-      "status": "planned",
-      "provenance": "planned_first_party",
+      "status": "ready",
+      "provenance": "first_party",
       "license": "PROJECT_OWNED",
-      "sourcePath": "src/assets/spatial/warm-research/effects.png"
+      "sourcePath": "src/app/components/pixel/PixelOperatingMap.tsx"
     },
     {
       "id": "hud.research-notebook",
       "kind": "hud-skin",
-      "status": "planned",
-      "provenance": "planned_first_party",
+      "status": "ready",
+      "provenance": "first_party",
       "license": "PROJECT_OWNED",
-      "sourcePath": "src/assets/spatial/warm-research/hud.png"
+      "sourcePath": "src/app/components/pixel/pixelOfficeTheme.ts"
     }
   ]
 }

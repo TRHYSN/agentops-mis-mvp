@@ -13,6 +13,7 @@ from github_ci_evidence import (
     BYOC_COMPOSE_REUSABLE_JOB,
     BYOC_COMPOSE_WORKFLOW,
     BYOC_CROSS_SCHEMA_WORKFLOW,
+    BYOC_CUSTOMER_RELEASE_WORKFLOW,
     MAIN_CI_WORKFLOW,
     ci_from_gh,
     ci_status,
@@ -21,6 +22,7 @@ from github_ci_evidence import (
     fetch_url,
     parse_run_page_for_head_success,
     redact,
+    run as run_command,
 )
 
 
@@ -129,6 +131,16 @@ def main() -> int:
             "url": "https://github.com/example/repo/actions/runs/30629180908",
             "workflowName": MAIN_CI_WORKFLOW,
         },
+        {
+            "conclusion": "success",
+            "createdAt": "2026-07-31T12:03:54Z",
+            "databaseId": 30629181001,
+            "headSha": REGRESSION_HEAD,
+            "name": BYOC_CUSTOMER_RELEASE_WORKFLOW,
+            "status": "completed",
+            "url": "https://github.com/example/repo/actions/runs/30629181001",
+            "workflowName": BYOC_CUSTOMER_RELEASE_WORKFLOW,
+        },
     ]
     parent_view = {
         "conclusion": "cancelled",
@@ -186,6 +198,8 @@ def main() -> int:
         failures.append(f"87ee537 Compose reusable job must remain failed: {regression_evidence}")
     if regression_evidence["byoc_cross_schema_v9_to_v11"].get("conclusion") != "success":
         failures.append(f"87ee537 cross-schema evidence must remain independently successful: {regression_evidence}")
+    if regression_evidence["byoc_customer_release"].get("conclusion") != "success":
+        failures.append(f"87ee537 customer release evidence must remain independently successful: {regression_evidence}")
     if workflow_evidence.get("ready") is not False:
         failures.append(f"87ee537 must not be promotion-ready: {workflow_evidence}")
 
@@ -203,6 +217,14 @@ def main() -> int:
             f"incomplete HTTP response did not fail closed: {incomplete_error!r}"
         )
 
+    with patch(
+        "github_ci_evidence.subprocess.run",
+        side_effect=subprocess.TimeoutExpired(["gh", "run", "list"], 15),
+    ):
+        timed_out = run_command(Path.cwd(), ["gh", "run", "list"], timeout=15)
+    if timed_out.returncode != 124 or timed_out.stderr != "command_timeout_after_15s":
+        failures.append(f"command timeout did not fail closed: {timed_out}")
+
     output = {
         "ok": not failures,
         "operation": "github_ci_evidence_smoke",
@@ -219,11 +241,16 @@ def main() -> int:
                 "agentops_mis_ci": regression_evidence["agentops_mis_ci"].get("conclusion"),
                 "byoc_compose": regression_evidence["byoc_compose"].get("conclusion"),
                 "byoc_cross_schema_v9_to_v11": regression_evidence["byoc_cross_schema_v9_to_v11"].get("conclusion"),
+                "byoc_customer_release": regression_evidence["byoc_customer_release"].get("conclusion"),
                 "promotion_ready": workflow_evidence.get("ready"),
             },
             "incomplete_http_response_failed_closed": (
                 incomplete_body is None
                 and "IncompleteRead" in str(incomplete_error)
+            ),
+            "command_timeout_failed_closed": (
+                timed_out.returncode == 124
+                and timed_out.stderr == "command_timeout_after_15s"
             ),
         },
         "safety": {

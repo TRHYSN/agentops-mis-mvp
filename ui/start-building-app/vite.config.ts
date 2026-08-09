@@ -42,6 +42,12 @@ export default defineConfig(({ mode }) => {
       alias: {
         // Alias @ to the src directory
         '@': path.resolve(__dirname, './src'),
+        '@agentops-human-auth-local': path.resolve(
+          __dirname,
+          transport.humanSessionRequired
+            ? './src/app/data/humanAuthCommercialUnavailable.ts'
+            : './src/app/data/humanAuthLocalApi.ts',
+        ),
       },
     },
     server: {

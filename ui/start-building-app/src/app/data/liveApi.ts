@@ -12,9 +12,14 @@ import type {
 } from "./mockData";
 
 const API_BASE = __AGENTOPS_API_BASE__;
-const HUMAN_SESSION_REQUIRED = __AGENTOPS_HUMAN_SESSION_REQUIRED__;
+export const HUMAN_SESSION_REQUIRED = __AGENTOPS_HUMAN_SESSION_REQUIRED__;
 const HUMAN_AUTH_CSRF_KEY = "agentops-human-auth-csrf";
 export const HUMAN_AUTH_UNAUTHORIZED_EVENT = "agentops:human-auth-unauthorized";
+
+export function apiResourceUrl(path: string): string {
+  if (!path.startsWith("/")) throw new Error("api_resource_path_must_be_absolute");
+  return `${API_BASE}${path}`;
+}
 const HUMAN_SESSION_UNAUTHORIZED_ERRORS = new Set([
   "human_auth_required",
   "human_session_invalid",
@@ -292,50 +297,84 @@ async function humanAwareFetch(path: string, init?: RequestInit): Promise<Respon
 }
 
 export async function getHumanAuthStatus(): Promise<HumanAuthStatus> {
+  if (HUMAN_SESSION_REQUIRED) {
+    const response = await humanAwareFetch("/human-auth/session");
+    if (await isHumanSessionUnauthorized(response)) {
+      setHumanAuthCsrf(null);
+      return {
+        required: true,
+        authenticated: false,
+        bootstrap_required: false,
+        password_recovery_available: false,
+        password_recovery_local_only: false,
+      };
+    }
+    if (!response.ok) {
+      throw new Error(`${response.status} ${response.statusText}: ${await response.text()}`);
+    }
+    const payload = await response.json() as Record<string, unknown>;
+    const rawUser = parseJsonObject(payload.user);
+    const memberships = asArray<Record<string, unknown>>(payload.memberships);
+    const primaryMembership = memberships[0] || {};
+    const userId = String(rawUser.user_id || "");
+    const displayName = String(rawUser.name || userId);
+    const csrfToken = String(payload.csrf_token || "");
+    if (!userId || !/^[a-f0-9]{64}$/.test(csrfToken)) {
+      throw new Error("human_session_identity_invalid");
+    }
+    setHumanAuthCsrf(csrfToken);
+    return {
+      required: true,
+      authenticated: true,
+      bootstrap_required: false,
+      password_recovery_available: false,
+      password_recovery_local_only: false,
+      csrf_token: csrfToken,
+      user: {
+        account_id: userId,
+        user_id: userId,
+        username: displayName,
+        display_name: displayName,
+        workspace_id: String(primaryMembership.workspace_id || ""),
+        role: String(primaryMembership.role || ""),
+      },
+    };
+  }
   const status = await apiJson<HumanAuthStatus>("/human-auth/status");
   if (status.csrf_token) setHumanAuthCsrf(status.csrf_token);
   return status;
 }
 
 export async function loginHuman(input: { username: string; password: string }): Promise<HumanAuthSession> {
-  const session = await apiJson<HumanAuthSession>("/human-auth/login", {
+  const raw = await apiJson<Record<string, unknown>>("/human-auth/login", {
     method: "POST",
     body: JSON.stringify(input),
   });
-  setHumanAuthCsrf(session.csrf_token);
-  return session;
-}
-
-export async function bootstrapHuman(input: {
-  setup_code: string;
-  username: string;
-  password: string;
-  display_name?: string;
-}): Promise<HumanAuthSession> {
-  const session = await apiJson<HumanAuthSession>("/human-auth/bootstrap", {
-    method: "POST",
-    body: JSON.stringify(input),
-  });
-  setHumanAuthCsrf(session.csrf_token);
-  return session;
-}
-
-export async function startHumanPasswordRecovery(setupCode: string): Promise<HumanPasswordRecoveryStart> {
-  return apiJson<HumanPasswordRecoveryStart>("/human-auth/password-recovery/start", {
-    method: "POST",
-    body: JSON.stringify({ setup_code: setupCode }),
-  });
-}
-
-export async function completeHumanPasswordRecovery(input: {
-  recovery_authority: string;
-  username: string;
-  password: string;
-}): Promise<HumanAuthSession> {
-  const session = await apiJson<HumanAuthSession>("/human-auth/password-recovery/complete", {
-    method: "POST",
-    body: JSON.stringify(input),
-  });
+  if (HUMAN_SESSION_REQUIRED) {
+    const rawUser = parseJsonObject(raw.user);
+    const memberships = asArray<Record<string, unknown>>(raw.memberships);
+    const primaryMembership = memberships[0] || {};
+    const userId = String(rawUser.user_id || "");
+    const displayName = String(rawUser.name || userId);
+    const csrfToken = String(raw.csrf_token || "");
+    if (!userId || !/^[a-f0-9]{64}$/.test(csrfToken)) {
+      throw new Error("human_session_identity_invalid");
+    }
+    const session: HumanAuthSession = {
+      csrf_token: csrfToken,
+      user: {
+        account_id: userId,
+        user_id: userId,
+        username: displayName,
+        display_name: displayName,
+        workspace_id: String(primaryMembership.workspace_id || ""),
+        role: String(primaryMembership.role || ""),
+      },
+    };
+    setHumanAuthCsrf(session.csrf_token);
+    return session;
+  }
+  const session = raw as unknown as HumanAuthSession;
   setHumanAuthCsrf(session.csrf_token);
   return session;
 }
@@ -343,17 +382,6 @@ export async function completeHumanPasswordRecovery(input: {
 export async function logoutHuman(): Promise<void> {
   await apiJson<Record<string, unknown>>("/human-auth/logout", { method: "POST", body: "{}" });
   setHumanAuthCsrf(null);
-}
-
-export async function loadHumanBrowserSessions(): Promise<HumanBrowserSessionsPayload> {
-  return apiJson<HumanBrowserSessionsPayload>("/human-auth/sessions");
-}
-
-export async function revokeHumanBrowserSession(input: { session_ref: string } | { all_other: true }): Promise<HumanBrowserSessionRevokePayload> {
-  return apiJson<HumanBrowserSessionRevokePayload>("/human-auth/sessions/revoke", {
-    method: "POST",
-    body: JSON.stringify(input),
-  });
 }
 
 function hostRelayRecord(value: unknown): Record<string, unknown> {
@@ -485,7 +513,7 @@ function boundedHumanAuthErrorCode(value: unknown): string {
   return /^[a-z0-9_]{1,64}$/.test(code) ? code : "human_auth_request_failed";
 }
 
-async function safeHumanAuthJson<T>(path: string, init?: RequestInit): Promise<T> {
+export async function humanAuthJson<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await humanAwareFetch(path, init);
   if (!response.ok) {
     let code = "human_auth_request_failed";
@@ -498,54 +526,6 @@ async function safeHumanAuthJson<T>(path: string, init?: RequestInit): Promise<T
     throw new HumanAuthRequestError(code);
   }
   return response.json() as Promise<T>;
-}
-
-export async function loadHumanPairingInvitations(): Promise<HumanPairingInvitationsPayload> {
-  return safeHumanAuthJson<HumanPairingInvitationsPayload>("/human-auth/pairing-invitations");
-}
-
-export async function createHumanPairingInvitation(input: {
-  role: HumanPairingRole;
-  expires_in_seconds: number;
-  label?: string;
-}): Promise<HumanPairingInvitationCreated> {
-  return safeHumanAuthJson<HumanPairingInvitationCreated>("/human-auth/pairing-invitations", {
-    method: "POST",
-    body: JSON.stringify(input),
-  });
-}
-
-export async function revokeHumanPairingInvitation(invitationRef: string): Promise<Record<string, unknown>> {
-  return safeHumanAuthJson<Record<string, unknown>>(`/human-auth/pairing-invitations/${encodeURIComponent(invitationRef)}/revoke`, {
-    method: "POST",
-    body: "{}",
-  });
-}
-
-export async function loadHumanPairedDevices(): Promise<HumanPairedDevicesPayload> {
-  return safeHumanAuthJson<HumanPairedDevicesPayload>("/human-auth/devices");
-}
-
-export async function revokeHumanPairedDevice(deviceRef: string): Promise<Record<string, unknown>> {
-  return safeHumanAuthJson<Record<string, unknown>>(`/human-auth/devices/${encodeURIComponent(deviceRef)}/revoke`, {
-    method: "POST",
-    body: "{}",
-  });
-}
-
-export async function pairHuman(input: {
-  pairing_secret: string;
-  username: string;
-  password: string;
-  display_name?: string;
-  device_label?: string;
-}): Promise<HumanAuthSession> {
-  const session = await safeHumanAuthJson<HumanAuthSession>("/human-auth/pair", {
-    method: "POST",
-    body: JSON.stringify(input),
-  });
-  setHumanAuthCsrf(session.csrf_token);
-  return session;
 }
 
 export interface DashboardMetrics {

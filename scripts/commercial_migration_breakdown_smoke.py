@@ -50,16 +50,17 @@ def main() -> int:
     for label, marker in required_markers.items():
         require(marker in text, f"missing breakdown marker {label}: {marker}", failures)
     normalized_text = " ".join(text.split())
-    require(
-        "final same-SHA dual-runtime acceptance and exact-head CI" in normalized_text
-        and (
-            "Lane 7 clean-customer image installation, retained-data "
-            "upgrade/rollback, and an external restore drill before promotion"
+    for marker in (
+        "checksum-manifested source-free customer bundle",
+        "Each promotion candidate must still pass all three BYOC evidence lanes, exact-head CI, and the manual same-SHA dual-runtime acceptance.",
+        "Historical receipts never transfer to a later commit.",
+        "Every final candidate must rerun exact-head CI, all three real BYOC workflows, strict promotion evidence, and same-SHA dual-runtime acceptance",
+    ):
+        require(
+            marker in normalized_text,
+            f"missing current promotion boundary: {marker}",
+            failures,
         )
-        in normalized_text,
-        "missing breakdown marker next_slice: final runtime, CI, and Lane 7 gates",
-        failures,
-    )
 
     forbidden_claims = [
         "merge PR #22 directly",

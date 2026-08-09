@@ -52,6 +52,7 @@ jobs:
           target_image_tag="${image_repository}:target-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           registry_container="agentops-byoc-registry-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           lifecycle_state_dir="${byoc_root}/lifecycle-state"
+          customer_release_root="${byoc_root}/customer-release"
           authority_id="audit_byoc_authority_${GITHUB_RUN_ID}_${GITHUB_RUN_ATTEMPT}"
           probe_id="audit_byoc_post_apply_${GITHUB_RUN_ID}_${GITHUB_RUN_ATTEMPT}"
 
@@ -100,6 +101,7 @@ jobs:
             printf 'AGENTOPS_RESTORE_DATABASE=%s\n' "${restore_database}"
             printf 'AGENTOPS_RESTORE_KEEP=false\n'
             printf 'AGENTOPS_BYOC_LIFECYCLE_STATE_DIR=%s\n' "${lifecycle_state_dir}"
+            printf 'AGENTOPS_BYOC_CUSTOMER_RELEASE_ROOT=%s\n' "${customer_release_root}"
             printf 'AGENTOPS_BYOC_SOURCE_IMAGE_TAG=%s\n' "${source_image_tag}"
             printf 'AGENTOPS_BYOC_TARGET_IMAGE_TAG=%s\n' "${target_image_tag}"
             printf 'AGENTOPS_BYOC_REGISTRY_CONTAINER=%s\n' "${registry_container}"
@@ -152,6 +154,7 @@ jobs:
           target_identity="target-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
 
           failure_stage="build_source"
+          DOCKER_DEFAULT_PLATFORM=linux/amd64 \
           AGENTOPS_IMAGE="${AGENTOPS_BYOC_SOURCE_IMAGE_TAG}" \
           AGENTOPS_BUILD_IDENTITY="${source_identity}" \
           AGENTOPS_SOURCE_REVISION="${GITHUB_SHA}" \
@@ -163,6 +166,7 @@ jobs:
           docker push "${AGENTOPS_BYOC_SOURCE_IMAGE_TAG}" > /dev/null
 
           failure_stage="build_target"
+          DOCKER_DEFAULT_PLATFORM=linux/amd64 \
           AGENTOPS_IMAGE="${AGENTOPS_BYOC_TARGET_IMAGE_TAG}" \
           AGENTOPS_BUILD_IDENTITY="${target_identity}" \
           AGENTOPS_SOURCE_REVISION="${GITHUB_SHA}" \
@@ -220,6 +224,10 @@ jobs:
             "${source_identity}"
           test "$(docker image inspect --format '{{index .Config.Labels "io.agentops.byoc.build-identity"}}' "${target_digest}")" = \
             "${target_identity}"
+          test "$(docker image inspect --format '{{.Os}}' "${source_digest}")" = "linux"
+          test "$(docker image inspect --format '{{.Os}}' "${target_digest}")" = "linux"
+          test "$(docker image inspect --format '{{.Architecture}}' "${source_digest}")" = "amd64"
+          test "$(docker image inspect --format '{{.Architecture}}' "${target_digest}")" = "amd64"
 
           temporary_env="${AGENTOPS_BYOC_ENV_FILE}.next"
           awk -v image="${source_digest}" '
@@ -236,6 +244,63 @@ jobs:
             printf 'AGENTOPS_BYOC_TARGET_IMAGE_ID=%s\n' "${target_image_id}"
           } >> "${GITHUB_ENV}"
           trap - ERR
+
+      - name: Build and verify source-free customer release bundle
+        run: |
+          set -euo pipefail
+          release_receipt="${RUNNER_TEMP}/agentops-byoc-release-bundle.json"
+          node deploy/byoc/build-release-bundle.mjs build \
+            --output "${AGENTOPS_BYOC_CUSTOMER_RELEASE_ROOT}" \
+            --image "${AGENTOPS_BYOC_SOURCE_IMAGE}" \
+            --source-revision "${GITHUB_SHA}" > "${release_receipt}"
+          node deploy/byoc/build-release-bundle.mjs \
+            verify "${AGENTOPS_BYOC_CUSTOMER_RELEASE_ROOT}" > /dev/null
+          "${AGENTOPS_BYOC_CUSTOMER_RELEASE_ROOT}/install.sh" \
+            --verify-only > /dev/null
+          jq -e --arg source "${GITHUB_SHA}" '
+            .ok == true
+            and .contract == "agentops_byoc_release_bundle_v1"
+            and .source_revision == $source
+            and .image_digest_verified == true
+            and .credentials_omitted == true
+            and .application_source_omitted == true
+          ' "${release_receipt}" > /dev/null
+
+          test ! -e "${AGENTOPS_BYOC_CUSTOMER_RELEASE_ROOT}/.git"
+          if find "${AGENTOPS_BYOC_CUSTOMER_RELEASE_ROOT}" -type f \
+            \( -name Dockerfile -o -name package.json -o -name package-lock.json \
+               -o -name server.py \) -print -quit | grep -q .
+          then
+            echo "customer release bundle contains application source or build input" >&2
+            exit 1
+          fi
+
+          release_compose="${AGENTOPS_BYOC_CUSTOMER_RELEASE_ROOT}/deploy/byoc/compose.yaml"
+          docker compose \
+            --env-file "${AGENTOPS_BYOC_ENV_FILE}" \
+            -f "${release_compose}" \
+            config --quiet
+          default_services="$(
+            docker compose \
+              --env-file "${AGENTOPS_BYOC_ENV_FILE}" \
+              -f "${release_compose}" \
+              config --services | sort
+          )"
+          test "${default_services}" = $'control-plane\nmigrate\npostgres'
+          admin_profile_services="$(
+            docker compose \
+              --profile entitlement-admin \
+              --env-file "${AGENTOPS_BYOC_ENV_FILE}" \
+              -f "${release_compose}" \
+              config --services | sort
+          )"
+          test "${admin_profile_services}" = \
+            $'control-plane\nentitlement-admin\nmigrate\npostgres'
+          {
+            printf 'AGENTOPS_BYOC_RELEASE_ROOT=%s\n' \
+              "${AGENTOPS_BYOC_CUSTOMER_RELEASE_ROOT}"
+            printf 'AGENTOPS_BYOC_COMPOSE_FILE=%s\n' "${release_compose}"
+          } >> "${GITHUB_ENV}"
 
       - name: Start clean BYOC control plane from source digest
         run: |
@@ -296,7 +361,7 @@ jobs:
         run: |
           set -euo pipefail
           backup_receipt="${RUNNER_TEMP}/agentops-byoc-backup.json"
-          timeout 5m deploy/byoc/backup.sh \
+          timeout 5m "${AGENTOPS_BYOC_RELEASE_ROOT}/deploy/byoc/backup.sh" \
             "${AGENTOPS_BYOC_BACKUP_BUNDLE}" > "${backup_receipt}"
           jq -e '
             .ok == true
@@ -316,7 +381,7 @@ jobs:
         run: |
           set -euo pipefail
           restore_receipt="${RUNNER_TEMP}/agentops-byoc-restore.json"
-          timeout 10m deploy/byoc/restore-drill.sh \
+          timeout 10m "${AGENTOPS_BYOC_RELEASE_ROOT}/deploy/byoc/restore-drill.sh" \
             "${AGENTOPS_BYOC_BACKUP_BUNDLE}" > "${restore_receipt}"
           jq -e '
             .ok == true
@@ -358,6 +423,7 @@ jobs:
       - name: Run real same-schema retained-data lifecycle
         run: |
           set -euo pipefail
+          # Contract markers: retained-data-lifecycle.mjs plan; retained-data-lifecycle.mjs apply; retained-data-lifecycle.mjs rollback.
           report_lifecycle_failure() {
             status=$?
             trap - EXIT
@@ -451,7 +517,7 @@ jobs:
           SQL
 
           plan_receipt="${RUNNER_TEMP}/agentops-byoc-lifecycle-plan.json"
-          timeout 5m deploy/byoc/retained-data-lifecycle.mjs plan \
+          timeout 5m "${AGENTOPS_BYOC_RELEASE_ROOT}/deploy/byoc/retained-data-lifecycle.mjs" plan \
             --to-image "${AGENTOPS_BYOC_TARGET_IMAGE}" > "${plan_receipt}"
           jq -e \
             --arg source_image "${AGENTOPS_BYOC_SOURCE_IMAGE}" \
@@ -473,7 +539,7 @@ jobs:
           operation_id="$(jq -er '.operation_id' "${plan_receipt}")"
 
           apply_receipt="${RUNNER_TEMP}/agentops-byoc-lifecycle-apply.json"
-          timeout 20m deploy/byoc/retained-data-lifecycle.mjs apply \
+          timeout 20m "${AGENTOPS_BYOC_RELEASE_ROOT}/deploy/byoc/retained-data-lifecycle.mjs" apply \
             --plan-id "${operation_id}" > "${apply_receipt}"
           jq -e \
             --arg operation_id "${operation_id}" \
@@ -518,7 +584,7 @@ jobs:
           SQL
 
           status_receipt="${RUNNER_TEMP}/agentops-byoc-lifecycle-status.json"
-          deploy/byoc/retained-data-lifecycle.mjs status > "${status_receipt}"
+          "${AGENTOPS_BYOC_RELEASE_ROOT}/deploy/byoc/retained-data-lifecycle.mjs" status > "${status_receipt}"
           jq -e \
             --arg operation_id "${operation_id}" \
             --arg target_id "${AGENTOPS_BYOC_TARGET_IMAGE_ID}" '
@@ -532,7 +598,7 @@ jobs:
             ' "${status_receipt}" > /dev/null
 
           rollback_receipt="${RUNNER_TEMP}/agentops-byoc-lifecycle-rollback.json"
-          timeout 20m deploy/byoc/retained-data-lifecycle.mjs rollback \
+          timeout 20m "${AGENTOPS_BYOC_RELEASE_ROOT}/deploy/byoc/retained-data-lifecycle.mjs" rollback \
             --confirm-restore-from-backup "${operation_id}" > "${rollback_receipt}"
           jq -e \
             --arg operation_id "${operation_id}" \
@@ -700,7 +766,8 @@ jobs:
 
           Verified on an ephemeral Ubuntu runner:
 
-          - clean image build and Compose startup;
+          - source-side immutable image publication followed by a source-excluded,
+            checksum-verified release payload and Compose startup;
           - production TypeScript/PostgreSQL health and schema fingerprint;
           - committed PostgreSQL backup bundle;
           - isolated restore provisioning, runtime/admin/function-owner boundaries, and cleanup.

@@ -8,11 +8,13 @@ import {
 } from "lucide-react";
 import { pick, usePreferences } from "../../context/PreferencesContext";
 import { useHumanAuth } from "../../context/HumanAuthContext";
+import { HUMAN_SESSION_REQUIRED } from "../../data/liveApi";
 
 interface NavItem {
   labelKey: string;
   path: string;
   icon: ReactNode;
+  localOnly?: boolean;
 }
 
 interface NavGroup {
@@ -49,7 +51,7 @@ const navGroups: NavGroup[] = [
       { labelKey: "connectors",    path: "/admin/connectors",         icon: <Plug size={15} /> },
       { labelKey: "externalBases", path: "/admin/bases/notion",       icon: <Database size={15} /> },
       { labelKey: "audit",         path: "/admin/audit",              icon: <ClipboardList size={15} /> },
-      { labelKey: "privateHostAcceptance", path: "/admin/private-host-acceptance", icon: <MonitorCheck size={15} /> },
+      { labelKey: "privateHostAcceptance", path: "/admin/private-host-acceptance", icon: <MonitorCheck size={15} />, localOnly: true },
     ],
   },
 ];
@@ -171,7 +173,7 @@ export function Sidebar({ locked = false }: { locked?: boolean }) {
 
               {!isCollapsed && (
                 <ul className="space-y-0.5">
-                  {group.items.map((item) => {
+                  {group.items.filter((item) => !item.localOnly || !HUMAN_SESSION_REQUIRED).map((item) => {
                     const isActive = locked
                       ? item.path === "/workspace/account"
                       : location.pathname === item.path ||

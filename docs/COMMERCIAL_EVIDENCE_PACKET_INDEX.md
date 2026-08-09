@@ -80,8 +80,11 @@ should be `commercial_promotion_preflight_smoke.py`.
 
 Use `python3 scripts/commercial_promotion_preflight_smoke.py` as the promotion
 preflight packet. It checks clean working-tree state, upstream sync, exact-head
-CI, branch-control, secret-scan and release-evidence command wiring without
-running live systems. The next generator should be
+CI, exact-SHA BYOC Compose/cross-schema/customer-release evidence,
+branch-control, secret-scan and release-evidence command wiring without running
+live systems. The customer-release lane is a top-level exact-branch push
+workflow with manual reruns available after it reaches the default branch, so
+package-write is never granted to ordinary PR CI. The next generator should be
 `commercial_promotion_packet_smoke.py`.
 
 Use `python3 scripts/commercial_promotion_packet_smoke.py` as the promotion

@@ -186,9 +186,9 @@ As of 2026-07-31:
   checks.
 - Lane 4 owns PreparedAction creation, approval binding, execution leases,
   terminal receipts, and reconciliation gates.
-- Frozen commit `d3b9e73` passed the complete real Hermes and real OpenClaw
-  Human review flow against the same source fingerprint. Both receipts reported
-  the TypeScript Worker started, no Python Worker or Python API started,
+- The frozen-source acceptance harness requires complete real Hermes and real
+  OpenClaw Human review flows against one source fingerprint. Passing receipts
+  require the TypeScript Worker, no Python Worker or Python API,
   `provider_call_performed=true`, and `dry_run=false`.
 - Lane 5 now has direct Human and Agent task, run, artifact, and evidence-graph
   read owners. Commercial Vite builds use the Next `/api/mis` transport and
@@ -207,14 +207,23 @@ As of 2026-07-31:
   Cost reservation, heartbeat, terminal settlement, historical
   UTC billing, active-run upgrade preflight, and exact `NUMERIC(18,6)`
   projections are contract-covered.
-- Lane 7 has a hardened BYOC package contract: separate migrator/runtime/admin
+- Lane 7 has a hardened BYOC package and executable promotion path: separate migrator/runtime/admin
   secrets, a non-root Node.js runtime, PostgreSQL 16 Compose topology, one-shot
   migration and entitlement administration, direct TypeScript/PostgreSQL
   readiness, atomic custom-format backup publication, stable isolated restore,
   cleanup-on-failure behavior, catalog fingerprint verification, and
-  supply-chain gates. Actual clean-customer image installation, retained-data
-  upgrade/rollback, an external restore drill, exact-head CI, and final
-  promotion remain open.
+  supply-chain gates. The top-level `BYOC Customer Release Acceptance` runs for
+  exact commercial integration branch pushes, publishes two exact-source
+  immutable OCI images, and transfers a
+  checksum-manifested source-free customer bundle to a separate no-checkout
+  runner. It contains no Dockerfile, application source, package-manager input,
+  Git metadata, or credentials. Using only that bundle plus immutable image
+  digests, the consumer executes packaged install, committed backup, isolated
+  restore, retained-volume same-schema apply, and backup-authoritative rollback.
+  A separate workflow covers historical v9-to-v11 forward migration with
+  backup-authoritative rollback.
+  Each promotion candidate must still pass all three BYOC evidence lanes,
+  exact-head CI, and the manual same-SHA dual-runtime acceptance.
 
 Database function ownership is now separated from migration authority. Before
 pending migrations execute, the transaction grants the migrator temporary
@@ -226,13 +235,13 @@ commit. Re-provisioning is idempotent, and PostgreSQL 16 contracts prove LOGIN,
 membership, and unexpected object-ownership drift fail closed and recover only
 after the catalog boundary is restored.
 
-Commits after `d3b9e73` are not covered by that frozen-source runtime receipt.
-Release, handoff, and merge authority remain false until the remaining read,
-enrollment, entitlement, deployment, and promotion gates pass and the final
-source commit is rerun through both real runtimes.
+Historical receipts never transfer to a later commit. Every final candidate
+must rerun exact-head CI, all three real BYOC workflows, strict promotion evidence,
+and same-SHA dual-runtime acceptance before release, handoff, or merge authority
+can be asserted.
 
-The next slices are the final same-SHA dual-runtime acceptance and exact-head
-CI, followed by Lane 7 clean-customer image installation, retained-data
+Final closure still requires final same-SHA dual-runtime acceptance and
+exact-head CI, plus Lane 7 clean-customer image installation, retained-data
 upgrade/rollback, and an external restore drill before promotion.
 
 ## Definition Of Done

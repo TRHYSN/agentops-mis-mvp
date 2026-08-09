@@ -3,7 +3,7 @@ import { Cpu, DollarSign, Clock, Download, GitBranch, AlertTriangle, ShieldCheck
 import { StatusBadge } from "../shared/StatusBadge";
 import { RiskBadge } from "../shared/RiskBadge";
 import { AuditTimeline } from "../shared/AuditTimeline";
-import { loadAudit, loadOperatorEvidenceReport, loadRunDetail, loadRunEvidenceGraph, loadRuns, useLiveData } from "../../data/liveApi";
+import { apiResourceUrl, HUMAN_SESSION_REQUIRED, loadAudit, loadOperatorEvidenceReport, loadRunDetail, loadRunEvidenceGraph, loadRuns, useLiveData } from "../../data/liveApi";
 import { usePreferences } from "../../context/PreferencesContext";
 
 export function RunDetail() {
@@ -571,10 +571,10 @@ export function RunDetail() {
               <div key={artifact.artifact_id} className="p-3 rounded-lg" style={{ background: "var(--mis-surface2)" }}>
                 <div className="flex items-center justify-between gap-2">
                   <div className="text-xs font-medium" style={{ color: "var(--mis-text)" }}>{artifact.title}</div>
-                  {hasApprovedDelivery && (
+                  {!HUMAN_SESSION_REQUIRED && hasApprovedDelivery && (
                     <a
                       data-testid="approved-artifact-download"
-                      href={`/mis-api/artifacts/${encodeURIComponent(artifact.artifact_id)}/download`}
+                      href={apiResourceUrl(`/artifacts/${encodeURIComponent(artifact.artifact_id)}/download`)}
                       download
                       title="Download approved artifact"
                       aria-label="Download approved artifact"

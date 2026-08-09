@@ -4,6 +4,39 @@ This package runs the commercial control plane as Next.js/TypeScript on Node.js
 with PostgreSQL 16. It does not start or proxy the Python API and does not use
 SQLite as an authority store.
 
+## Customer Release
+
+Customer delivery does not require this source tree. The release workflow first
+publishes the commercial image, resolves its immutable OCI digest, and builds a
+checksum-manifested source-free bundle:
+
+```bash
+node deploy/byoc/build-release-bundle.mjs build \
+  --output /private/path/agentops-byoc-release \
+  --image registry.example.com/agentops-mis@sha256:<64-hex-digest> \
+  --source-revision <40-hex-git-revision>
+```
+
+The customer receives that bundle, not the repository. It contains the release
+Compose model and operational backup, restore, and retained-data lifecycle
+tools, but no Dockerfile, application source, package-manager input, Git
+metadata, credentials, customer data, or source-side builder. Verify the bundle
+with the packaged installer before preparing private configuration:
+
+```bash
+cd /private/path/agentops-byoc-release
+./install.sh --verify-only
+```
+
+See `RELEASE_BUNDLE.md` for the customer-side startup boundary. The source-tree
+instructions below are for maintainers building and testing the image before
+publication.
+
+The current customer release is explicitly `linux/amd64`; it is not a
+multi-architecture or ARM64 release. The producer and manifest bind that
+platform, and customer promotion evidence verifies the published image's OS and
+architecture before packaging.
+
 ## Prepare
 
 1. Copy `.env.example` to an untracked `.env`.
@@ -438,3 +471,16 @@ belongs to the exact source commit and GitHub workflow run being promoted; this
 README intentionally records no run ID or source SHA. Final BYOC promotion
 still requires green exact-head workflow results and merge promotion for that
 same candidate.
+
+The source-free customer artifact is built by
+`deploy/byoc/build-release-bundle.mjs` and documented in
+`deploy/byoc/RELEASE_BUNDLE.md`. The dedicated
+`.github/workflows/byoc-customer-release-acceptance.yml` gate publishes an exact
+source and target OCI image, transfers only the bounded tar archive to a
+separate no-checkout runner, and executes the packaged installer, backup,
+isolated restore, retained-data apply, and backup-authoritative rollback there.
+The runner verifies authority retention, post-apply probe removal, source image
+restoration, stable PostgreSQL volume and cluster identity, and final
+TypeScript/PostgreSQL readiness. A local source-tree Compose run or a bundle
+directory created and consumed in one checkout is not evidence for the
+clean-customer requirement.

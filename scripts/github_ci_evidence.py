@@ -23,6 +23,7 @@ BYOC_COMPOSE_REUSABLE_JOB = (
     "Clean install, restore drill, and same-schema image lifecycle"
 )
 BYOC_CROSS_SCHEMA_WORKFLOW = "BYOC Cross-Schema v9 to v11 Acceptance"
+BYOC_CUSTOMER_RELEASE_WORKFLOW = "BYOC Customer Release Acceptance"
 
 
 SECRET_PATTERNS = [
@@ -45,7 +46,27 @@ def redact(text: str) -> str:
 
 
 def run(root: Path, args: list[str], *, timeout: int = 15) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(args, cwd=root, capture_output=True, text=True, timeout=timeout, check=False)
+    try:
+        return subprocess.run(
+            args,
+            cwd=root,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as exc:
+        stdout = (
+            exc.stdout.decode("utf-8", errors="replace")
+            if isinstance(exc.stdout, bytes)
+            else (exc.stdout or "")
+        )
+        return subprocess.CompletedProcess(
+            args=args,
+            returncode=124,
+            stdout=stdout,
+            stderr=f"command_timeout_after_{timeout}s",
+        )
 
 
 def ci_from_env(head_sha: str, *, workflow_name: str = MAIN_CI_WORKFLOW) -> dict[str, Any] | None:
@@ -438,16 +459,25 @@ def commercial_workflow_evidence(root: Path, head_sha: str, branch: str) -> dict
         required_before_ready=True,
         workflow_name=BYOC_CROSS_SCHEMA_WORKFLOW,
     )
+    byoc_customer_release = ci_status(
+        root,
+        head_sha,
+        branch,
+        required_before_ready=True,
+        workflow_name=BYOC_CUSTOMER_RELEASE_WORKFLOW,
+    )
     evidence = {
         "agentops_mis_ci": main_ci,
         "byoc_compose": byoc_compose,
         "byoc_cross_schema_v9_to_v11": byoc_cross_schema,
+        "byoc_customer_release": byoc_customer_release,
     }
     return {
         "model": {
             "agentops_mis_ci": "top_level_workflow",
             "byoc_compose": "reusable_workflow_job_in_agentops_mis_ci",
             "byoc_cross_schema_v9_to_v11": "top_level_workflow",
+            "byoc_customer_release": "top_level_exact_branch_push_or_manual_workflow",
         },
         "exact_sha": head_sha,
         "evidence": evidence,

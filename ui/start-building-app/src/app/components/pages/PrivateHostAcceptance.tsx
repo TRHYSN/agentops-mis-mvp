@@ -4,6 +4,7 @@ import {
   LoaderCircle, LockKeyhole, MonitorCheck, Plus, RefreshCw, Server, ShieldCheck, XCircle,
 } from "lucide-react";
 import {
+  apiResourceUrl,
   createPrivateHostAuthorityReceipt,
   createPrivateHostAcceptanceMarker,
   loadPrivateHostAcceptanceSnapshot,
@@ -366,7 +367,7 @@ export function PrivateHostAcceptance() {
             </dl>
             <div className="flex justify-end px-4 py-3">
               <a
-                href={`/mis-api/host/acceptance-receipts/${encodeURIComponent(authorityReceipt.receipt_id)}/download`}
+                href={apiResourceUrl(`/host/acceptance-receipts/${encodeURIComponent(authorityReceipt.receipt_id)}/download`)}
                 download
                 className="flex h-8 items-center gap-1.5 rounded px-3 text-[11px]"
                 style={{ border: "1px solid var(--mis-border)", background: "var(--mis-surface2)", color: "var(--mis-text)" }}

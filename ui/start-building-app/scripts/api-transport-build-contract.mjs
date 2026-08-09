@@ -58,6 +58,17 @@ try {
   assert.equal(freeLocalBundle.includes("/mis-api"), true);
   assert.equal(freeLocalBundle.includes("/api/mis"), false);
   assert.equal(freeLocalBundle.includes("127.0.0.1:8787"), false);
+  assert.equal(freeLocalBundle.includes("/human-auth/status"), true);
+  for (const localAuthPath of [
+    "/human-auth/bootstrap",
+    "/human-auth/password-recovery/",
+    "/human-auth/pair",
+    "/human-auth/pairing-invitations",
+    "/human-auth/devices",
+    "/human-auth/sessions",
+  ]) {
+    assert.equal(freeLocalBundle.includes(localAuthPath), true);
+  }
 
   const commercial = build("commercial", {
     VITE_AGENTOPS_DEPLOYMENT_MODE: "production",
@@ -69,6 +80,17 @@ try {
   assert.equal(commercialBundle.includes("/mis-api"), false);
   assert.equal(commercialBundle.includes("127.0.0.1:8787"), false);
   assert.equal(commercialBundle.includes("/human-auth/session"), true);
+  assert.equal(commercialBundle.includes("/human-auth/status"), false);
+  for (const localAuthPath of [
+    "/human-auth/bootstrap",
+    "/human-auth/password-recovery/",
+    "/human-auth/pair",
+    "/human-auth/pairing-invitations",
+    "/human-auth/devices",
+    "/human-auth/sessions",
+  ]) {
+    assert.equal(commercialBundle.includes(localAuthPath), false);
+  }
   assert.equal(commercialBundle.includes("X-AgentOps-CSRF"), true);
   assert.equal(commercialBundle.includes("Idempotency-Key"), true);
 
@@ -99,6 +121,8 @@ try {
     free_local_bundle_python_compatibility_path: true,
     commercial_bundle_next_postgres_path: true,
     commercial_human_session_write_authority: true,
+    free_local_human_auth_preserved: true,
+    commercial_local_human_auth_omitted: true,
     python_proxy_target_omitted_from_bundles: true,
     commercial_proxy_build_rejected: true,
     commercial_insecure_http_build_rejected: true,

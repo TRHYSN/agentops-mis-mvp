@@ -28,6 +28,7 @@ import { ExperimentDetail } from "./components/pages/ExperimentDetail";
 import { Experiments } from "./components/pages/Experiments";
 import { PreferencesProvider } from "./context/PreferencesContext";
 import { AuthGate } from "./components/auth/AuthGate";
+import { HUMAN_SESSION_REQUIRED } from "./data/liveApi";
 
 export default function App() {
   return (
@@ -63,7 +64,9 @@ export default function App() {
               <Route path="/admin/bases/notion" element={<NotionBase />} />
               <Route path="/admin/templates" element={<TemplateSwitching />} />
               <Route path="/admin/audit" element={<AuditCenter />} />
-              <Route path="/admin/private-host-acceptance" element={<PrivateHostAcceptance />} />
+              {!HUMAN_SESSION_REQUIRED && (
+                <Route path="/admin/private-host-acceptance" element={<PrivateHostAcceptance />} />
+              )}
             </Routes>
           </AppShell>
         </AuthGate>

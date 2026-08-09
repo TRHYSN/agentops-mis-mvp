@@ -142,6 +142,10 @@ export function validateArtKitManifest(value: unknown): ArtKitManifest {
     invariant(!assetIds.has(id), `duplicate asset slot ${id}`);
     assetIds.add(id);
     invariant(
+      ["planned", "prototype", "ready"].includes(String(record.status)),
+      `assetSlots[${index}] has invalid status`,
+    );
+    invariant(
       ["first_party", "generated_first_party", "planned_first_party"].includes(String(record.provenance)),
       `assetSlots[${index}] has forbidden provenance`,
     );
@@ -152,6 +156,10 @@ export function validateArtKitManifest(value: unknown): ArtKitManifest {
     if (record.sourcePath !== undefined) {
       const sourcePath = requireString(record.sourcePath, `assetSlots[${index}].sourcePath`);
       invariant(!/^https?:\/\//i.test(sourcePath), `assetSlots[${index}] must not point at remote commercial assets`);
+    }
+    if (record.status === "ready") {
+      invariant(record.provenance !== "planned_first_party", `assetSlots[${index}] ready asset cannot have planned provenance`);
+      requireString(record.sourcePath, `assetSlots[${index}].sourcePath`);
     }
   });
 

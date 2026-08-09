@@ -2,7 +2,8 @@
 
 ## Goal
 
-Before any public commercial release, replace temporary Star-Office-UI demo art with an original AgentOps MIS Pixel Office asset pack.
+Before any public commercial release, keep Pixel Office visuals entirely within
+an original AgentOps MIS asset boundary.
 
 The product should keep the useful interaction pattern:
 
@@ -13,7 +14,21 @@ The product should keep the useful interaction pattern:
 - audit vault
 - connector dock
 
-But the commercial asset pack must be original.
+The production decision is a project-owned, source-rendered React/CSS asset
+pack. It does not copy or bundle the temporary Star-Office-UI demo art.
+
+## Current Production Decision
+
+**Code-rendered commercial pack: complete.**
+
+The current pack is recorded under `assets/pixel-office/` and implemented by
+the committed Pixel Office components and theme sources. Rooms, terrain, props,
+avatars, state effects, and HUD materials are rendered from source at runtime.
+`asset-manifest.json` inventories those sources; `LICENSE.md` records ownership.
+
+Transparent PNG sprites or a Figma kit are optional future enhancements, not a
+dependency of the current commercial build. Adding them would create a new
+asset review gate and must not weaken the source-rendered fallback.
 
 ## Original Asset Pack Scope
 
@@ -66,7 +81,7 @@ But the commercial asset pack must be original.
 - Mattermost
 - n8n
 
-## Suggested Art Direction
+## Optional Bitmap Expansion
 
 - 32px or 48px tile grid.
 - Isometric or top-down pixel office, but choose one perspective and keep it consistent.
@@ -79,28 +94,16 @@ But the commercial asset pack must be original.
 - Each agent role should have a distinct silhouette, not only a color swap.
 - Status animation should be readable even when compressed in a video.
 
-## Directory Proposal
+## Current Directory
 
 ```text
 assets/pixel-office/
   README.md
   LICENSE.md
-  sprites/
-    agents/
-    states/
-    connectors/
-  tiles/
-    floors/
-    desks/
-    rooms/
-  scenes/
-    control-tower.json
-    workforce-floor.json
-  figma/
-    export-notes.md
+  asset-manifest.json
 ```
 
-## Figma / Generation Prompt Starter
+## Optional Figma / Generation Prompt Starter
 
 ```text
 Create an original pixel art office asset pack for an AI workforce management system named AgentOps MIS.
@@ -113,12 +116,17 @@ Export transparent PNG sprites and Figma components with clear naming.
 
 ## Replacement Milestones
 
-1. Demo adapter works with Star-Office-UI in local non-commercial mode.
-2. Freeze the AgentOps MIS state vocabulary and scene layout.
-3. Create original Figma components for rooms, agents, states and connector icons.
-4. Export sprites and scene JSON into `assets/pixel-office`.
-5. Replace Star-Office-UI assets in any public-facing build.
-6. Add original asset license and attribution.
+1. Complete: keep Star-Office-UI as an optional local non-commercial link only.
+2. Complete: freeze the AgentOps MIS state vocabulary and scene layout.
+3. Complete: implement original rooms, agents, states, effects, and HUD in
+   project-owned React/CSS source.
+4. Complete: inventory the production source-rendered pack in
+   `assets/pixel-office/asset-manifest.json`.
+5. Complete: verify public-facing builds import no Star-Office or third-party
+   Pixel Office art.
+6. Complete: record original ownership and attribution boundaries.
+7. Optional: add reviewed Figma/bitmap exports without replacing the
+   source-rendered fallback.
 
 ## Release Gate
 
@@ -127,4 +135,10 @@ Public commercial release is blocked until:
 - no Star-Office-UI art asset remains in product bundles
 - no LimeZu-derived art asset remains unless its commercial license is explicitly satisfied
 - `assets/pixel-office/LICENSE.md` states original ownership/licensing
+- every production art-kit slot is `ready`, `first_party`, and points to a
+  committed source listed in `asset-manifest.json`
 - product README and marketing pages no longer imply Star-Office assets are ours
+
+The current source-rendered pack satisfies these repository gates. Final legal
+review remains an external release decision, not a software fallback to
+third-party art.

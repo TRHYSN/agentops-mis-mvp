@@ -23,8 +23,8 @@ def main() -> int:
 
     require('testId="host-relay-section"' in account, "Remote Console is not in Account Security", failures)
     require(
-        'const canManageRelay = required && user?.role === "owner"' in account,
-        "Relay controls are not visibly Owner-only",
+        'const canManageRelay = !HUMAN_SESSION_REQUIRED && required && user?.role === "owner"' in account,
+        "Relay controls are not visibly Free-Local Owner-only",
         failures,
     )
     require(

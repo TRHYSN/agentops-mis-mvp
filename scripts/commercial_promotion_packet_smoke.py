@@ -10,7 +10,7 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
-from github_ci_evidence import ci_status as shared_ci_status
+from github_ci_evidence import commercial_workflow_evidence
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -161,18 +161,19 @@ def validate_sources(texts: dict[Path, str], failures: list[str]) -> None:
     require(not hardcoded, f"hard-coded SHA found in promotion packet docs: {hardcoded}", failures)
 
 
-def packet_blockers(ci: dict[str, Any], sync: dict[str, int | None], dirty_count: int) -> list[str]:
+def packet_blockers(
+    promotion_workflows: dict[str, Any],
+    sync: dict[str, int | None],
+    dirty_count: int,
+) -> list[str]:
     blockers: list[str] = []
     if dirty_count:
         blockers.append("working_tree_not_clean")
     if sync.get("behind") not in (0, None):
         blockers.append("branch_behind_upstream")
-    if ci.get("head_matches") is not True:
-        blockers.append("ci_head_not_matched")
-    if ci.get("status") != "completed":
-        blockers.append("ci_not_completed")
-    if ci.get("conclusion") != "success":
-        blockers.append("ci_not_success")
+    for key, evidence in promotion_workflows.get("evidence", {}).items():
+        if evidence.get("required_before_ready") is not False:
+            blockers.append(f"{key}_not_ready")
     return blockers
 
 
@@ -193,8 +194,9 @@ def main() -> int:
     branch = current_branch()
     sync = upstream_sync()
     dirty_count = len(status_entries())
-    ci = shared_ci_status(ROOT, head_sha, branch, required_before_ready=True)
-    blockers = packet_blockers(ci, sync, dirty_count)
+    promotion_workflows = commercial_workflow_evidence(ROOT, head_sha, branch)
+    ci = promotion_workflows["evidence"]["agentops_mis_ci"]
+    blockers = packet_blockers(promotion_workflows, sync, dirty_count)
     packet_ready = not blockers and not failures
 
     if args.require_ready and not packet_ready:
@@ -211,6 +213,7 @@ def main() -> int:
             "working_tree_entries": dirty_count,
         },
         "ci": ci,
+        "promotion_workflows": promotion_workflows,
         "promotion_packet_ready": packet_ready,
         "blocking_reasons": blockers,
         "included_packets": [

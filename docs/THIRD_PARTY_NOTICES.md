@@ -9,7 +9,7 @@ commercial distribution.
 | Component | Location | License posture |
 |---|---|---|
 | AgentOps MIS backend, CLI and local UI | Repository root, `agentops_mis_cli/`, `server.py`, `ui/start-building-app/src/` | Proprietary local MVP; see root `LICENSE`. |
-| Pixel Office operating map | `ui/start-building-app/src/app/components/pixel/` and `PixelOffice.tsx` | First-party React/CSS implementation; no copied bitmap, sprite, tileset or Star-Office art assets. |
+| Pixel Office operating map | `assets/pixel-office/`, `ui/start-building-app/src/app/components/pixel/` and `PixelOffice.tsx` | Project-owned source-rendered asset pack; no copied bitmap, sprite, tileset or Star-Office art assets. |
 
 ## Runtime And UI Dependencies
 
@@ -44,9 +44,9 @@ Commercial or public release is blocked unless the release artifact proves:
   frames are bundled;
 - no paid tileset, LimeZu-derived art, Donarg tileset, MetroCity-style sprite or
   unclear-license asset is bundled;
-- any future `assets/pixel-office/` pack contains its own `LICENSE.md` and
-  provenance notes;
+- the current `assets/pixel-office/` pack retains its own `LICENSE.md`, source
+  manifest, and zero third-party entries;
 - product copy does not imply third-party art is owned by AgentOps MIS.
 
-The current local UI uses CSS geometry and component markup only for Pixel
-Office visuals.
+The current local UI uses the project-owned source-rendered pack: CSS geometry,
+component markup, palettes, materials, and state-driven visual effects only.

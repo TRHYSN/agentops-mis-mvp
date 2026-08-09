@@ -548,9 +548,13 @@ def main() -> int:
         connected = wait_status(
             status_path,
             lambda payload: payload.get("state") == "connected"
-            and payload.get("successful_connections", 0) >= 1,
+            and payload.get("successful_connections", 0) >= 1
+            and payload.get("host_tls_ready") is True,
         )
-        if connected.get("state") != "connected":
+        if (
+            connected.get("state") != "connected"
+            or connected.get("host_tls_ready") is not True
+        ):
             failures.append("service did not establish the first authenticated tunnel")
         if int(connected.get("current_epoch") or 0) <= preexisting_epoch:
             failures.append("service did not continue the pre-existing connector epoch")
@@ -611,7 +615,8 @@ def main() -> int:
         reconnected = wait_status(
             status_path,
             lambda payload: payload.get("state") == "connected"
-            and payload.get("successful_connections", 0) >= 2,
+            and payload.get("successful_connections", 0) >= 2
+            and payload.get("host_tls_ready") is True,
         )
         if (
             reconnected.get("state") != "connected"

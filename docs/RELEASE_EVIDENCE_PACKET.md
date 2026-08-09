@@ -41,6 +41,14 @@ python3 scripts/merge_readiness_status_smoke.py --require-ready-to-merge
   release in local MVP / NOT_READY posture.
 - READY evidence requires current-head CI with status `completed` and conclusion
   `success`.
+- Commercial promotion additionally requires an exact-SHA successful top-level
+  `BYOC Customer Release Acceptance` run. It is triggered by pushes to the
+  commercial integration branch, supports later manual reruns, and is not part
+  of arbitrary pull-request CI because its producer needs package-write
+  permission. Its separate consumer job has package-read permission and no
+  repository checkout. That consumer must complete packaged install, committed
+  backup, isolated restore, same-schema apply, and backup-authoritative rollback
+  while retaining PostgreSQL volume and cluster identity.
 
 ### Release Freeze And Required Checks
 
@@ -76,6 +84,7 @@ The packet includes the canonical command manifest used for release review:
 - `python3 scripts/release_branch_control_smoke.py`
 - `python3 scripts/release_freeze_protocol_smoke.py`
 - `python3 scripts/github_ci_evidence_smoke.py`
+- `node deploy/byoc/release-bundle-contract.mjs`
 - `python3 scripts/clean_machine_rc_smoke.py`
 - `python3 scripts/run_local_stack_smoke.py`
 - `python3 scripts/private_host_owner_browser_handoff_smoke.py`
