@@ -6,8 +6,9 @@ Git metadata, credential, database, or generated customer data.
 
 The release root contains an executable `install.sh`, the image-only
 `deploy/byoc/compose.yaml`, operational backup, restore, and retained-data
-lifecycle tools, `release-image.env`, a bounded manifest, `SHA256SUMS`, and the
-`COMMITTED` marker. It does not contain the source-side bundle builder.
+lifecycle tools, the executable `owner-init.sh`, `release-image.env`, a bounded
+manifest, `SHA256SUMS`, and the `COMMITTED` marker. It does not contain the
+source-side bundle builder.
 
 The release is bound to the exact source commit and the application image's
 immutable registry digest. A release build fails when any selected input is
@@ -57,6 +58,33 @@ same immutable application image boundary.
 Edit the generated `deploy/byoc/.env` routing values for the customer's trusted
 HTTPS origin before exposing the service beyond loopback. Never place
 credentials in the release manifest, image reference, or support receipt.
+
+After the non-interactive installer reports success, initialize the first Owner
+for one workspace:
+
+```sh
+./owner-init.sh \
+  --workspace-id ws_customer \
+  --username owner \
+  --display-name "Workspace Owner"
+```
+
+The command reads and confirms the password from the controlling terminal with
+echo disabled, then sends it only on the one-shot container's stdin. For bounded
+automation, `--password-stdin` accepts exactly one input line. Password values
+are rejected in argv, are never exported to the environment, and are omitted
+from success and failure receipts. The one-shot service mounts only the existing
+migrator secret, converts it to a container-tmpfs `PGPASSFILE`, drops privileges,
+and runs the image's existing `bootstrap-owner.ts`. It does not mount the runtime,
+entitlement-admin, entitlement-operator, or Human Session secrets. A workspace
+with an existing Owner fails closed, including concurrent attempts.
+
+The success receipt intentionally preserves `user.user_id` and
+`membership.workspace_id`, plus the safe membership role/status. Use those safe
+identifiers in the later entitlement workflow. Owner initialization does not
+create a default entitlement and does not replace
+`entitlement-operator-password`; entitlement creation still requires the
+separate v11 challenge and `entitlement-admin` flow.
 
 `.github/workflows/byoc-customer-release-acceptance.yml` is the authoritative
 clean-customer gate. Its producer job may checkout the exact source and publish

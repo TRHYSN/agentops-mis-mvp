@@ -123,6 +123,51 @@ services:
     networks:
       - control_plane
 
+  owner-bootstrap:
+    profiles: [owner-bootstrap]
+    image: "${AGENTOPS_IMAGE:?set AGENTOPS_IMAGE to the immutable AgentOps release digest}"
+    restart: "no"
+    user: "0:0"
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - DAC_OVERRIDE
+      - SETGID
+      - SETUID
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /run/agentops-runtime-secrets:rw,noexec,nosuid,size=1m,mode=0700,uid=1000,gid=1000
+    entrypoint:
+      - node
+      - /usr/local/lib/agentops/node-secret-entrypoint.mjs
+      - --postgres-migrator
+      - --
+    command:
+      - node
+      - /usr/local/lib/agentops/owner-bootstrap-entrypoint.mjs
+    environment:
+      AGENTOPS_DEPLOYMENT_MODE: production
+      AGENTOPS_CONTROL_PLANE_MODE: postgres
+      AGENTOPS_POSTGRES_SCHEMA: public
+      AGENTOPS_POSTGRES_RUNTIME_API_SCHEMA: agentops_runtime_api
+      AGENTOPS_POSTGRES_RUNTIME_ROLE: "${AGENTOPS_POSTGRES_RUNTIME_USER:-agentops_runtime}"
+      AGENTOPS_POSTGRES_ENTITLEMENT_ADMIN_ROLE: "${AGENTOPS_POSTGRES_ENTITLEMENT_ADMIN_USER:-agentops_entitlement_admin}"
+      AGENTOPS_POSTGRES_SSL: "false"
+      AGENTOPS_POSTGRES_MIGRATOR_HOST: postgres
+      AGENTOPS_POSTGRES_MIGRATOR_PORT: "5432"
+      AGENTOPS_POSTGRES_MIGRATOR_DATABASE: "${AGENTOPS_POSTGRES_DATABASE:-agentops}"
+      AGENTOPS_POSTGRES_MIGRATOR_USER: "${AGENTOPS_POSTGRES_MIGRATOR_USER:-agentops_migrator}"
+      AGENTOPS_POSTGRES_MIGRATOR_PASSWORD_SOURCE_FILE: /run/secrets/postgres_migrator_password
+    secrets:
+      - postgres_migrator_password
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    networks:
+      - control_plane
+
   control-plane:
     image: "${AGENTOPS_IMAGE:?set AGENTOPS_IMAGE to the immutable AgentOps release digest}"
     restart: unless-stopped

@@ -32,6 +32,7 @@ const INPUTS = [
   ["deploy/byoc/.env.example", "deploy/byoc/.env.example", 0o600],
   ["deploy/byoc/RELEASE_BUNDLE.md", "README.md", 0o600],
   ["deploy/byoc/install.sh", "install.sh", 0o700],
+  ["deploy/byoc/owner-init.sh", "owner-init.sh", 0o700],
   ["deploy/byoc/backup.sh", "deploy/byoc/backup.sh", 0o700],
   ["deploy/byoc/restore-drill.sh", "deploy/byoc/restore-drill.sh", 0o700],
   ["deploy/byoc/postgres-destructive-database.sh", "deploy/byoc/postgres-destructive-database.sh", 0o700],
@@ -42,6 +43,9 @@ const INPUTS = [
 const RELEASE_INPUTS = [
   ...new Set([
     "deploy/byoc/build-release-bundle.mjs",
+    "deploy/byoc/Dockerfile",
+    "deploy/byoc/owner-bootstrap-contract.mjs",
+    "deploy/byoc/owner-bootstrap-entrypoint.mjs",
     "deploy/byoc/release-bundle-contract.mjs",
     ...INPUTS.map(([sourcePath]) => sourcePath),
   ]),
@@ -115,6 +119,7 @@ function verify(root) {
     || manifest.credentials_included !== false
     || manifest.application_source_included !== false
     || manifest.repository_checkout_required !== false
+    || manifest.owner_bootstrap_command_included !== true
     || !Array.isArray(manifest.files)
   ) fail("release_manifest_invalid");
   const declared = new Map(manifest.files.map((item) => [item.path, item]));
@@ -167,6 +172,7 @@ function verify(root) {
     credentials_omitted: true,
     application_source_omitted: true,
     repository_checkout_required: false,
+    owner_bootstrap_command_included: true,
   };
 }
 
@@ -209,6 +215,7 @@ function build(output, image, revision) {
       credentials_included: false,
       application_source_included: false,
       repository_checkout_required: false,
+      owner_bootstrap_command_included: true,
       files,
     };
     const manifestBytes = Buffer.from(`${JSON.stringify(manifest, null, 2)}\n`);

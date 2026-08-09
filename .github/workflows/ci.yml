@@ -228,6 +228,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
+          timeout 120s node deploy/byoc/owner-bootstrap-contract.mjs
           timeout 120s node deploy/byoc/release-bundle-contract.mjs
           timeout 120s python3 scripts/redaction_policy_smoke.py
           timeout 120s python3 scripts/sqlite_pragmas_smoke.py

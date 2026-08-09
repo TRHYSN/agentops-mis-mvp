@@ -20,6 +20,7 @@ COPY migrations/postgres ./migrations/postgres
 COPY --chmod=0555 \
     deploy/byoc/node-healthcheck.mjs \
     deploy/byoc/node-secret-entrypoint.mjs \
+    deploy/byoc/owner-bootstrap-entrypoint.mjs \
     deploy/byoc/postgres-dsn-for-restore.mjs \
     deploy/byoc/postgres-role-boundary-check.mts \
     deploy/byoc/restore-provision.sh \

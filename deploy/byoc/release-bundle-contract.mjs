@@ -21,11 +21,15 @@ const sourceRepository = resolve(moduleDirectory, "../..");
 const image = `ghcr.io/example/agentops-mis-byoc@sha256:${"a".repeat(64)}`;
 const releaseInputs = [
   "deploy/byoc/build-release-bundle.mjs",
+  "deploy/byoc/Dockerfile",
+  "deploy/byoc/owner-bootstrap-contract.mjs",
+  "deploy/byoc/owner-bootstrap-entrypoint.mjs",
   "deploy/byoc/release-bundle-contract.mjs",
   "deploy/byoc/compose.release.yaml",
   "deploy/byoc/.env.example",
   "deploy/byoc/RELEASE_BUNDLE.md",
   "deploy/byoc/install.sh",
+  "deploy/byoc/owner-init.sh",
   "deploy/byoc/backup.sh",
   "deploy/byoc/restore-drill.sh",
   "deploy/byoc/postgres-destructive-database.sh",
@@ -86,8 +90,10 @@ function copyInputs(repository) {
   }
   for (const executable of [
     "deploy/byoc/build-release-bundle.mjs",
+    "deploy/byoc/owner-bootstrap-contract.mjs",
     "deploy/byoc/release-bundle-contract.mjs",
     "deploy/byoc/install.sh",
+    "deploy/byoc/owner-init.sh",
     "deploy/byoc/backup.sh",
     "deploy/byoc/restore-drill.sh",
     "deploy/byoc/postgres-destructive-database.sh",
@@ -103,8 +109,32 @@ function assertStaticCustomerBoundary() {
   if (/^\s+build:/m.test(compose) || /context:|dockerfile:|\.\.\/\.\./i.test(compose)) {
     fail("release_compose_build_boundary_invalid");
   }
-  if ((compose.match(/image: "?\$\{AGENTOPS_IMAGE:\?[^}]+\}"?/g) || []).length !== 3) {
+  if ((compose.match(/image: "?\$\{AGENTOPS_IMAGE:\?[^}]+\}"?/g) || []).length !== 4) {
     fail("release_compose_image_binding_invalid");
+  }
+  const ownerService = compose.match(
+    /  owner-bootstrap:\n([\s\S]*?)(?=\n  [a-z][a-z0-9-]+:|\nvolumes:)/,
+  )?.[1] || "";
+  const ownerOperator = readFileSync(join(moduleDirectory, "owner-init.sh"), "utf8");
+  const ownerEntrypoint = readFileSync(
+    join(moduleDirectory, "owner-bootstrap-entrypoint.mjs"),
+    "utf8",
+  );
+  if (
+    !ownerService.includes("profiles: [owner-bootstrap]")
+    || !ownerService.includes("--postgres-migrator")
+    || !ownerService.includes("postgres_migrator_password")
+    || ownerService.includes("postgres_runtime_password")
+    || ownerService.includes("postgres_entitlement_admin_password")
+    || ownerService.includes("entitlement_operator_password")
+    || ownerService.includes("human_session_hmac_key")
+    || !ownerOperator.includes("--password-stdin")
+    || !ownerOperator.includes("set +x")
+    || /openssl|rand\b/.test(ownerOperator)
+    || !ownerEntrypoint.includes("PGPASSFILE")
+    || ownerEntrypoint.includes("childEnvironment.PGPASSWORD =")
+  ) {
+    fail("release_owner_bootstrap_boundary_invalid");
   }
   const installer = readFileSync(join(moduleDirectory, "install.sh"), "utf8");
   if (
@@ -246,6 +276,7 @@ try {
     || receipt.credentials_omitted !== true
     || receipt.application_source_omitted !== true
     || receipt.repository_checkout_required !== false
+    || receipt.owner_bootstrap_command_included !== true
   ) fail("release_build_receipt_invalid");
 
   const verified = run(
@@ -287,6 +318,9 @@ try {
     || path.startsWith("migrations/")
   );
   if (forbidden.length) fail("release_source_or_build_input_present");
+  if ((readFileSync(join(output, "owner-init.sh")).length || 0) < 1) {
+    fail("release_owner_bootstrap_operator_missing");
+  }
 
   writeFileSync(join(output, "compose.override.yaml"), "services: {}\n", "utf8");
   const unmanifested = run(
@@ -423,6 +457,9 @@ exit 0
     unsupported_host_refused: true,
     signed_provenance_required: true,
     node_20_operator_preflight_required: true,
+    owner_bootstrap_operator_packaged: true,
+    owner_bootstrap_password_stdin_only: true,
+    owner_bootstrap_entitlement_boundary_unchanged: true,
     failed_health_stack_stopped: true,
     tamper_refused: true,
     credentials_omitted: true,

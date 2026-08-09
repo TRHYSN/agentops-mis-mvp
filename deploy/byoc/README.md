@@ -46,6 +46,32 @@ Clean installation itself does not require host Node.js. Packaged backup and
 retained-data lifecycle operations currently require Node.js 20 or newer and
 fail before creating output or state when that runtime is unavailable.
 
+After the source-free installer completes, the customer initializes the first
+workspace Owner with the packaged command:
+
+```bash
+./owner-init.sh \
+  --workspace-id ws_customer \
+  --username owner \
+  --display-name "Workspace Owner"
+```
+
+Its default prompt reads and confirms the password from `/dev/tty` with echo
+disabled. `--password-stdin` is available for bounded automation and accepts one
+line only. The password is never accepted in argv, exported through the process
+environment, generated on the customer's behalf, or written to a receipt. The
+profile reuses only the migrator role and its existing Compose secret; a tmpfs
+`PGPASSFILE` carries database authentication after the container drops
+privileges. Repeating or racing initialization for the same workspace fails
+closed through the existing transaction and advisory lock in
+`bootstrap-owner.ts`.
+
+The receipt retains the safe `user.user_id` and `membership.workspace_id`, role,
+and status for later administration. This command does not create an entitlement
+and does not alter the independently generated `entitlement-operator-password`.
+The initial entitlement still goes through the v11 challenge and the isolated
+`entitlement-admin` profile documented below.
+
 ## Prepare
 
 1. Copy `.env.example` to an untracked `.env`.
