@@ -11,8 +11,8 @@ This board tracks candidate delivery facts. It does not replace MIS or the revie
 |---|---|---|---|---|---|
 | L00 Reconcile | completed | Sol Commander | plan, board, Gate 0 receipt | G0 `PASS_WITH_CONDITIONS` | Keep this branch docs/evidence-only |
 | L01 Dogfood | completed with condition | MIS integrator | MIS objects/readback only | Task/Plan/Run passed; Project/Goal route is Human Session only | Preserve IDs and record later evidence |
-| L02 openJiuwen spike | verifying | openJiuwen integrator | isolated incubator runtime package/docs/tests | Task `tsk_re_v05_l02_openjiuwen`; Plan `plan_21c9c79c9588e3ab`; Run `run_gw_ddb3915b002a`; remediation SHA `e926889`; real install/network remains `NOT_RUN` | Independent Phase B re-verification |
-| L03 Domain | completed with condition | research domain engineer | domain/repository/migration/tests | SHA `aabbf0a`; Phase B `PASS_WITH_CONDITIONS`; Draft PR `#121` | Record/verify MIS Artifact, Evaluation, and plan-evidence; keep EvidenceEdge Claim gate deferred to L05 |
+| L02 openJiuwen spike | completed with conditions | openJiuwen integrator | isolated incubator runtime package/docs/tests | SHA `71cc411`; dual Phase B `PASS`; Draft PR `#122`; real install/network remains `NOT_RUN` | Record/verify MIS Artifact, Evaluation, and plan-evidence; keep real runtime work separately gated |
+| L03 Domain | completed with conditions | research domain engineer | domain/repository/migration/tests | SHA `44a6d8f`; dual Phase B `PASS`; Draft PR `#121`; verified manifest `pem_re_v05_l03_44a6d8ff` | Keep EvidenceEdge Claim gate deferred to L05; request separate Relay allowlist integration permission |
 | L04 Durable executor | pending | executor engineer | executor/reconcile/tests | L03 contract required | No action |
 | L05 Evidence | pending | evidence engineer | ingest/claim/invalidation/tests | L03 contract required | No action |
 | L06 Jiuwen runtime | pending | runtime integrator | runtime adapter/tests | L02 + L03 + L05 | No action |
@@ -46,6 +46,10 @@ This board tracks candidate delivery facts. It does not replace MIS or the revie
 - `openjiuwen_real_install=NOT_RUN`
 - `control_draft_pr=120`
 - `l03_draft_pr=121`
-- `l02_draft_pr=NOT_CREATED_PHASE_B_BLOCKED`
+- `l03_final_artifact=art_re_v05_l03_44a6d8ff`
+- `l03_final_evaluation=eval_gw_run_gw_30889b1ffa9b_rule`
+- `l03_final_manifest=pem_re_v05_l03_44a6d8ff_verified`
+- `l03_exact_head_ci=FAIL_RELAY_WHEEL_ALLOWLIST_INTEGRATION_PERMISSION_REQUIRED`
+- `l02_draft_pr=122`
 
-L02 exact SHA `fe045c3` failed independent Phase B on canonical JSON enforcement, camel-case secret keys, permission-authority consistency, and an inaccurate upstream notice filename. Remediation SHA `e926889` passes the implementer and Commander regression suites and is under independent Phase B; the failed SHA remains audit history. L03 SHA `138e6ab` fixed all first-round blockers but failed a second Phase B on autocommit revision atomicity, strict Claim/Metric types, and an unreachable cancellation edge. Remediation SHA `aabbf0a` passes implementer and Commander regression suites and is under a new independent Phase B. Candidate integration remains blocked until both lanes pass. This reconciliation branch remains docs/evidence-only.
+L02 SHAs `fe045c3`, `e926889`, `d0c716b`, `0bf78fd`, `e8f8e8d`, and `9be2b3a` remain failed/superseded audit history. Exact SHA `71cc411` closes receipt binding, Unicode, canonical JSON, notice, arbitrary prefix/suffix raw-field classification, and checkpoint-body findings; it passed two independent final reviews and is published as Draft PR `#122`. L03 SHAs through `18537df` remain superseded audit history; exact SHA `44a6d8f` passed two final independent reviews and its MIS Artifact, Evaluation, ToolCall, and plan-evidence manifest are linked. PR `#121` exact-head CI still fails because the Relay wheel exact-module allowlist does not yet include the three new Research Domain modules; an in-memory proof validates the narrow fix, but that shared integration path has not been changed without separate permission. This reconciliation branch remains docs/evidence-only.

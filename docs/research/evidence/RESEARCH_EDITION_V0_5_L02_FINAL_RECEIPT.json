@@ -1,0 +1,88 @@
+{
+  "schema_version": "research_edition_lane_receipt_v1",
+  "lane": "L02",
+  "title": "openJiuwen offline compatibility spike final Phase B",
+  "status": "pass_with_conditions",
+  "canonical": false,
+  "authority_class": "candidate",
+  "git": {
+    "repository": "geogejoy107-jpg/agentops-mis-mvp",
+    "base_sha": "ceed92756e527e2580290db78d5513d09e40b389",
+    "branch": "codex/research-v05-openjiuwen-spike",
+    "head_sha": "71cc411e772119b0d52ffd0a1c404d00b31acc65",
+    "commit_count": 7,
+    "merge_commit_count": 0,
+    "changed_file_count": 6,
+    "draft_pr": 122,
+    "draft_pr_base": "codex/research-v05-reconcile"
+  },
+  "mis": {
+    "workspace_id": "local-demo",
+    "task_id": "tsk_re_v05_l02_openjiuwen",
+    "agent_plan_id": "plan_21c9c79c9588e3ab",
+    "plan_hash": "09caa226f9e3ad1fa2bec24d65f357c591c1f7a403cecf8bfe2b9b8ba5442d32",
+    "run_id": "run_gw_ddb3915b002a"
+  },
+  "execution": {
+    "implementation_agent": "/root/openjiuwen_spike_impl",
+    "independent_verifiers": [
+      "/root/l02_final_independent_a",
+      "/root/l02_visible_fallback_verify"
+    ],
+    "visible_thread_id": "019fe556-3c50-7e12-9c8e-1bda4c2cf94d",
+    "visible_thread_final_status": "UNAVAILABLE_AFTER_PRIOR_REMEDIATION_REVIEWS",
+    "superseded_audit_history": [
+      "fe045c35",
+      "e9268896",
+      "d0c716bd",
+      "0bf78fd4",
+      "e8f8e8d8",
+      "9be2b3aa"
+    ]
+  },
+  "verification": {
+    "focused_openjiuwen_tests": "PASS_25_OF_25",
+    "research_lab_tests": "PASS_45_OF_45",
+    "research_api_smoke": "PASS",
+    "experiment_cli_smoke": "PASS",
+    "bwformer_cpu_smoke": "PASS_FIXTURE_ONLY_CLAIM_INELIGIBLE",
+    "independent_raw_field_matrices": [
+      "PASS_10008_CASES",
+      "PASS_4465_CASES"
+    ],
+    "receipt_binding_no_mutation": "PASS",
+    "canonical_unicode_capacity": "PASS",
+    "secret_scan": "PASS_947_FILES_0_FINDINGS",
+    "syntax_compile_manifest_diff": "PASS",
+    "exact_head_clean_ancestry_no_merge_six_paths": "PASS"
+  },
+  "independent_verdict": {
+    "result": "PASS_WITH_CONDITIONS",
+    "blocking_findings": [],
+    "conditions": [
+      "Only the offline compatibility harness is verified.",
+      "Real openJiuwen install, import, agent, callback, permission-host, checkpoint, cancellation, and restart checks remain NOT_RUN.",
+      "Commit-to-PyPI equivalence and transitive dependency compatibility remain UNKNOWN.",
+      "JiuwenSwarm remains NOT_INTEGRATED."
+    ]
+  },
+  "upstream": {
+    "component": "agent-core",
+    "commit": "bf0a3eb2c70fcbae404403530519ca02e7fc4692",
+    "python": ">=3.11,<3.14",
+    "license": "Apache-2.0",
+    "notice": "Open_Source_Software_Notice.txt",
+    "installed": false,
+    "imported": false
+  },
+  "safety": {
+    "network_execution_performed": false,
+    "live_gpu_uat": "NOT_RUN",
+    "credentials_used": false,
+    "merge_performed": false,
+    "release_performed": false,
+    "canonical_state_changed": false,
+    "raw_prompt_omitted": true,
+    "raw_response_omitted": true
+  }
+}
