@@ -67,6 +67,7 @@ _SENSITIVE_JOINED_ROOTS = (
     "clientsecret",
     "credentials",
     "credential",
+    "message",
     "messages",
     "password",
     "privatekey",
@@ -79,30 +80,14 @@ _SENSITIVE_JOINED_ROOTS = (
     "prompt",
     "token",
 )
-_SENSITIVE_TRAILING_DESCRIPTORS = (
-    "blob",
-    "body",
-    "bytes",
-    "config",
-    "content",
-    "data",
-    "digest",
-    "file",
-    "hash",
-    "header",
-    "id",
-    "key",
-    "material",
-    "path",
-    "pem",
-    "policy",
-    "ref",
-    "reference",
-    "setting",
-    "text",
-    "value",
-    "less",
-)
+_BENIGN_ROOT_MORPHOLOGIES = {
+    "cookie": ("cutter",),
+    "credential": ("ing",),
+    "prompt": ("ness",),
+    "secret": ("ary",),
+    "token": ("izer",),
+}
+_CHECKPOINT_REFERENCE_MORPHOLOGIES = ("cursor", "hash", "id", "ref", "reference")
 
 REQUEST_OPERATIONS = frozenset({"action.propose", "cancel", "resume"})
 EVENT_TYPES = frozenset(
@@ -734,49 +719,23 @@ def _is_sensitive_key(key: str) -> bool:
     camel_split = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", acronym_split)
     normalized = re.sub(r"[^a-z0-9]+", "_", camel_split.lower()).strip("_")
     tokens = tuple(token for token in normalized.split("_") if token)
-    components = set(tokens)
-    sensitive_components = {
-        "authorization",
-        "cookie",
-        "credential",
-        "credentials",
-        "messages",
-        "password",
-        "prompt",
-        "response",
-        "secret",
-        "secrets",
-        "token",
-        "transcript",
-    }
-    sensitive_compounds = {
-        "apikey",
-        "accesskey",
-        "accesskeyid",
-        "authorization",
-        "clientsecret",
-        "credential",
-        "credentials",
-        "password",
-        "privatekey",
-        "secretkey",
-    }
-    if normalized in _SENSITIVE_KEYS or components & sensitive_components:
+    if normalized in _SENSITIVE_KEYS:
         return True
-    for start in range(len(tokens)):
-        candidate = ""
-        for token in tokens[start:]:
-            candidate += token
-            if candidate in sensitive_compounds:
-                return True
     joined = "".join(tokens)
     for sensitive_root in _SENSITIVE_JOINED_ROOTS:
         search_from = 0
         while (root_index := joined.find(sensitive_root, search_from)) >= 0:
             trailing = joined[root_index + len(sensitive_root) :]
-            if not trailing or trailing.startswith(_SENSITIVE_TRAILING_DESCRIPTORS):
+            benign_morphologies = _BENIGN_ROOT_MORPHOLOGIES.get(sensitive_root, ())
+            if not trailing.startswith(benign_morphologies):
                 return True
             search_from = root_index + 1
+    search_from = 0
+    while (checkpoint_index := joined.find("checkpoint", search_from)) >= 0:
+        trailing = joined[checkpoint_index + len("checkpoint") :]
+        if trailing not in _CHECKPOINT_REFERENCE_MORPHOLOGIES:
+            return True
+        search_from = checkpoint_index + 1
     return False
 
 

@@ -323,6 +323,29 @@ class ProtocolValidationTests(unittest.TestCase):
             "MESSAGESBLOB",
             "transcriptcontent",
             "TRANSCRIPTDATA",
+            "tokenpayload",
+            "cookiestore",
+            "secretpayload",
+            "rawpromptpayload",
+            "rawresponsepayload",
+            "transcriptpayload",
+            "clientsecretpayload",
+            "privatekeypassphrase",
+            "passwordsalt",
+            "authorizationbearer",
+            "apikeyjson",
+            "accesskeymap",
+            "tokens",
+            "cookies",
+            "prompts",
+            "responses",
+            "transcripts",
+            "checkpointBody",
+            "checkpoint_body",
+            "checkpointpayload",
+            "checkpointReferenceBody",
+            "messagepayload",
+            "rawmessagebody",
         ):
             request = action_request(arguments={field: "ordinary-looking-value"})
             self.assert_protocol_error("sensitive_key_forbidden", lambda: validate_message(request))
@@ -337,9 +360,50 @@ class ProtocolValidationTests(unittest.TestCase):
             "secretaryName",
             "xApiLatency",
             "accessibilityKeynote",
+            "tokenizerLatency",
+            "cookieCutterCount",
+            "promptnessScore",
+            "checkpointReference",
+            "checkpointHash",
+            "checkpointCursor",
         ):
             request = action_request(arguments={field: "bounded-benign-value"})
             self.assertEqual(validate_message(request), request)
+
+    def test_forbidden_roots_reject_arbitrary_prefix_and_suffix_matrix(self) -> None:
+        forbidden_roots = (
+            "accesskeyid",
+            "accesskey",
+            "apikey",
+            "authorization",
+            "clientsecret",
+            "credentials",
+            "credential",
+            "messages",
+            "message",
+            "password",
+            "privatekey",
+            "response",
+            "secretkey",
+            "secret",
+            "transcript",
+            "cookie",
+            "prompt",
+            "token",
+        )
+        arbitrary_prefixes = ("", "x", "tenant42", "serviceopaque")
+        arbitrary_suffixes = ("", "payload", "warehouse", "opaquez")
+
+        for root in forbidden_roots:
+            for prefix in arbitrary_prefixes:
+                for suffix in arbitrary_suffixes:
+                    field = f"{prefix}{root}{suffix}"
+                    with self.subTest(field=field):
+                        request = action_request(arguments={field: "ordinary-looking-value"})
+                        self.assert_protocol_error(
+                            "sensitive_key_forbidden",
+                            lambda: validate_message(request),
+                        )
 
     def test_unpaired_surrogates_fail_as_protocol_errors(self) -> None:
         request = action_request(arguments={"text": "\ud800"})

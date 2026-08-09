@@ -73,14 +73,17 @@ accepted from an untrusted protocol peer or treated as MIS evidence.
 
 Sensitive field names are split at camel-case and arbitrary delimiters. Every
 contiguous token range is checked against exact known compounds. A bounded set
-of normalized sensitive roots plus trailing descriptors also catches fully
-unseparated forms after arbitrary prefixes, such as `userpasswordhash`,
-`xauthorizationpolicy`, or `sshprivatekeypem`. The same bounded rule covers
-declared raw-field categories including token, cookie, secret, prompt,
-response, messages, and transcript. This is not a generic substring match: a
-root must end the key or be followed by a known descriptor, so unrelated words
-such as `passage`, `author`, `credentialing`, `secretary`, `xApiLatency`, or
-`accessibilityKeynote` remain valid.
+of normalized forbidden roots is then matched at every position regardless of
+prefix or suffix, so novel endings cannot bypass the boundary. This covers API,
+access, private, and client key/secret compounds plus password, authorization,
+credential, token, cookie, secret, prompt, response, message, and transcript
+families. Narrow explicit morphology exceptions preserve semantically distinct
+`secretary`, `credentialing`, `tokenizer`, `cookieCutter`, and `promptness`
+fields; unrelated `passage`, `author`, `xApiLatency`, and
+`accessibilityKeynote` fields contain no forbidden normalized root. Checkpoint
+fields are classified separately and fail closed: only checkpoint references,
+hashes, cursors, and identifiers are allowed, while bodies, payloads, raw
+bytes, and unrecognized checkpoint forms are rejected.
 
 ## License and notice boundary
 
