@@ -82,6 +82,17 @@ def main() -> int:
         failures.append("misleading reconcile metadata was accepted")
     except ResearchDomainError:
         pass
+    for bad_step in (True, 1.5, "1"):
+        try:
+            MetricSnapshot("metric_bad_step", "attempt_2", "art_3", "loss", 0.2, bad_step)  # type: ignore[arg-type]
+            failures.append(f"invalid metric step was accepted: {bad_step!r}")
+        except ResearchDomainError:
+            pass
+    try:
+        ResearchClaim("claim_bad_bool", "contract_1", 1, "eval_1", "Bad gate", machine_gate_passed=1)  # type: ignore[arg-type]
+        failures.append("truthy non-bool machine gate was accepted")
+    except ResearchDomainError:
+        pass
 
     immutable = contract(payload_a)
     try:
@@ -102,6 +113,7 @@ def main() -> int:
 
     with sqlite3.connect(":memory:") as conn:
         authority_fixture(conn)
+        conn.isolation_level = None
         receipt = apply_research_domain_migration(conn)
         repo = SQLiteResearchRepository(conn)
         conn.execute("INSERT INTO artifacts VALUES('art_cross','ws_other')")
@@ -129,6 +141,29 @@ def main() -> int:
         )
         require(revised.version == 2 and revised.supersedes_version == 1, "revision did not create new version", failures)
         require(revised.content_hash != c.content_hash, "revision did not create new hash", failures)
+
+        atomic = ResearchContract.create(
+            contract_id="contract_atomic", version=1, workspace_id="ws_1",
+            project_ref="project_1", goal_ref="goal_1", requirement_ref="requirement_1",
+            agent_plan_id="plan_1", contract_artifact_id="art_4", payload={"protocol": "v1"},
+        )
+        repo.add_contract(atomic)
+        for target in ("proposed", "review_pending", "approved", "active"):
+            atomic = repo.transition_contract("contract_atomic", 1, target, expected_state_version=atomic.state_version)
+        repo.add_contract(ResearchContract.create(
+            contract_id="contract_atomic", version=2, workspace_id="ws_1",
+            project_ref="project_1", goal_ref="goal_1", requirement_ref="requirement_1",
+            agent_plan_id="plan_1", contract_artifact_id="art_4", payload={"protocol": "conflict"},
+            status="rejected", supersedes_version=1,
+        ))
+        before_conflict = repo.get_contract("contract_atomic", 1)
+        try:
+            repo.revise_contract("contract_atomic", 1, payload={"protocol": "v2"}, expected_state_version=atomic.state_version)
+            failures.append("conflicting revision insert was accepted")
+        except RepositoryConflict:
+            pass
+        require(repo.get_contract("contract_atomic", 1) == before_conflict,
+                "failed revision did not roll back prior UPDATE", failures)
 
         trial = Trial("trial_1", "contract_1", 2, "task_1")
         repo.add_trial(trial)
@@ -166,6 +201,14 @@ def main() -> int:
         except InvalidTransition:
             pass
 
+        cancel_reconcile = JobAttempt("attempt_3", "trial_1", "run_3", 3)
+        repo.add_job_attempt(cancel_reconcile)
+        for target in ("submitted", "acknowledged", "running", "heartbeat_lost", "reconciling", "cancel_pending", "cancelled"):
+            cancel_reconcile = repo.transition_job_attempt(
+                "attempt_3", target, expected_state_version=cancel_reconcile.state_version
+            )
+        require(cancel_reconcile.status == "cancelled", "reconciling cancel request was unreachable", failures)
+
         checkpoint = Checkpoint(
             "checkpoint_1", "attempt_2", "art_2", "run_2", "a" * 64, "b" * 64, "valid"
         )
@@ -185,6 +228,14 @@ def main() -> int:
         try:
             repo.transition_claim("claim_1", "accepted", expected_state_version=claim.state_version)
             failures.append("claim bypassed machine/reviewer gates")
+        except ResearchDomainError:
+            pass
+        try:
+            repo.transition_claim(
+                "claim_1", "accepted", expected_state_version=claim.state_version,
+                machine_gate_passed="true", independent_reviewer_id="reviewer_2",  # type: ignore[arg-type]
+            )
+            failures.append("string machine gate was accepted")
         except ResearchDomainError:
             pass
         claim = repo.transition_claim(

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from contextlib import contextmanager
 import sqlite3
 from typing import Any, Mapping, Protocol, runtime_checkable
 
@@ -99,6 +100,29 @@ class SQLiteResearchRepository:
         if row is None:
             raise RepositoryConflict(f"attempt {attempt_id} is missing")
         return self._trial_workspace(str(row[0]))
+
+    @contextmanager
+    def _revision_transaction(self):
+        """Own an IMMEDIATE transaction, or nest without committing the caller."""
+        nested = self.conn.in_transaction
+        savepoint = "research_contract_revision"
+        if nested:
+            self.conn.execute(f"SAVEPOINT {savepoint}")
+        else:
+            self.conn.execute("BEGIN IMMEDIATE")
+        try:
+            yield
+            if nested:
+                self.conn.execute(f"RELEASE SAVEPOINT {savepoint}")
+            else:
+                self.conn.commit()
+        except Exception:
+            if nested:
+                self.conn.execute(f"ROLLBACK TO SAVEPOINT {savepoint}")
+                self.conn.execute(f"RELEASE SAVEPOINT {savepoint}")
+            else:
+                self.conn.rollback()
+            raise
 
     @staticmethod
     def _contract(row: sqlite3.Row) -> ResearchContract:
@@ -205,7 +229,7 @@ class SQLiteResearchRepository:
         revised = current.revision(payload=payload)
         now = _now()
         try:
-            with self.conn:
+            with self._revision_transaction():
                 if current.status in {"approved", "active"}:
                     superseded = current.transition("superseded", expected_state_version=expected_state_version)
                     cursor = self.conn.execute(

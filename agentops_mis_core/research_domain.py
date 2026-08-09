@@ -312,7 +312,7 @@ class JobAttempt:
     ) -> "JobAttempt":
         if self.status != "reconciling" and reconcile_outcome is not None:
             raise ResearchDomainError("reconcile_outcome is only valid for a reconciling result")
-        if self.status == "reconciling":
+        if self.status == "reconciling" and target != "cancel_pending":
             expected_target = {
                 "running": "running", "succeeded": "succeeded", "failed": "failed",
                 "orphaned": "orphaned", "unknown": "reconcile_ambiguous",
@@ -366,7 +366,9 @@ class MetricSnapshot:
             raise ResearchDomainError("metric name is required and bounded")
         if isinstance(self.value, bool) or not isinstance(self.value, (int, float)) or not math.isfinite(float(self.value)):
             raise ResearchDomainError("metric value must be finite")
-        if self.step is not None and (isinstance(self.step, bool) or self.step < 0):
+        if self.step is not None and type(self.step) is not int:
+            raise ResearchDomainError("metric step must be an exact integer")
+        if self.step is not None and self.step < 0:
             raise ResearchDomainError("metric step must be non-negative")
         if self.validity not in {"valid", "invalid", "legacy_unverified"}:
             raise ResearchDomainError("unsupported metric validity")
@@ -393,6 +395,8 @@ class ResearchClaim:
             raise ResearchDomainError("claim statement is required and bounded")
         if self.independent_reviewer_id is not None:
             _id(self.independent_reviewer_id, "independent_reviewer_id")
+        if type(self.machine_gate_passed) is not bool:
+            raise ResearchDomainError("machine_gate_passed must be an exact boolean")
         if self.status not in CLAIM_TRANSITIONS:
             raise ResearchDomainError("unsupported claim status")
         if self.status == "accepted" and not (self.machine_gate_passed and self.independent_reviewer_id):
@@ -407,6 +411,8 @@ class ResearchClaim:
         independent_reviewer_id: str | None = None,
     ) -> "ResearchClaim":
         gate = self.machine_gate_passed if machine_gate_passed is None else machine_gate_passed
+        if type(gate) is not bool:
+            raise ResearchDomainError("machine_gate_passed must be an exact boolean")
         reviewer = independent_reviewer_id or self.independent_reviewer_id
         if target == "accepted" and not (gate and reviewer):
             raise ResearchDomainError("accepted claim requires machine and independent reviewer gates")
