@@ -25,7 +25,7 @@ body is copied here.
 - rejection of unpaired Unicode surrogates before canonical encoding;
 - recursive rejection of prompt, response, transcript, secret and
   credential-shaped fields/values, including camel/delimiter compounds with
-  trailing descriptors and fully unseparated sensitive-prefix variants;
+  trailing descriptors and fully unseparated variants with arbitrary prefixes;
 - ordered event application plus exact duplicate detection;
 - in-memory idempotency receipts: same key and effect payload replays the
   original receipt, while changed content fails;

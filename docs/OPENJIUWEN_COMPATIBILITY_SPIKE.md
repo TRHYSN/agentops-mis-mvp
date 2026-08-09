@@ -73,12 +73,14 @@ accepted from an untrusted protocol peer or treated as MIS evidence.
 
 Sensitive field names are split at camel-case and arbitrary delimiters. Every
 contiguous token range is checked against exact known compounds. A bounded set
-of normalized compound prefixes also catches fully unseparated trailing
-descriptors such as `passwordhash`, `authorizationheader`, or `privatekeypem`;
-credential prefixes use a separate bounded descriptor list. This is not a
-generic substring match, so unrelated words such as `passage`, `author`,
-`credentialing`, `secretary`, `xApiLatency`, or `accessibilityKeynote` remain
-valid.
+of normalized sensitive roots plus trailing descriptors also catches fully
+unseparated forms after arbitrary prefixes, such as `userpasswordhash`,
+`xauthorizationpolicy`, or `sshprivatekeypem`. The same bounded rule covers
+declared raw-field categories including token, cookie, secret, prompt,
+response, messages, and transcript. This is not a generic substring match: a
+root must end the key or be followed by a known descriptor, so unrelated words
+such as `passage`, `author`, `credentialing`, `secretary`, `xApiLatency`, or
+`accessibilityKeynote` remain valid.
 
 ## License and notice boundary
 

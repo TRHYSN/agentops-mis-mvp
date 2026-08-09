@@ -59,17 +59,27 @@ _SENSITIVE_KEYS = {
     "token",
     "transcript",
 }
-_SENSITIVE_COMPOUND_PREFIXES = (
+_SENSITIVE_JOINED_ROOTS = (
     "accesskeyid",
     "accesskey",
     "apikey",
     "authorization",
     "clientsecret",
+    "credentials",
+    "credential",
+    "messages",
     "password",
     "privatekey",
+    "response",
+    "secrets",
     "secretkey",
+    "secret",
+    "transcript",
+    "cookie",
+    "prompt",
+    "token",
 )
-_SENSITIVE_CREDENTIAL_DESCRIPTORS = (
+_SENSITIVE_TRAILING_DESCRIPTORS = (
     "blob",
     "body",
     "bytes",
@@ -84,11 +94,14 @@ _SENSITIVE_CREDENTIAL_DESCRIPTORS = (
     "key",
     "material",
     "path",
+    "pem",
+    "policy",
     "ref",
     "reference",
     "setting",
     "text",
     "value",
+    "less",
 )
 
 REQUEST_OPERATIONS = frozenset({"action.propose", "cancel", "resume"})
@@ -757,14 +770,13 @@ def _is_sensitive_key(key: str) -> bool:
             if candidate in sensitive_compounds:
                 return True
     joined = "".join(tokens)
-    if joined.startswith(_SENSITIVE_COMPOUND_PREFIXES):
-        return True
-    for credential_prefix in ("credential", "credentials"):
-        if not joined.startswith(credential_prefix):
-            continue
-        descriptor = joined[len(credential_prefix) :]
-        if descriptor.startswith(_SENSITIVE_CREDENTIAL_DESCRIPTORS):
-            return True
+    for sensitive_root in _SENSITIVE_JOINED_ROOTS:
+        search_from = 0
+        while (root_index := joined.find(sensitive_root, search_from)) >= 0:
+            trailing = joined[root_index + len(sensitive_root) :]
+            if not trailing or trailing.startswith(_SENSITIVE_TRAILING_DESCRIPTORS):
+                return True
+            search_from = root_index + 1
     return False
 
 
