@@ -1,0 +1,105 @@
+{
+  "schema_version": "research_edition_gate_receipt_v1",
+  "work_id": "RE-V05-L00-99ce51d6-e2a9bdd8",
+  "plan_id": "RE-V05-PLAN-001",
+  "status": "pass_with_conditions",
+  "canonical": false,
+  "authority_class": "candidate",
+  "created_at": "2026-08-09T06:27:36Z",
+  "mis": {
+    "workspace_id": "local-demo",
+    "task_id": "tsk_re_v05_l00_99ce51d",
+    "agent_plan_id": "plan_336c6f572cdcd906",
+    "agent_plan_hash": "e2a9bdd8339e10e16bd169a4f1ff32d61fc8aa2e5a092875e8f057a2e7cb0d6f",
+    "agent_plan_verification_hash": "2d80a7f121b5359bdc28dbdc50cced1f2d264dfe08af9be14b8049e2fa91cb2c",
+    "agent_plan_quality_score": 100,
+    "run_id": "run_gw_e5fcd972a353",
+    "run_status": "running",
+    "project_goal_status": "not_available_human_session_required",
+    "readback_verified": true
+  },
+  "git": {
+    "repository": "geogejoy107-jpg/agentops-mis-mvp",
+    "base_sha": "99ce51d693f1d646ea84acc2f7f376bde1a95a9a",
+    "branch": "codex/research-v05-reconcile",
+    "worktree_ref": "agentops-mis-research-v05-reconcile",
+    "current_checkout_reused": false
+  },
+  "inputs": [
+    {
+      "kind": "research_edition_package",
+      "sha256": "1caa0d0de411faf524229d70a435eef23c70e2d80daa557fb5547eb0ba4a82e1"
+    },
+    {
+      "kind": "repository_instructions",
+      "path": "AGENTS.md",
+      "sha256": "4971e440db4c57b49bc22a39395384bd833777f0869eefc55bf92d906b05ddf5"
+    }
+  ],
+  "reports": [
+    {
+      "role": "repo_reconciler",
+      "mode": "read_only",
+      "result": "pass_with_conditions",
+      "files_changed": []
+    },
+    {
+      "role": "openjiuwen_researcher",
+      "mode": "read_only",
+      "result": "pass_with_conditions",
+      "files_changed": []
+    },
+    {
+      "role": "research_domain_architect",
+      "mode": "read_only",
+      "result": "pass_with_conditions",
+      "files_changed": []
+    },
+    {
+      "role": "memory_curator",
+      "mode": "read_only",
+      "result": "pass_with_conditions",
+      "files_changed": []
+    }
+  ],
+  "verification": {
+    "package_validation": "PASS",
+    "exact_main_ci": "PASS",
+    "exact_main_unit_tests": "PASS_20_TESTS",
+    "bwformer_cpu_smoke": "PASS_FIXTURE_ONLY",
+    "research_api_smoke": "PASS",
+    "research_evidence_smoke": "PASS",
+    "ui_build": "PASS_REMOTE_EXACT_HEAD_CI",
+    "live_gpu_uat": "NOT_RUN",
+    "openjiuwen_real_install": "NOT_RUN"
+  },
+  "verified_findings": [
+    "Research Lab 0.4.1 already provides bounded local execution and MIS evidence ingest.",
+    "Durable cross-session execution, restart reconciliation, exactly-once checkpoint resume, and real SSH execution are absent.",
+    "openJiuwen and JiuwenSwarm are not integrated on main.",
+    "The uploaded Research Edition remains Proposal and canonical=false.",
+    "PR 118 is a candidate reference with model-mapping conflict and incomplete test discovery."
+  ],
+  "unknowns": [
+    "Historical adaptive-planning candidate source",
+    "Authorized SSH/GPU environment and credentials",
+    "Canonical owner promotion of Research Edition"
+  ],
+  "safety": {
+    "feature_write_allowed": "separately_bound_wave_1_only",
+    "mis_ledger_write": "written_and_read_back",
+    "github_write": "not_written",
+    "notion_write": "not_written",
+    "canonical_state_changed": false,
+    "raw_prompt_omitted": true,
+    "raw_response_omitted": true,
+    "credentials_omitted": true,
+    "private_topology_omitted": true
+  },
+  "dogfood_notes": [
+    "The first Agent Plan over-redacted a date-prefixed path as phone data.",
+    "The second Agent Plan failed because the installed MIS verifier cannot resolve uncommitted worktree-local references or directory bases.",
+    "The replacement Agent Plan used exact readable installed-repository files and passed all checks with quality 100/100."
+  ],
+  "next_action": "Create separate L02 and L03 candidate worktrees, then give each its own MIS Task, verified Agent Plan, and plan-bound Run before feature changes."
+}
