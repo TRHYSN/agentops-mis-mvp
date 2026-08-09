@@ -198,7 +198,8 @@ running_services=$(
     ps --services --status running
 )
 [ -z "$running_services" ] || fail "install_already_running"
-docker pull "$image" >/dev/null
+docker compose --env-file "$environment_file" -f "$compose_file" \
+  pull --quiet
 revision_label=$(docker image inspect \
   --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$image")
 [ "$revision_label" = "$source_revision" ] || fail "release_image_revision_mismatch"

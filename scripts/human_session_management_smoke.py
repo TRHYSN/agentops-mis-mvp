@@ -379,6 +379,8 @@ def main() -> int:
         "topbar": ROOT / "ui/start-building-app/src/app/components/layout/Topbar.tsx",
         "settings": ROOT / "ui/start-building-app/src/app/components/shared/WorkspaceSettings.tsx",
         "api": ROOT / "ui/start-building-app/src/app/data/liveApi.ts",
+        "local_auth_api": ROOT / "ui/start-building-app/src/app/data/humanAuthLocalApi.ts",
+        "commercial_auth_api": ROOT / "ui/start-building-app/src/app/data/humanAuthCommercialUnavailable.ts",
     }
     ui_source = {name: path.read_text(encoding="utf-8") if path.is_file() else "" for name, path in ui_files.items()}
     ui_checks = {
@@ -395,7 +397,12 @@ def main() -> int:
             and 'lg:grid-cols-[220px_minmax(0,1fr)]' in ui_source["settings"]
         ),
         "api_uses_relative_human_auth_paths": all(
-            marker in ui_source["api"]
+            marker in ui_source["local_auth_api"]
+            for marker in ('"/human-auth/sessions"', '"/human-auth/sessions/revoke"')
+        ),
+        "commercial_api_omits_local_session_admin_paths": all(
+            marker not in ui_source["api"]
+            and marker not in ui_source["commercial_auth_api"]
             for marker in ('"/human-auth/sessions"', '"/human-auth/sessions/revoke"')
         ),
     }

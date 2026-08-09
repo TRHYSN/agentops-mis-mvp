@@ -114,6 +114,7 @@ function assertStaticCustomerBoundary() {
     || !installer.includes('[ "$install_complete" = false ]')
     || !installer.includes('host_platform=$(docker info --format')
     || !installer.includes('fail "customer_host_platform_unsupported"')
+    || !installer.includes("pull --quiet")
   ) {
     fail("release_installer_failure_cleanup_contract_missing");
   }
