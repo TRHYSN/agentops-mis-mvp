@@ -348,7 +348,9 @@ jobs:
 
           audit_count() {
             "${compose[@]}" exec -T -e "ACCEPTANCE_AUDIT_ID=$1" postgres sh -ceu \
-              'psql --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" --no-psqlrc --tuples-only --no-align --set=audit_id="$ACCEPTANCE_AUDIT_ID" --command "SELECT count(*) FROM audit_logs WHERE audit_id=:'\''audit_id'\''"'
+              'psql --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" --no-psqlrc --tuples-only --no-align --set=ON_ERROR_STOP=1 --set=audit_id="$ACCEPTANCE_AUDIT_ID"' <<'SQL'
+          SELECT count(*) FROM audit_logs WHERE audit_id = :'audit_id';
+          SQL
           }
           "${compose[@]}" exec -T -e "ACCEPTANCE_AUDIT_ID=${authority_id}" postgres sh -ceu \
             'psql --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" --no-psqlrc --set=ON_ERROR_STOP=1 --set=audit_id="$ACCEPTANCE_AUDIT_ID"' <<'SQL'

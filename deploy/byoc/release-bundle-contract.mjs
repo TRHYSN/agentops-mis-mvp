@@ -157,6 +157,8 @@ function assertStaticCustomerBoundary() {
     || !consumer.includes("and .backup_restore_authoritative == true")
     || !consumer.includes('test "$(audit_count "${authority_id}"')
     || !consumer.includes('test "$(audit_count "${probe_id}"')
+    || !consumer.includes("SELECT count(*) FROM audit_logs WHERE audit_id = :'audit_id';")
+    || consumer.includes('--command "SELECT count(*) FROM audit_logs WHERE audit_id=')
   ) {
     fail("release_consumer_lifecycle_contract_missing");
   }
