@@ -19,7 +19,10 @@ body is copied here.
 
 - one complete UTF-8 JSON object per newline-terminated record;
 - fixed schemas and event names; unknown fields and types fail closed;
+- exact request-to-receipt binding for action identity, permission classifier,
+  terminal state, deterministic IDs, and cancel/resume targets;
 - byte, record, identifier, string, collection, nesting, and payload limits;
+- rejection of unpaired Unicode surrogates before canonical encoding;
 - recursive rejection of prompt, response, transcript, secret and
   credential-shaped fields/values;
 - ordered event application plus exact duplicate detection;

@@ -47,9 +47,16 @@ an exact retry replays the original receipt; changed content fails. Cancel and
 resume receipts are intentionally labelled no-effect. The parent must not
 interpret them as a stopped process or restored runtime snapshot.
 
+Receipt commit recomputes the complete expected event sequence from the
+validated request. Action ID/type, classifier decision/reason, deterministic
+event IDs, terminal event, permission-request ID, and cancel/resume target are
+all exact-bound. Individually valid events cannot be recombined into a forged
+receipt for another action.
+
 The wire decoder accepts only its exact canonical UTF-8 encoding with one
 terminal LF; alternate key order, whitespace, escapes, CRLF, or a partial
-record fail closed. A worker stream holds at most 64 idempotency receipts, 64
+record fail closed. Unpaired Unicode surrogates are rejected before canonical
+encoding and produce only a bounded error code. A worker stream holds at most 64 idempotency receipts, 64
 request/event streams, three contiguous events per receipt, and 192 event
 identities. It does not evict or silently forget authority-relevant
 deduplication state: exhaustion fails closed, and a new managed worker process
@@ -91,7 +98,7 @@ Official refs:
 - [PyPI project](https://pypi.org/project/openjiuwen/)
 - [Building ReActAgent](https://github.com/openJiuwen-ai/agent-core/blob/bf0a3eb2c70fcbae404403530519ca02e7fc4692/docs/en/2.Development%20Guide/Agents/Building%20ReActAgent.md)
 - [Custom tools](https://github.com/openJiuwen-ai/agent-core/blob/bf0a3eb2c70fcbae404403530519ca02e7fc4692/docs/en/2.Development%20Guide/Basic%20Functions/Custom%20Tools.md)
-- [Tool permissions and host integration](https://github.com/openJiuwen-ai/agent-core/blob/bf0a3eb2c70fcbae404403530519ca02e7fc4692/docs/en/2.Development%20Guide/Basic%20Functions/Tool%20permissions%20and%20host%20integration.md)
+- [Tool permissions and host integration](https://github.com/openJiuwen-ai/agent-core/blob/bf0a3eb2c70fcbae404403530519ca02e7fc4692/docs/en/2.Development%20Guide/Tool%20permissions%20and%20host%20integration.md)
 - [Checkpoint mechanism](https://github.com/openJiuwen-ai/agent-core/blob/bf0a3eb2c70fcbae404403530519ca02e7fc4692/docs/en/2.Development%20Guide/Advanced%20Usage/Checkpointer%20Checkpoint%20Mechanism.md)
 - [Callback event source](https://github.com/openJiuwen-ai/agent-core/blob/bf0a3eb2c70fcbae404403530519ca02e7fc4692/openjiuwen/core/runner/callback/events.py)
 

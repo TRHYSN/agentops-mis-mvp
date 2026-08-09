@@ -164,7 +164,10 @@ def canonical_digest(value: Any) -> str:
 def decode_line(raw: bytes | str) -> dict[str, Any]:
     """Decode one exact canonical, newline-terminated JSONL record."""
 
-    encoded = raw.encode("utf-8") if isinstance(raw, str) else bytes(raw)
+    try:
+        encoded = raw.encode("utf-8") if isinstance(raw, str) else bytes(raw)
+    except UnicodeEncodeError as exc:
+        raise ProtocolError("invalid_unicode", "JSONL record contains an invalid Unicode scalar") from exc
     if len(encoded) > MAX_LINE_BYTES:
         raise ProtocolError("line_too_large", "JSONL record exceeds the byte limit")
     if not encoded.endswith(b"\n"):
@@ -259,6 +262,109 @@ def event_message(
     return validate_message(event)
 
 
+def receipt_events_for_request(request: Mapping[str, Any]) -> tuple[dict[str, Any], ...]:
+    """Build the only semantically valid fake-worker receipt for a request."""
+
+    validated = validate_message(dict(request))
+    if validated["kind"] != "request":
+        raise ProtocolError("request_required", "receipt generation requires a request")
+    operation = validated["operation"]
+    payload = validated["payload"]
+    event_payloads: list[tuple[str, dict[str, Any]]] = [
+        ("request.accepted", {"operation": operation})
+    ]
+    if operation == "action.propose":
+        permission = classify_permission(payload["action_type"])
+        event_payloads.append(
+            (
+                "permission.decision",
+                {
+                    "action_id": payload["action_id"],
+                    "action_type": payload["action_type"],
+                    "decision": permission.decision.value,
+                    "reason_code": permission.reason_code,
+                },
+            )
+        )
+        if permission.decision is PermissionDecision.ALLOW:
+            event_payloads.append(
+                (
+                    "action.completed",
+                    {
+                        "action_id": payload["action_id"],
+                        "result_summary": "bounded_read_only_receipt",
+                        "side_effect_performed": False,
+                    },
+                )
+            )
+        elif permission.decision is PermissionDecision.ASK:
+            event_payloads.append(
+                (
+                    "action.awaiting_approval",
+                    {
+                        "action_id": payload["action_id"],
+                        "permission_request_id": stable_protocol_id(
+                            "perm", validated["request_id"], payload["action_id"]
+                        ),
+                        "required_decision": "human_approval",
+                        "effect_performed": False,
+                    },
+                )
+            )
+        else:
+            event_payloads.append(
+                (
+                    "action.denied",
+                    {
+                        "action_id": payload["action_id"],
+                        "reason_code": permission.reason_code,
+                        "effect_performed": False,
+                    },
+                )
+            )
+    elif operation == "cancel":
+        common = {
+            "target_request_id": payload["target_request_id"],
+            "effect_performed": False,
+        }
+        event_payloads.extend((("cancel.requested", dict(common)), ("cancel.accepted", dict(common))))
+    elif operation == "resume":
+        common = {
+            "target_request_id": payload["target_request_id"],
+            "checkpoint_id": payload["checkpoint_id"],
+            "expected_sequence": payload["expected_sequence"],
+            "effect_performed": False,
+        }
+        event_payloads.extend((("resume.requested", dict(common)), ("resume.accepted", dict(common))))
+    else:  # validate_message makes this unreachable.
+        raise ProtocolError("unknown_operation", "request operation is not supported")
+
+    return tuple(
+        event_message(
+            event_id=stable_protocol_id(
+                "evt", validated["request_id"], str(sequence), event_type
+            ),
+            request_id=validated["request_id"],
+            sequence=sequence,
+            event_type=event_type,
+            payload=event_payload,
+        )
+        for sequence, (event_type, event_payload) in enumerate(event_payloads)
+    )
+
+
+def stable_protocol_id(prefix: str, *parts: str) -> str:
+    """Return a bounded deterministic identifier for protocol-owned receipts."""
+
+    _validate_identifier(prefix, "id_prefix")
+    for index, part in enumerate(parts):
+        if not isinstance(part, str):
+            raise ProtocolError("invalid_identifier_input", f"id part {index} must be a string")
+        _reject_surrogates(part)
+    digest = hashlib.sha256("\x00".join(parts).encode("utf-8")).hexdigest()[:24]
+    return f"{prefix}_{digest}"
+
+
 class IdempotencyStore:
     """In-memory receipt store; it is not durable MIS or runtime state."""
 
@@ -307,7 +413,8 @@ class IdempotencyStore:
         if receipt is not None:
             self._request_fingerprints[request_id] = fingerprint
             self._request_keys[request_id] = key
-        return receipt
+            return _clone_receipt(receipt)
+        return None
 
     def commit(self, request: Mapping[str, Any], events: Iterable[Mapping[str, Any]]) -> StoredReceipt:
         validated = validate_message(dict(request))
@@ -336,18 +443,23 @@ class IdempotencyStore:
             if validated_event["sequence"] != index:
                 raise ProtocolError("receipt_sequence_mismatch", "receipt events must be contiguous")
             copied_event_list.append(validated_event)
-        if not copied_event_list:
-            raise ProtocolError("empty_receipt", "receipt must contain at least one event")
-        copied_events = tuple(copied_event_list)
+        if len(copied_event_list) != MAX_RECEIPT_EVENTS:
+            raise ProtocolError("receipt_event_count", "receipt must contain exactly three events")
+        expected_events = receipt_events_for_request(validated)
+        if copied_event_list != list(expected_events):
+            raise ProtocolError(
+                "receipt_semantic_mismatch",
+                "receipt events do not exactly match the originating request",
+            )
         receipt = StoredReceipt(
             fingerprint=request_fingerprint(validated),
             request_id=validated["request_id"],
-            events=copied_events,
+            events=expected_events,
         )
         self._request_fingerprints[validated["request_id"]] = receipt.fingerprint
         self._request_keys[validated["request_id"]] = key
         self._by_key[key] = receipt
-        return receipt
+        return _clone_receipt(receipt)
 
 
 class EventSequenceStore:
@@ -544,6 +656,7 @@ def _validate_tree(value: Any, *, path: str, depth: int) -> None:
             raise ProtocolError("non_finite_number", "non-finite numbers are forbidden")
         return
     if isinstance(value, str):
+        _reject_surrogates(value)
         if len(value) > MAX_STRING_CHARS:
             raise ProtocolError("string_too_large", "string exceeds the character limit")
         for pattern in _SECRET_VALUE_PATTERNS:
@@ -556,6 +669,7 @@ def _validate_tree(value: Any, *, path: str, depth: int) -> None:
         for key, item in value.items():
             if not isinstance(key, str):
                 raise ProtocolError("invalid_key", "object keys must be strings")
+            _reject_surrogates(key)
             if not key or len(key) > MAX_KEY_CHARS:
                 raise ProtocolError("invalid_key", "object key length is invalid")
             if _is_sensitive_key(key):
@@ -590,17 +704,36 @@ def _is_sensitive_key(key: str) -> bool:
         "transcript",
     }
     joined = "".join(normalized.split("_"))
-    sensitive_compounds = (
+    sensitive_suffixes = (
         "apikey",
         "accesskey",
+        "accesskeyid",
+        "authorization",
         "clientsecret",
+        "credential",
+        "credentials",
+        "password",
         "privatekey",
         "secretkey",
     )
     return (
         normalized in _SENSITIVE_KEYS
         or bool(components & sensitive_components)
-        or any(compound in joined for compound in sensitive_compounds)
+        or any(joined.endswith(compound) for compound in sensitive_suffixes)
+    )
+
+
+def _reject_surrogates(value: str) -> None:
+    if any(0xD800 <= ord(character) <= 0xDFFF for character in value):
+        raise ProtocolError("invalid_unicode", "unpaired Unicode surrogates are forbidden")
+
+
+def _clone_receipt(receipt: StoredReceipt) -> StoredReceipt:
+    events = tuple(json.loads(canonical_json(event)) for event in receipt.events)
+    return StoredReceipt(
+        fingerprint=receipt.fingerprint,
+        request_id=receipt.request_id,
+        events=events,
     )
 
 

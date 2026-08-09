@@ -7,7 +7,6 @@ managed-subprocess contract.
 
 from __future__ import annotations
 
-import hashlib
 import json
 import sys
 from dataclasses import dataclass
@@ -18,13 +17,11 @@ try:  # Support both direct execution and test imports from this directory.
         MAX_TOTAL_BYTES,
         EventSequenceStore,
         IdempotencyStore,
-        PermissionDecision,
         ProtocolError,
-        classify_permission,
         decode_line,
         decode_stream,
         encode_message,
-        event_message,
+        receipt_events_for_request,
         validate_message,
     )
 except ImportError:  # pragma: no cover - exercised by direct script execution.
@@ -32,13 +29,11 @@ except ImportError:  # pragma: no cover - exercised by direct script execution.
         MAX_TOTAL_BYTES,
         EventSequenceStore,
         IdempotencyStore,
-        PermissionDecision,
         ProtocolError,
-        classify_permission,
         decode_line,
         decode_stream,
         encode_message,
-        event_message,
+        receipt_events_for_request,
         validate_message,
     )
 
@@ -65,7 +60,7 @@ class FakeWorker:
         if prior is not None:
             return ProcessResult(events=prior.events, replayed=True)
 
-        events = self._build_events(validated)
+        events = receipt_events_for_request(validated)
         receipt = self.idempotency.commit(validated, events)
         for event in receipt.events:
             applied = self.event_sequences.apply(event)
@@ -91,95 +86,6 @@ class FakeWorker:
                 if len(output) > MAX_TOTAL_BYTES:
                     raise ProtocolError("output_too_large", "worker output exceeds the total byte limit")
         return bytes(output)
-
-    def _build_events(self, request: dict[str, Any]) -> tuple[dict[str, Any], ...]:
-        operation = request["operation"]
-        payload = request["payload"]
-        payloads: list[tuple[str, dict[str, Any]]] = [
-            ("request.accepted", {"operation": operation})
-        ]
-        if operation == "action.propose":
-            permission = classify_permission(payload["action_type"])
-            payloads.append(
-                (
-                    "permission.decision",
-                    {
-                        "action_id": payload["action_id"],
-                        "action_type": payload["action_type"],
-                        "decision": permission.decision.value,
-                        "reason_code": permission.reason_code,
-                    },
-                )
-            )
-            if permission.decision is PermissionDecision.ALLOW:
-                payloads.append(
-                    (
-                        "action.completed",
-                        {
-                            "action_id": payload["action_id"],
-                            "result_summary": "bounded_read_only_receipt",
-                            "side_effect_performed": False,
-                        },
-                    )
-                )
-            elif permission.decision is PermissionDecision.ASK:
-                payloads.append(
-                    (
-                        "action.awaiting_approval",
-                        {
-                            "action_id": payload["action_id"],
-                            "permission_request_id": _stable_id(
-                                "perm", request["request_id"], payload["action_id"]
-                            ),
-                            "required_decision": "human_approval",
-                            "effect_performed": False,
-                        },
-                    )
-                )
-            else:
-                payloads.append(
-                    (
-                        "action.denied",
-                        {
-                            "action_id": payload["action_id"],
-                            "reason_code": permission.reason_code,
-                            "effect_performed": False,
-                        },
-                    )
-                )
-        elif operation == "cancel":
-            common = {
-                "target_request_id": payload["target_request_id"],
-                "effect_performed": False,
-            }
-            payloads.extend((("cancel.requested", dict(common)), ("cancel.accepted", dict(common))))
-        elif operation == "resume":
-            common = {
-                "target_request_id": payload["target_request_id"],
-                "checkpoint_id": payload["checkpoint_id"],
-                "expected_sequence": payload["expected_sequence"],
-                "effect_performed": False,
-            }
-            payloads.extend((("resume.requested", dict(common)), ("resume.accepted", dict(common))))
-        else:  # validate_message makes this unreachable and keeps the worker fail closed.
-            raise ProtocolError("unknown_operation", "request operation is not supported")
-
-        return tuple(
-            event_message(
-                event_id=_stable_id("evt", request["request_id"], str(sequence), event_type),
-                request_id=request["request_id"],
-                sequence=sequence,
-                event_type=event_type,
-                payload=event_payload,
-            )
-            for sequence, (event_type, event_payload) in enumerate(payloads)
-        )
-
-
-def _stable_id(prefix: str, *parts: str) -> str:
-    digest = hashlib.sha256("\x00".join(parts).encode("utf-8")).hexdigest()[:24]
-    return f"{prefix}_{digest}"
-
 
 def main() -> int:
     worker = FakeWorker()

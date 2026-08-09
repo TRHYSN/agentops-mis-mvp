@@ -75,7 +75,7 @@
     "https://pypi.org/project/openjiuwen/",
     "https://github.com/openJiuwen-ai/agent-core/blob/bf0a3eb2c70fcbae404403530519ca02e7fc4692/docs/en/2.Development%20Guide/Agents/Building%20ReActAgent.md",
     "https://github.com/openJiuwen-ai/agent-core/blob/bf0a3eb2c70fcbae404403530519ca02e7fc4692/docs/en/2.Development%20Guide/Basic%20Functions/Custom%20Tools.md",
-    "https://github.com/openJiuwen-ai/agent-core/blob/bf0a3eb2c70fcbae404403530519ca02e7fc4692/docs/en/2.Development%20Guide/Basic%20Functions/Tool%20permissions%20and%20host%20integration.md",
+    "https://github.com/openJiuwen-ai/agent-core/blob/bf0a3eb2c70fcbae404403530519ca02e7fc4692/docs/en/2.Development%20Guide/Tool%20permissions%20and%20host%20integration.md",
     "https://github.com/openJiuwen-ai/agent-core/blob/bf0a3eb2c70fcbae404403530519ca02e7fc4692/docs/en/2.Development%20Guide/Advanced%20Usage/Checkpointer%20Checkpoint%20Mechanism.md",
     "https://github.com/openJiuwen-ai/agent-core/blob/bf0a3eb2c70fcbae404403530519ca02e7fc4692/openjiuwen/core/runner/callback/events.py"
   ]
