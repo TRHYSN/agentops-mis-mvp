@@ -12,7 +12,7 @@ This board tracks candidate delivery facts. It does not replace MIS or the revie
 | L00 Reconcile | completed | Sol Commander | plan, board, Gate 0 receipt | G0 `PASS_WITH_CONDITIONS` | Keep this branch docs/evidence-only |
 | L01 Dogfood | completed with condition | MIS integrator | MIS objects/readback only | Task/Plan/Run passed; Project/Goal route is Human Session only | Preserve IDs and record later evidence |
 | L02 openJiuwen spike | running | openJiuwen integrator | isolated incubator runtime package/docs/tests | Task `tsk_re_v05_l02_openjiuwen`; Plan `plan_21c9c79c9588e3ab`; Run `run_gw_ddb3915b002a`; install/network still not authorized | Implement fake protocol/manifest slice, then independent review |
-| L03 Domain | running | research domain engineer | domain/repository/migration/tests | Task `tsk_re_v05_l03_domain`; Plan `plan_b802370e7c5eb757`; Run `run_gw_c7c6e0a62419` | Implement pure contract foundation, then independent review |
+| L03 Domain | verifying | research domain engineer | domain/repository/migration/tests | Task `tsk_re_v05_l03_domain`; Plan `plan_b802370e7c5eb757`; Run `run_gw_c7c6e0a62419`; remediation SHA `138e6ab` | Independent Phase B re-verification |
 | L04 Durable executor | pending | executor engineer | executor/reconcile/tests | L03 contract required | No action |
 | L05 Evidence | pending | evidence engineer | ingest/claim/invalidation/tests | L03 contract required | No action |
 | L06 Jiuwen runtime | pending | runtime integrator | runtime adapter/tests | L02 + L03 + L05 | No action |
@@ -33,6 +33,9 @@ This board tracks candidate delivery facts. It does not replace MIS or the revie
 ## Current truth
 
 - `feature_write_allowed=true_for_separately_bound_wave_1_only`
+- `codex_goal_mode=active`
+- `package_unpacked=true`
+- `package_manifest_validation=PASS_39_FILES`
 - `mis_ledger_write=written_and_read_back`
 - `mis_task_id=tsk_re_v05_l00_99ce51d`
 - `mis_plan_id=plan_336c6f572cdcd906`
@@ -43,4 +46,4 @@ This board tracks candidate delivery facts. It does not replace MIS or the revie
 - `openjiuwen_real_install=NOT_RUN`
 - `draft_pr=NOT_CREATED`
 
-The next transition is independent verification of the L02/L03 commits, followed by candidate integration in contract-dependency order. This reconciliation branch remains docs/evidence-only.
+L02 exact SHA `fe045c3` failed independent Phase B on canonical JSON enforcement, camel-case secret keys, permission-authority consistency, and an inaccurate upstream notice filename; remediation is in progress and the failed SHA remains audit history. L03 remediation SHA `138e6ab` is under fresh independent Phase B. Candidate integration remains blocked until both lanes pass. This reconciliation branch remains docs/evidence-only.

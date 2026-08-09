@@ -28,7 +28,10 @@
   "inputs": [
     {
       "kind": "research_edition_package",
-      "sha256": "1caa0d0de411faf524229d70a435eef23c70e2d80daa557fb5547eb0ba4a82e1"
+      "sha256": "1caa0d0de411faf524229d70a435eef23c70e2d80daa557fb5547eb0ba4a82e1",
+      "unpacked_path": ".codex-inputs/AgentOps_MIS_Research_Edition_Codex_Spec_2026-08-09",
+      "manifest_entries": 39,
+      "bundled_validation": "PASS"
     },
     {
       "kind": "repository_instructions",
@@ -64,6 +67,7 @@
   ],
   "verification": {
     "package_validation": "PASS",
+    "package_manifest_entries": 39,
     "exact_main_ci": "PASS",
     "exact_main_unit_tests": "PASS_20_TESTS",
     "bwformer_cpu_smoke": "PASS_FIXTURE_ONLY",

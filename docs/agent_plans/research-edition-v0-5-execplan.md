@@ -10,6 +10,8 @@ Updated: 2026-08-09
 
 MIS binding: Task `tsk_re_v05_l00_99ce51d`; Agent Plan `plan_336c6f572cdcd906`; Run `run_gw_e5fcd972a353`; verified MIS plan hash `e2a9bdd8339e10e16bd169a4f1ff32d61fc8aa2e5a092875e8f057a2e7cb0d6f`.
 
+Codex goal mode: active for thread `019fe520-fd45-7aa3-a4ba-ce25aff05763`. Completion requires all applicable CPU/offline tests, secret scans, scope/ancestry checks, and independent Phase B reviews for the first candidate wave to pass, followed by auditable MIS evidence and Draft PRs. Merge, release, GPU/credential use, production writes, and canonical promotion remain out of scope.
+
 ## Authority and intent
 
 The user authorized isolated reconciliation, planning, local candidate implementation, tests, documentation, and evidence work by saying “开始” with the Research Edition execution package attached. This starts candidate work; it does not promote the package, this plan, or its output to canonical product state.
@@ -33,6 +35,7 @@ Evolve the existing Research Lab 0.4.1 into an evidence-first Research Edition c
 | Input | SHA-256 / exact ref | Authority |
 |---|---|---|
 | Research Edition ZIP | `1caa0d0de411faf524229d70a435eef23c70e2d80daa557fb5547eb0ba4a82e1` | Candidate |
+| Unpacked Research Edition package | `.codex-inputs/AgentOps_MIS_Research_Edition_Codex_Spec_2026-08-09`; package validator `PASS`, 39 manifest entries | Local candidate input |
 | `PROJECT_GOAL.yaml` | `cc4513d1…` | Candidate |
 | Product and architecture spec | `d86c7d88…` | Candidate |
 | Candidate context | `1ddd26ce…` | Candidate |
@@ -133,3 +136,4 @@ Stop and request direction for: main moving before branch integration; unexplain
 
 - 2026-08-09: Gate 0 synthesized from four read-only reports. Architecture decisions frozen for candidate planning. No canonical state changed.
 - 2026-08-09: G1/G2 bound to live MIS. Two earlier Agent Plan submissions remain as audit history: one exposed date-path over-redaction and one exposed installed-repository reference resolution. Replacement plan `plan_336c6f572cdcd906` passed all checks with quality 100/100.
+- 2026-08-09: The uploaded ZIP was fully unpacked into the workspace-local `.codex-inputs` directory and its bundled validator passed all 39 manifest entries. Codex goal mode was activated with the candidate-scope completion and stop conditions above.
