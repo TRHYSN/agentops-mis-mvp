@@ -652,6 +652,7 @@ jobs:
           npm run test:prepared-action-owner-contract
           npm run test:owner-bootstrap-contract
           npm run test:human-session-approval-contract
+          npm run test:control-tower-ui-contract
           npm run test:commercial-worker-contract
           npm run build
 

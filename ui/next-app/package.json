@@ -48,6 +48,7 @@
     "test:loop-supervision-contract": "tsx scripts/loop-supervision-contract.ts",
     "test:human-read-models-contract": "tsx scripts/human-read-models-contract.ts",
     "test:human-session-approval-contract": "tsx scripts/human-session-approval-contract.ts",
+    "test:control-tower-ui-contract": "tsx scripts/control-tower-ui-contract.ts",
     "test:human-run-evidence-graph-postgres-contract": "tsx scripts/human-run-evidence-graph-postgres-contract.ts",
     "test:human-task-run-read-postgres-contract": "tsx scripts/human-task-run-read-postgres-contract.ts",
     "test:prepared-action-owner-contract": "tsx scripts/prepared-action-owner-contract.ts",
