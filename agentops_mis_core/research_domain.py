@@ -214,7 +214,7 @@ class ResearchContract:
             raise ResearchDomainError("contract payload_json must be a canonical JSON string")
         try:
             parsed = json.loads(self.payload_json)
-        except (TypeError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        except (TypeError, UnicodeDecodeError, ValueError) as exc:
             raise ResearchDomainError("contract payload_json must be a canonical JSON object") from exc
         if not isinstance(parsed, dict):
             raise ResearchDomainError("contract payload must be a JSON object")

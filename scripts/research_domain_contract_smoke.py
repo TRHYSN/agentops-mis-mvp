@@ -97,6 +97,16 @@ def main() -> int:
         failures.append("bytes Contract payload_json leaked through validation")
     except ResearchDomainError:
         pass
+    try:
+        ResearchContract(
+            contract_id="contract_huge_int", version=1, workspace_id="ws_1",
+            project_ref="project_1", goal_ref="goal_1", requirement_ref="requirement_1",
+            agent_plan_id="plan_1", contract_artifact_id="art_1",
+            payload_json='{"x":' + ('1' * 5000) + '}', content_hash="0" * 64,
+        )
+        failures.append("oversized persisted JSON integer leaked through validation")
+    except ResearchDomainError:
+        pass
     for malformed in ({"x": "\ud800"}, {"\ud800": "x"}):
         try:
             ResearchContract.create(
