@@ -12,7 +12,7 @@ This board tracks candidate delivery facts. It does not replace MIS or the revie
 | L00 Reconcile | completed | Sol Commander | plan, board, Gate 0 receipt | G0 `PASS_WITH_CONDITIONS` | Keep this branch docs/evidence-only |
 | L01 Dogfood | completed with condition | MIS integrator | MIS objects/readback only | Task/Plan/Run passed; Project/Goal route is Human Session only | Preserve IDs and record later evidence |
 | L02 openJiuwen spike | verifying | openJiuwen integrator | isolated incubator runtime package/docs/tests | Task `tsk_re_v05_l02_openjiuwen`; Plan `plan_21c9c79c9588e3ab`; Run `run_gw_ddb3915b002a`; remediation SHA `e926889`; real install/network remains `NOT_RUN` | Independent Phase B re-verification |
-| L03 Domain | verifying | research domain engineer | domain/repository/migration/tests | Task `tsk_re_v05_l03_domain`; Plan `plan_b802370e7c5eb757`; Run `run_gw_c7c6e0a62419`; remediation SHA `aabbf0a` | Independent Phase B re-verification |
+| L03 Domain | completed with condition | research domain engineer | domain/repository/migration/tests | SHA `aabbf0a`; Phase B `PASS_WITH_CONDITIONS`; Draft PR `#121` | Record/verify MIS Artifact, Evaluation, and plan-evidence; keep EvidenceEdge Claim gate deferred to L05 |
 | L04 Durable executor | pending | executor engineer | executor/reconcile/tests | L03 contract required | No action |
 | L05 Evidence | pending | evidence engineer | ingest/claim/invalidation/tests | L03 contract required | No action |
 | L06 Jiuwen runtime | pending | runtime integrator | runtime adapter/tests | L02 + L03 + L05 | No action |
@@ -45,6 +45,7 @@ This board tracks candidate delivery facts. It does not replace MIS or the revie
 - `live_gpu_uat=NOT_RUN`
 - `openjiuwen_real_install=NOT_RUN`
 - `control_draft_pr=120`
-- `implementation_draft_prs=NOT_CREATED_PHASE_B_BLOCKED`
+- `l03_draft_pr=121`
+- `l02_draft_pr=NOT_CREATED_PHASE_B_BLOCKED`
 
 L02 exact SHA `fe045c3` failed independent Phase B on canonical JSON enforcement, camel-case secret keys, permission-authority consistency, and an inaccurate upstream notice filename. Remediation SHA `e926889` passes the implementer and Commander regression suites and is under independent Phase B; the failed SHA remains audit history. L03 SHA `138e6ab` fixed all first-round blockers but failed a second Phase B on autocommit revision atomicity, strict Claim/Metric types, and an unreachable cancellation edge. Remediation SHA `aabbf0a` passes implementer and Commander regression suites and is under a new independent Phase B. Candidate integration remains blocked until both lanes pass. This reconciliation branch remains docs/evidence-only.

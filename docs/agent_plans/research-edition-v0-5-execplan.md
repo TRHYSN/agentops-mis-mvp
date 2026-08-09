@@ -97,7 +97,9 @@ Only one integration owner may edit `server.py` at a time. L03 owns research sch
 - G0 Current State: `PASS_WITH_CONDITIONS`.
 - G1 Plan: `PASS`; Task and 100/100 verified Agent Plan were read back with exact hashes.
 - G2 Dogfood: `PASS_WITH_CONDITIONS`; a plan-bound Run was read back. Commander Project/Goal remains unavailable to this agent because that route requires a Human Session, so no Project/Goal ID was fabricated.
-- G3 openJiuwen Spike through G12 Final: `NOT_RUN`.
+- G3 openJiuwen Spike: `RUNNING`; remediation continues after independent Phase B found receipt-binding, secret-key normalization, Unicode error-envelope, and source-URL blockers.
+- G4 Domain: `PASS_WITH_CONDITIONS`; exact SHA `aabbf0a`, independent adversarial checks 55/55, Draft PR `#121`. EvidenceEdge-backed Claim readiness/invalidation remains deferred to L05.
+- G5 Durability through G12 Final: `NOT_RUN`.
 
 `feature_write_allowed=true` only for separately owned Wave 1 candidate branches after each receives its own Task/Plan/Run binding. It does not authorize implementation on this reconciliation branch, merge, release, dependency installation, GPU, credentials, or external side effects.
 
@@ -139,3 +141,4 @@ Stop and request direction for: main moving before branch integration; unexplain
 - 2026-08-09: G1/G2 bound to live MIS. Two earlier Agent Plan submissions remain as audit history: one exposed date-path over-redaction and one exposed installed-repository reference resolution. Replacement plan `plan_336c6f572cdcd906` passed all checks with quality 100/100.
 - 2026-08-09: The uploaded ZIP was fully unpacked into the workspace-local `.codex-inputs` directory and its bundled validator passed all 39 manifest entries. Codex goal mode was activated with the candidate-scope completion and stop conditions above.
 - 2026-08-09: Draft PR `#120` published the docs/evidence-only control branch. It remains Proposal/canonical=false and is the intended review base for independently verified Wave 1 implementation PRs.
+- 2026-08-09: L03 exact SHA `aabbf0a` passed independent Phase B with the explicit L05 Claim-evidence condition and was published as Draft PR `#121` against the control branch.

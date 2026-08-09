@@ -1,0 +1,64 @@
+{
+  "schema_version": "research_edition_lane_receipt_v1",
+  "lane": "L03",
+  "title": "Native research domain foundation",
+  "status": "pass_with_conditions",
+  "canonical": false,
+  "authority_class": "candidate",
+  "git": {
+    "repository": "geogejoy107-jpg/agentops-mis-mvp",
+    "base_sha": "ceed92756e527e2580290db78d5513d09e40b389",
+    "branch": "codex/research-v05-domain-foundation",
+    "head_sha": "aabbf0addc35726a467efc3ac6338e3bb76b3242",
+    "commit_count": 3,
+    "merge_commit_count": 0,
+    "changed_file_count": 5,
+    "draft_pr": 121,
+    "draft_pr_base": "codex/research-v05-reconcile"
+  },
+  "mis": {
+    "workspace_id": "local-demo",
+    "task_id": "tsk_re_v05_l03_domain",
+    "agent_plan_id": "plan_b802370e7c5eb757",
+    "plan_hash": "20998223e4e75f6ffb71b4b54534e7fc89a930046457c53dc0344c2bd67fdf2a",
+    "run_id": "run_gw_c7c6e0a62419"
+  },
+  "execution": {
+    "implementation_agent": "/root/research_domain_impl",
+    "independent_verifier": "/root/l03_reverify",
+    "visible_thread_id": "019fe558-7fd2-7433-aae6-05eb995caa9f",
+    "failed_audit_history": [
+      "dd8e0c82265bf4c419dfb54984cb123649a38795",
+      "138e6abc487b2e6639a63ef165c80ae1c6738c2f"
+    ]
+  },
+  "verification": {
+    "domain_contract_smoke": "PASS",
+    "domain_migration_smoke": "PASS",
+    "research_lab_tests": "PASS_20_OF_20",
+    "research_api_smoke": "PASS",
+    "experiment_cli_smoke": "PASS_6_OF_6",
+    "bwformer_cpu_smoke": "PASS_FIXTURE_ONLY",
+    "sqlite_concurrency": "PASS_100_READS_20_WRITES_0_ERRORS",
+    "independent_adversarial_checks": "PASS_55_OF_55",
+    "secret_scan": "PASS_946_FILES_0_FINDINGS",
+    "syntax_compile": "PASS_5_OF_5",
+    "exact_head_clean_ancestry_no_merge_diff_path_dependency": "PASS"
+  },
+  "independent_verdict": {
+    "result": "PASS_WITH_CONDITIONS",
+    "blocking_findings": [],
+    "condition": "EvidenceEdge-backed Claim readiness and invalidation remain explicitly deferred to L05; end-to-end Claim acceptance is not claimed."
+  },
+  "safety": {
+    "user_database_migrated": false,
+    "network_execution_performed": false,
+    "live_gpu_uat": "NOT_RUN",
+    "credentials_used": false,
+    "merge_performed": false,
+    "release_performed": false,
+    "canonical_state_changed": false,
+    "raw_prompt_omitted": true,
+    "raw_response_omitted": true
+  }
+}
