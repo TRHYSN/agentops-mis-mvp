@@ -17,7 +17,7 @@ from agentops_mis_core.research_domain import (  # noqa: E402
     canonical_hash, canonical_json, classify_legacy_record,
 )
 from agentops_mis_core.research_migrations import apply_research_domain_migration  # noqa: E402
-from agentops_mis_core.research_repository import SQLiteResearchRepository  # noqa: E402
+from agentops_mis_core.research_repository import RepositoryConflict, SQLiteResearchRepository  # noqa: E402
 
 
 def require(value: bool, message: str, failures: list[str]) -> None:
@@ -27,17 +27,17 @@ def require(value: bool, message: str, failures: list[str]) -> None:
 
 def authority_fixture(conn: sqlite3.Connection) -> None:
     conn.executescript("""
-        CREATE TABLE agent_plans(plan_id TEXT PRIMARY KEY);
-        CREATE TABLE artifacts(artifact_id TEXT PRIMARY KEY);
-        CREATE TABLE tasks(task_id TEXT PRIMARY KEY);
-        CREATE TABLE runs(run_id TEXT PRIMARY KEY);
-        CREATE TABLE evaluations(evaluation_id TEXT PRIMARY KEY);
+        CREATE TABLE agent_plans(plan_id TEXT PRIMARY KEY,workspace_id TEXT NOT NULL);
+        CREATE TABLE artifacts(artifact_id TEXT PRIMARY KEY,workspace_id TEXT NOT NULL);
+        CREATE TABLE tasks(task_id TEXT PRIMARY KEY,workspace_id TEXT NOT NULL);
+        CREATE TABLE runs(run_id TEXT PRIMARY KEY,workspace_id TEXT NOT NULL);
+        CREATE TABLE evaluations(evaluation_id TEXT PRIMARY KEY,workspace_id TEXT NOT NULL);
     """)
-    conn.executemany("INSERT INTO agent_plans VALUES(?)", [("plan_1",)])
-    conn.executemany("INSERT INTO artifacts VALUES(?)", [(f"art_{i}",) for i in range(1, 8)])
-    conn.executemany("INSERT INTO tasks VALUES(?)", [("task_1",)])
-    conn.executemany("INSERT INTO runs VALUES(?)", [(f"run_{i}",) for i in range(1, 4)])
-    conn.executemany("INSERT INTO evaluations VALUES(?)", [("eval_1",)])
+    conn.executemany("INSERT INTO agent_plans VALUES(?,?)", [("plan_1", "ws_1")])
+    conn.executemany("INSERT INTO artifacts VALUES(?,?)", [(f"art_{i}", "ws_1") for i in range(1, 8)])
+    conn.executemany("INSERT INTO tasks VALUES(?,?)", [("task_1", "ws_1")])
+    conn.executemany("INSERT INTO runs VALUES(?,?)", [(f"run_{i}", "ws_1") for i in range(1, 4)])
+    conn.executemany("INSERT INTO evaluations VALUES(?,?)", [("eval_1", "ws_1")])
     conn.commit()
 
 
@@ -58,6 +58,28 @@ def main() -> int:
     try:
         canonical_hash({"bad": float("nan")})
         failures.append("non-finite canonical JSON was accepted")
+    except ResearchDomainError:
+        pass
+    try:
+        canonical_json({1: "coerced"})
+        failures.append("non-string mapping key was accepted")
+    except ResearchDomainError:
+        pass
+    try:
+        ResearchContract.create(
+            contract_id="contract_bad", version=1, workspace_id="ws_1",
+            project_ref="project_1", goal_ref="goal_1", requirement_ref="requirement_1",
+            agent_plan_id="plan_1", contract_artifact_id="art_1", payload=payload_a,
+            protocol_hash="0" * 64,
+        )
+        failures.append("mismatched supplied protocol hash was accepted")
+    except ResearchDomainError:
+        pass
+    try:
+        JobAttempt("attempt_bad", "trial_1", "run_1", 1).transition(
+            "submitted", expected_state_version=1, reconcile_outcome="running"
+        )
+        failures.append("misleading reconcile metadata was accepted")
     except ResearchDomainError:
         pass
 
@@ -82,6 +104,16 @@ def main() -> int:
         authority_fixture(conn)
         receipt = apply_research_domain_migration(conn)
         repo = SQLiteResearchRepository(conn)
+        conn.execute("INSERT INTO artifacts VALUES('art_cross','ws_other')")
+        try:
+            repo.add_contract(ResearchContract.create(
+                contract_id="contract_cross", version=1, workspace_id="ws_1",
+                project_ref="project_1", goal_ref="goal_1", requirement_ref="requirement_1",
+                agent_plan_id="plan_1", contract_artifact_id="art_cross", payload=payload_a,
+            ))
+            failures.append("cross-workspace contract Artifact was accepted")
+        except RepositoryConflict:
+            pass
         repo.add_contract(immutable)
         c = repo.transition_contract("contract_1", 1, "proposed", expected_state_version=1)
         c = repo.transition_contract("contract_1", 1, "review_pending", expected_state_version=c.state_version)

@@ -223,10 +223,80 @@ _LEGACY_REQUIRED_COLUMNS = {
     "research_metrics": {"metric_id", "experiment_id", "trial_id", "attempt_id", "workspace_id", "name", "value", "step", "recorded_at"},
 }
 
+_NATIVE_OBJECT_NAMES = frozenset({
+    "research_contract_versions", "uq_research_contract_single_current",
+    "research_trial_records", "research_job_attempts", "research_checkpoints",
+    "research_metric_snapshots", "research_claims", "research_evidence_edges",
+    "idx_research_trial_contract", "idx_research_job_trial", "idx_research_claim_contract",
+})
+
+
+def _normalized_sql(value: str | None) -> str:
+    normalized = " ".join((value or "").split())
+    return normalized.replace(" IF NOT EXISTS ", " ")
+
+
+def _expected_native_manifest() -> dict[str, tuple[str, str]]:
+    scratch = sqlite3.connect(":memory:")
+    try:
+        for statement in MIGRATION_STATEMENTS:
+            if " ON research_attempts" in statement or " ON research_metrics" in statement:
+                continue
+            scratch.execute(statement)
+        return {
+            str(name): (str(kind), _normalized_sql(sql))
+            for kind, name, sql in scratch.execute(
+                "SELECT type,name,sql FROM sqlite_master WHERE name IN (%s)" %
+                ",".join("?" for _ in _NATIVE_OBJECT_NAMES), tuple(sorted(_NATIVE_OBJECT_NAMES))
+            )
+        }
+    finally:
+        scratch.close()
+
+
+def _installed_native_manifest(conn: sqlite3.Connection) -> dict[str, tuple[str, str]]:
+    return {
+        str(name): (str(kind), _normalized_sql(sql))
+        for kind, name, sql in conn.execute(
+            "SELECT type,name,sql FROM sqlite_master WHERE name IN (%s)" %
+            ",".join("?" for _ in _NATIVE_OBJECT_NAMES), tuple(sorted(_NATIVE_OBJECT_NAMES))
+        )
+    }
+
+
+def _verify_installed_schema(conn: sqlite3.Connection) -> None:
+    expected = _expected_native_manifest()
+    actual = _installed_native_manifest(conn)
+    if actual != expected:
+        missing = sorted(set(expected) - set(actual))
+        drifted = sorted(name for name in set(expected) & set(actual) if expected[name] != actual[name])
+        extra = sorted(set(actual) - set(expected))
+        raise MigrationChecksumMismatch(
+            f"{MIGRATION_ID} target schema drift: missing={missing}, drifted={drifted}, extra={extra}"
+        )
+    compatibility = {
+        "research_attempts": ("uq_research_attempts_trial_attempt_number", MIGRATION_STATEMENTS[-2]),
+        "research_metrics": ("uq_research_metrics_attempt_slot", MIGRATION_STATEMENTS[-1]),
+    }
+    for table, (index_name, statement) in compatibility.items():
+        if _table_exists(conn, table):
+            row = conn.execute(
+                "SELECT type,sql FROM sqlite_master WHERE name=?", (index_name,)
+            ).fetchone()
+            if row is None or str(row[0]) != "index" or _normalized_sql(row[1]) != _normalized_sql(statement):
+                raise MigrationChecksumMismatch(f"{MIGRATION_ID} compatibility index drift: {index_name}")
+
 
 def inspect_legacy_anomalies(conn: sqlite3.Connection) -> tuple[LegacyAnomaly, ...]:
     """Inspect v0.4 identities before adding any uniqueness constraint."""
     anomalies: list[LegacyAnomaly] = []
+    expected_manifest = _expected_native_manifest()
+    installed_manifest = _installed_native_manifest(conn)
+    for name, actual in installed_manifest.items():
+        if expected_manifest.get(name) != actual:
+            anomalies.append(LegacyAnomaly(
+                "incompatible_target_schema", name, name, "sqlite_master DDL differs from pinned migration",
+            ))
     for table, required in _TARGET_REQUIRED_COLUMNS.items():
         if _table_exists(conn, table) and not required.issubset(_columns(conn, table)):
             anomalies.append(LegacyAnomaly(
@@ -398,31 +468,32 @@ def apply_research_domain_migration(conn: sqlite3.Connection) -> MigrationReceip
     if conn.in_transaction:
         raise ResearchMigrationError("migration requires a connection with no active transaction")
     conn.execute("PRAGMA foreign_keys=ON")
-    if _table_exists(conn, "schema_migrations"):
-        receipt_columns = {"migration_id", "description", "applied_at"}
-        if not receipt_columns.issubset(_columns(conn, "schema_migrations")):
-            raise LegacyPreflightError((LegacyAnomaly(
-                "incompatible_migration_ledger", "schema_migrations", "schema_migrations",
-                "missing columns: " + ",".join(sorted(receipt_columns - _columns(conn, "schema_migrations"))),
-            ),))
-        existing = conn.execute(
-            "SELECT description FROM schema_migrations WHERE migration_id=?", (MIGRATION_ID,)
-        ).fetchone()
-    else:
-        existing = None
-    if existing is not None:
-        if str(existing[0]) != receipt_description():
-            raise MigrationChecksumMismatch(
-                f"{MIGRATION_ID} receipt checksum does not match current DDL"
-            )
-        return MigrationReceipt(MIGRATION_ID, migration_checksum(), False, True)
-
-    anomalies = inspect_legacy_anomalies(conn)
-    if anomalies:
-        raise LegacyPreflightError(anomalies)
-
     try:
         conn.execute("BEGIN IMMEDIATE")
+        if _table_exists(conn, "schema_migrations"):
+            receipt_columns = {"migration_id", "description", "applied_at"}
+            if not receipt_columns.issubset(_columns(conn, "schema_migrations")):
+                raise LegacyPreflightError((LegacyAnomaly(
+                    "incompatible_migration_ledger", "schema_migrations", "schema_migrations",
+                    "missing columns: " + ",".join(sorted(receipt_columns - _columns(conn, "schema_migrations"))),
+                ),))
+            existing = conn.execute(
+                "SELECT description FROM schema_migrations WHERE migration_id=?", (MIGRATION_ID,)
+            ).fetchone()
+        else:
+            existing = None
+        if existing is not None:
+            if str(existing[0]) != receipt_description():
+                raise MigrationChecksumMismatch(
+                    f"{MIGRATION_ID} receipt checksum does not match current DDL"
+                )
+            _verify_installed_schema(conn)
+            conn.commit()
+            return MigrationReceipt(MIGRATION_ID, migration_checksum(), False, True)
+
+        anomalies = inspect_legacy_anomalies(conn)
+        if anomalies:
+            raise LegacyPreflightError(anomalies)
         conn.execute(
             """CREATE TABLE IF NOT EXISTS schema_migrations (
                 migration_id TEXT PRIMARY KEY,
@@ -441,6 +512,7 @@ def apply_research_domain_migration(conn: sqlite3.Connection) -> MigrationReceip
             "INSERT INTO schema_migrations(migration_id,description,applied_at) VALUES(?,?,?)",
             (MIGRATION_ID, receipt_description(), datetime.now(timezone.utc).isoformat()),
         )
+        _verify_installed_schema(conn)
         conn.commit()
     except Exception:
         conn.rollback()

@@ -71,6 +71,17 @@ def main() -> int:
         except MigrationChecksumMismatch:
             pass
 
+    with sqlite3.connect(":memory:") as drifted:
+        drifted.executescript(AUTHORITY_SQL)
+        apply_research_domain_migration(drifted)
+        drifted.execute("DROP INDEX idx_research_claim_contract")
+        drifted.commit()
+        try:
+            apply_research_domain_migration(drifted)
+            failures.append("matching receipt accepted missing target index")
+        except MigrationChecksumMismatch:
+            pass
+
     anomaly_codes: set[str] = set()
     with sqlite3.connect(":memory:") as legacy_bad:
         legacy_bad.executescript(AUTHORITY_SQL + LEGACY_SQL)

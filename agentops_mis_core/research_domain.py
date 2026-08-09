@@ -32,6 +32,25 @@ class StaleStateVersion(ResearchDomainError):
 
 def canonical_json(value: Any) -> str:
     """Return deterministic JSON and reject non-finite/non-JSON values."""
+    def validate(item: Any, path: str = "$") -> None:
+        if item is None or isinstance(item, (str, bool, int)):
+            return
+        if isinstance(item, float):
+            if not math.isfinite(item):
+                raise ResearchDomainError(f"{path} must be finite")
+            return
+        if isinstance(item, list):
+            for index, child in enumerate(item):
+                validate(child, f"{path}[{index}]")
+            return
+        if isinstance(item, dict):
+            for key, child in item.items():
+                if not isinstance(key, str):
+                    raise ResearchDomainError(f"{path} mapping keys must be strings")
+                validate(child, f"{path}.{key}")
+            return
+        raise ResearchDomainError(f"{path} contains unsupported JSON type")
+    validate(value)
     try:
         return json.dumps(
             value,
@@ -187,7 +206,8 @@ class ResearchContract:
             if supplied is None:
                 object.__setattr__(self, field, derived)
             else:
-                _hash(supplied, field)
+                if _hash(supplied, field) != derived:
+                    raise ResearchDomainError(f"{field} does not match canonical payload-derived value")
         if self.supersedes_version is not None and self.supersedes_version >= self.version:
             raise ResearchDomainError("supersedes_version must precede version")
 
@@ -278,12 +298,20 @@ class JobAttempt:
             raise ResearchDomainError("unsupported attempt status")
         if self.reconcile_outcome not in {None, "running", "succeeded", "failed", "orphaned", "unknown"}:
             raise ResearchDomainError("unsupported reconcile outcome")
+        allowed_outcome = {
+            "running": "running", "succeeded": "succeeded", "failed": "failed",
+            "orphaned": "orphaned", "reconcile_ambiguous": "unknown",
+        }.get(self.status)
+        if self.reconcile_outcome is not None and self.reconcile_outcome != allowed_outcome:
+            raise ResearchDomainError("reconcile_outcome does not match the durable result state")
         if self.legacy_attempt_id is not None:
             _id(self.legacy_attempt_id, "legacy_attempt_id")
 
     def transition(
         self, target: str, *, expected_state_version: int, reconcile_outcome: str | None = None
     ) -> "JobAttempt":
+        if self.status != "reconciling" and reconcile_outcome is not None:
+            raise ResearchDomainError("reconcile_outcome is only valid for a reconciling result")
         if self.status == "reconciling":
             expected_target = {
                 "running": "running", "succeeded": "succeeded", "failed": "failed",

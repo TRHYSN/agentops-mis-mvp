@@ -47,6 +47,59 @@ class SQLiteResearchRepository:
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA foreign_keys=ON")
 
+    def _authority_workspace(self, table: str, id_column: str, identity: str) -> str:
+        columns = {str(row[1]) for row in self.conn.execute(f'PRAGMA table_info("{table}")')}
+        if id_column not in columns:
+            raise RepositoryConflict(f"MIS authority table {table} is unavailable or incompatible")
+        if "workspace_id" in columns:
+            row = self.conn.execute(
+                f'SELECT workspace_id FROM "{table}" WHERE "{id_column}"=?', (identity,)
+            ).fetchone()
+            if row is None or not row[0]:
+                raise RepositoryConflict(f"MIS authority {table}:{identity} has no workspace")
+            return str(row[0])
+        # Current main artifacts/evaluations predate a direct workspace column.
+        # Their bounded compatibility authority is derived from real Task/Run FKs.
+        if table not in {"artifacts", "evaluations"} or not {"task_id", "run_id"}.issubset(columns):
+            raise RepositoryConflict(f"MIS authority {table}:{identity} lacks workspace authority")
+        row = self.conn.execute(
+            f'SELECT task_id,run_id FROM "{table}" WHERE "{id_column}"=?', (identity,)
+        ).fetchone()
+        if row is None:
+            raise RepositoryConflict(f"MIS authority {table}:{identity} is missing")
+        workspaces = set()
+        if row[0]:
+            workspaces.add(self._authority_workspace("tasks", "task_id", str(row[0])))
+        if row[1]:
+            workspaces.add(self._authority_workspace("runs", "run_id", str(row[1])))
+        if len(workspaces) != 1:
+            raise RepositoryConflict(f"MIS authority {table}:{identity} has ambiguous workspace bindings")
+        return workspaces.pop()
+
+    @staticmethod
+    def _same_workspace(expected: str, actual: str, subject: str) -> None:
+        if actual != expected:
+            raise RepositoryConflict(f"cross-workspace {subject}: expected {expected}, got {actual}")
+
+    def _trial_workspace(self, trial_id: str) -> str:
+        row = self.conn.execute(
+            """SELECT c.workspace_id FROM research_trial_records t
+               JOIN research_contract_versions c
+                 ON c.contract_id=t.contract_id AND c.version=t.contract_version
+               WHERE t.trial_id=?""", (trial_id,),
+        ).fetchone()
+        if row is None:
+            raise RepositoryConflict(f"trial {trial_id} has no contract workspace")
+        return str(row[0])
+
+    def _attempt_workspace(self, attempt_id: str) -> str:
+        row = self.conn.execute(
+            "SELECT trial_id FROM research_job_attempts WHERE attempt_id=?", (attempt_id,),
+        ).fetchone()
+        if row is None:
+            raise RepositoryConflict(f"attempt {attempt_id} is missing")
+        return self._trial_workspace(str(row[0]))
+
     @staticmethod
     def _contract(row: sqlite3.Row) -> ResearchContract:
         return ResearchContract(
@@ -81,6 +134,8 @@ class SQLiteResearchRepository:
 
     def add_contract(self, contract: ResearchContract) -> None:
         now = _now()
+        self._same_workspace(contract.workspace_id, self._authority_workspace("agent_plans", "plan_id", contract.agent_plan_id), "contract Agent Plan")
+        self._same_workspace(contract.workspace_id, self._authority_workspace("artifacts", "artifact_id", contract.contract_artifact_id), "contract Artifact")
         try:
             with self.conn:
                 self.conn.execute(
@@ -184,6 +239,8 @@ class SQLiteResearchRepository:
 
     def add_trial(self, trial: Trial) -> None:
         now = _now()
+        contract = self._require_contract(trial.contract_id, trial.contract_version)
+        self._same_workspace(contract.workspace_id, self._authority_workspace("tasks", "task_id", trial.task_id), "trial Task")
         try:
             with self.conn:
                 self.conn.execute(
@@ -217,6 +274,8 @@ class SQLiteResearchRepository:
 
     def add_job_attempt(self, attempt: JobAttempt) -> None:
         now = _now()
+        workspace = self._trial_workspace(attempt.trial_id)
+        self._same_workspace(workspace, self._authority_workspace("runs", "run_id", attempt.run_id), "attempt Run")
         try:
             with self.conn:
                 self.conn.execute(
@@ -263,6 +322,9 @@ class SQLiteResearchRepository:
         return updated
 
     def add_checkpoint(self, checkpoint: Checkpoint) -> None:
+        workspace = self._attempt_workspace(checkpoint.attempt_id)
+        self._same_workspace(workspace, self._authority_workspace("artifacts", "artifact_id", checkpoint.artifact_id), "checkpoint Artifact")
+        self._same_workspace(workspace, self._authority_workspace("runs", "run_id", checkpoint.source_run_id), "checkpoint source Run")
         try:
             with self.conn:
                 self.conn.execute(
@@ -277,6 +339,10 @@ class SQLiteResearchRepository:
             raise RepositoryConflict("checkpoint or artifact identity conflicts") from exc
 
     def add_metric_snapshot(self, metric: MetricSnapshot) -> None:
+        workspace = self._attempt_workspace(metric.attempt_id)
+        self._same_workspace(workspace, self._authority_workspace("artifacts", "artifact_id", metric.artifact_id), "metric Artifact")
+        if metric.evaluation_id is not None:
+            self._same_workspace(workspace, self._authority_workspace("evaluations", "evaluation_id", metric.evaluation_id), "metric Evaluation")
         try:
             with self.conn:
                 self.conn.execute(
@@ -291,6 +357,8 @@ class SQLiteResearchRepository:
 
     def add_claim(self, claim: ResearchClaim) -> None:
         now = _now()
+        contract = self._require_contract(claim.contract_id, claim.contract_version)
+        self._same_workspace(contract.workspace_id, self._authority_workspace("evaluations", "evaluation_id", claim.evaluation_id), "claim Evaluation")
         try:
             with self.conn:
                 self.conn.execute(
