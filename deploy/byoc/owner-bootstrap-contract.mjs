@@ -42,6 +42,7 @@ try {
   assert.doesNotMatch(ownerService, /human_session_hmac_key/);
   assert.match(dockerfile, /owner-bootstrap-entrypoint\.mjs/);
   assert.match(helper, /PGPASSFILE/);
+  assert.match(helper, /\["run", "--silent", "bootstrap:owner", "--"/);
   assert.doesNotMatch(helper, /childEnvironment\.PGPASSWORD\s*=/);
   assert.match(helper, /delete childEnvironment\.AGENTOPS_POSTGRES_MIGRATOR_PASSWORD_FILE/);
   assert.match(operator, /set \+x/);
