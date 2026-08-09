@@ -34,6 +34,10 @@ class LegacyPreflightError(ResearchMigrationError):
         super().__init__("legacy research data failed closed preflight: " + ", ".join(a.code for a in self.anomalies))
 
 
+class AuthorityPreflightError(LegacyPreflightError):
+    """Core MIS authority schema is absent or cannot support safe bindings."""
+
+
 @dataclass(frozen=True, slots=True)
 class LegacyAnomaly:
     code: str
@@ -146,7 +150,7 @@ MIGRATION_STATEMENTS = (
         statement TEXT NOT NULL,
         status TEXT NOT NULL,
         state_version INTEGER NOT NULL CHECK(state_version >= 1),
-        machine_gate_passed INTEGER NOT NULL DEFAULT 0,
+        machine_gate_passed INTEGER NOT NULL DEFAULT 0 CHECK(machine_gate_passed IN (0,1)),
         independent_reviewer_id TEXT,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL,
@@ -222,6 +226,45 @@ _LEGACY_REQUIRED_COLUMNS = {
     "research_attempts": {"attempt_id", "experiment_id", "trial_id", "workspace_id", "attempt_number", "status", "run_id"},
     "research_metrics": {"metric_id", "experiment_id", "trial_id", "attempt_id", "workspace_id", "name", "value", "step", "recorded_at"},
 }
+
+_CORE_REQUIRED_COLUMNS = {
+    "agent_plans": {"plan_id", "workspace_id", "status", "plan_hash", "verified_at"},
+    "artifacts": {"artifact_id", "task_id", "run_id", "content_hash"},
+    "tasks": {"task_id", "workspace_id"},
+    "runs": {"run_id", "workspace_id"},
+    "evaluations": {"evaluation_id", "task_id", "run_id"},
+}
+_CORE_PRIMARY_KEYS = {
+    "agent_plans": "plan_id", "artifacts": "artifact_id", "tasks": "task_id",
+    "runs": "run_id", "evaluations": "evaluation_id",
+}
+_CORE_REQUIRED_FOREIGN_KEYS = {
+    "artifacts": {("task_id", "tasks", "task_id"), ("run_id", "runs", "run_id")},
+    "evaluations": {("task_id", "tasks", "task_id"), ("run_id", "runs", "run_id")},
+}
+
+
+def inspect_core_authority_schema(conn: sqlite3.Connection) -> tuple[LegacyAnomaly, ...]:
+    anomalies: list[LegacyAnomaly] = []
+    for table, required in _CORE_REQUIRED_COLUMNS.items():
+        if not _table_exists(conn, table):
+            anomalies.append(LegacyAnomaly("missing_core_authority_table", table, table, "required Core MIS table is absent"))
+            continue
+        columns = _columns(conn, table)
+        missing = sorted(required - columns)
+        if missing:
+            anomalies.append(LegacyAnomaly("incompatible_core_authority_columns", table, table, "missing columns: " + ",".join(missing)))
+        pk_columns = {str(row[1]) for row in conn.execute(f'PRAGMA table_info("{table}")') if int(row[5]) > 0}
+        expected_pk = _CORE_PRIMARY_KEYS[table]
+        if pk_columns != {expected_pk}:
+            anomalies.append(LegacyAnomaly("incompatible_core_authority_primary_key", table, table, f"expected primary key {expected_pk}"))
+    for table, required in _CORE_REQUIRED_FOREIGN_KEYS.items():
+        if not _table_exists(conn, table):
+            continue
+        actual = {(str(row[3]), str(row[2]), str(row[4])) for row in conn.execute(f'PRAGMA foreign_key_list("{table}")')}
+        for edge in sorted(required - actual):
+            anomalies.append(LegacyAnomaly("missing_core_authority_foreign_key", table, edge[0], f"expected {edge[0]} -> {edge[1]}.{edge[2]}"))
+    return tuple(anomalies)
 
 _NATIVE_OBJECT_NAMES = frozenset({
     "research_contract_versions", "uq_research_contract_single_current",
@@ -470,6 +513,9 @@ def apply_research_domain_migration(conn: sqlite3.Connection) -> MigrationReceip
     conn.execute("PRAGMA foreign_keys=ON")
     try:
         conn.execute("BEGIN IMMEDIATE")
+        authority_anomalies = inspect_core_authority_schema(conn)
+        if authority_anomalies:
+            raise AuthorityPreflightError(authority_anomalies)
         if _table_exists(conn, "schema_migrations"):
             receipt_columns = {"migration_id", "description", "applied_at"}
             if not receipt_columns.issubset(_columns(conn, "schema_migrations")):

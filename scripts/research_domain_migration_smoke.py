@@ -11,7 +11,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from agentops_mis_core.research_migrations import (  # noqa: E402
-    MIGRATION_ID, LegacyPreflightError, MigrationChecksumMismatch,
+    MIGRATION_ID, AuthorityPreflightError, LegacyPreflightError, MigrationChecksumMismatch,
     apply_research_domain_migration, classify_legacy_row,
     legacy_read_compatibility_contract, migration_checksum,
 )
@@ -19,11 +19,17 @@ from agentops_mis_core.research_migrations import (  # noqa: E402
 
 AUTHORITY_SQL = """
 CREATE TABLE schema_migrations(migration_id TEXT PRIMARY KEY,description TEXT NOT NULL,applied_at TEXT NOT NULL);
-CREATE TABLE agent_plans(plan_id TEXT PRIMARY KEY);
-CREATE TABLE artifacts(artifact_id TEXT PRIMARY KEY);
-CREATE TABLE tasks(task_id TEXT PRIMARY KEY);
-CREATE TABLE runs(run_id TEXT PRIMARY KEY);
-CREATE TABLE evaluations(evaluation_id TEXT PRIMARY KEY);
+CREATE TABLE tasks(task_id TEXT PRIMARY KEY,workspace_id TEXT NOT NULL);
+CREATE TABLE runs(run_id TEXT PRIMARY KEY,workspace_id TEXT NOT NULL);
+CREATE TABLE agent_plans(plan_id TEXT PRIMARY KEY,workspace_id TEXT NOT NULL,status TEXT NOT NULL,plan_hash TEXT,verified_at TEXT);
+CREATE TABLE artifacts(
+ artifact_id TEXT PRIMARY KEY,task_id TEXT,run_id TEXT,content_hash TEXT,
+ FOREIGN KEY(task_id) REFERENCES tasks(task_id),FOREIGN KEY(run_id) REFERENCES runs(run_id)
+);
+CREATE TABLE evaluations(
+ evaluation_id TEXT PRIMARY KEY,task_id TEXT NOT NULL,run_id TEXT NOT NULL,
+ FOREIGN KEY(task_id) REFERENCES tasks(task_id),FOREIGN KEY(run_id) REFERENCES runs(run_id)
+);
 """
 
 LEGACY_SQL = """
@@ -49,6 +55,14 @@ def require(value: bool, message: str, failures: list[str]) -> None:
 
 def main() -> int:
     failures: list[str] = []
+    with sqlite3.connect(":memory:") as empty:
+        try:
+            apply_research_domain_migration(empty)
+            failures.append("empty SQLite invented Core MIS authority tables")
+        except AuthorityPreflightError:
+            pass
+        require(not list(empty.execute("SELECT name FROM sqlite_master WHERE type='table'")),
+                "failed Core authority preflight wrote schema objects", failures)
     with sqlite3.connect(":memory:") as fresh:
         fresh.executescript(AUTHORITY_SQL)
         first = apply_research_domain_migration(fresh)
@@ -79,6 +93,23 @@ def main() -> int:
         try:
             apply_research_domain_migration(drifted)
             failures.append("matching receipt accepted missing target index")
+        except MigrationChecksumMismatch:
+            pass
+
+    with sqlite3.connect(":memory:") as constraint_drift:
+        constraint_drift.executescript(AUTHORITY_SQL)
+        apply_research_domain_migration(constraint_drift)
+        constraint_drift.execute("PRAGMA writable_schema=ON")
+        constraint_drift.execute(
+            """UPDATE sqlite_master SET sql=REPLACE(
+                 sql,' CHECK(machine_gate_passed IN (0,1))','')
+               WHERE type='table' AND name='research_claims'"""
+        )
+        constraint_drift.execute("PRAGMA writable_schema=OFF")
+        constraint_drift.commit()
+        try:
+            apply_research_domain_migration(constraint_drift)
+            failures.append("matching receipt accepted claim CHECK constraint drift")
         except MigrationChecksumMismatch:
             pass
 

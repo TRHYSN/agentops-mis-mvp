@@ -190,7 +190,12 @@ class ResearchContract:
         _positive_version(self.state_version, "state_version")
         if self.status not in CONTRACT_TRANSITIONS:
             raise ResearchDomainError("unsupported contract status")
-        parsed = json.loads(self.payload_json)
+        try:
+            parsed = json.loads(self.payload_json)
+        except (TypeError, json.JSONDecodeError) as exc:
+            raise ResearchDomainError("contract payload_json must be a canonical JSON object") from exc
+        if not isinstance(parsed, dict):
+            raise ResearchDomainError("contract payload must be a JSON object")
         if canonical_json(parsed) != self.payload_json:
             raise ResearchDomainError("payload_json must already be canonical")
         if canonical_hash(parsed) != _hash(self.content_hash, "content_hash"):
@@ -213,6 +218,8 @@ class ResearchContract:
 
     @classmethod
     def create(cls, *, payload: Mapping[str, Any], **fields: Any) -> "ResearchContract":
+        if not isinstance(payload, dict):
+            raise ResearchDomainError("contract payload must be a JSON object")
         payload_json = canonical_json(payload)
         return cls(payload_json=payload_json, content_hash=canonical_hash(payload), **fields)
 
@@ -228,7 +235,9 @@ class ResearchContract:
         )
         return replace(self, status=target, state_version=next_version)
 
-    def revision(self, *, payload: Mapping[str, Any]) -> "ResearchContract":
+    def revision(
+        self, *, payload: Mapping[str, Any], contract_artifact_id: str | None = None
+    ) -> "ResearchContract":
         """Create a new immutable draft; persistence supersedes the old row atomically."""
         return ResearchContract.create(
             contract_id=self.contract_id,
@@ -238,7 +247,7 @@ class ResearchContract:
             goal_ref=self.goal_ref,
             requirement_ref=self.requirement_ref,
             agent_plan_id=self.agent_plan_id,
-            contract_artifact_id=self.contract_artifact_id,
+            contract_artifact_id=contract_artifact_id or self.contract_artifact_id,
             payload=payload,
             status="draft",
             state_version=1,

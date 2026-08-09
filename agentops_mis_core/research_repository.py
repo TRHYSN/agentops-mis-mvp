@@ -31,7 +31,7 @@ class ResearchRepository(Protocol):
     def add_contract(self, contract: ResearchContract) -> None: ...
     def get_contract(self, contract_id: str, version: int | None = None) -> ResearchContract | None: ...
     def transition_contract(self, contract_id: str, version: int, target: str, *, expected_state_version: int) -> ResearchContract: ...
-    def revise_contract(self, contract_id: str, version: int, *, payload: Mapping[str, Any], expected_state_version: int) -> ResearchContract: ...
+    def revise_contract(self, contract_id: str, version: int, *, payload: Mapping[str, Any], expected_state_version: int, contract_artifact_id: str | None = None) -> ResearchContract: ...
     def add_trial(self, trial: Trial) -> None: ...
     def get_trial(self, trial_id: str) -> Trial | None: ...
     def transition_trial(self, trial_id: str, target: str, *, expected_state_version: int) -> Trial: ...
@@ -101,6 +101,27 @@ class SQLiteResearchRepository:
             raise RepositoryConflict(f"attempt {attempt_id} is missing")
         return self._trial_workspace(str(row[0]))
 
+    def _validate_contract_authority(self, contract: ResearchContract) -> None:
+        plan_workspace = self._authority_workspace("agent_plans", "plan_id", contract.agent_plan_id)
+        artifact_workspace = self._authority_workspace("artifacts", "artifact_id", contract.contract_artifact_id)
+        self._same_workspace(contract.workspace_id, plan_workspace, "contract Agent Plan")
+        self._same_workspace(contract.workspace_id, artifact_workspace, "contract Artifact")
+        artifact_row = self.conn.execute(
+            "SELECT content_hash FROM artifacts WHERE artifact_id=?", (contract.contract_artifact_id,),
+        ).fetchone()
+        if artifact_row is None or not isinstance(artifact_row[0], str) or artifact_row[0] != contract.content_hash:
+            raise RepositoryConflict("contract Artifact content_hash does not match immutable Contract payload")
+        if contract.status in {"approved", "active"}:
+            plan = self.conn.execute(
+                "SELECT plan_hash,verified_at FROM agent_plans WHERE plan_id=?", (contract.agent_plan_id,),
+            ).fetchone()
+            plan_hash = plan[0] if plan else None
+            verified_at = plan[1] if plan else None
+            if not (isinstance(plan_hash, str) and len(plan_hash) == 64
+                    and all(char in "0123456789abcdefABCDEF" for char in plan_hash)
+                    and isinstance(verified_at, str) and verified_at.strip()):
+                raise RepositoryConflict("approved/active Contract requires a verified immutable Agent Plan")
+
     @contextmanager
     def _revision_transaction(self):
         """Own an IMMEDIATE transaction, or nest without committing the caller."""
@@ -158,8 +179,7 @@ class SQLiteResearchRepository:
 
     def add_contract(self, contract: ResearchContract) -> None:
         now = _now()
-        self._same_workspace(contract.workspace_id, self._authority_workspace("agent_plans", "plan_id", contract.agent_plan_id), "contract Agent Plan")
-        self._same_workspace(contract.workspace_id, self._authority_workspace("artifacts", "artifact_id", contract.contract_artifact_id), "contract Artifact")
+        self._validate_contract_authority(contract)
         try:
             with self.conn:
                 self.conn.execute(
@@ -192,7 +212,11 @@ class SQLiteResearchRepository:
                 "SELECT * FROM research_contract_versions WHERE contract_id=? AND version=?",
                 (contract_id, version),
             ).fetchone()
-        return self._contract(row) if row else None
+        if row is None:
+            return None
+        contract = self._contract(row)
+        self._validate_contract_authority(contract)
+        return contract
 
     def _require_contract(self, contract_id: str, version: int) -> ResearchContract:
         contract = self.get_contract(contract_id, version)
@@ -205,6 +229,7 @@ class SQLiteResearchRepository:
     ) -> ResearchContract:
         current = self._require_contract(contract_id, version)
         updated = current.transition(target, expected_state_version=expected_state_version)
+        self._validate_contract_authority(updated)
         with self.conn:
             cursor = self.conn.execute(
                 """UPDATE research_contract_versions SET status=?,state_version=?,updated_at=?
@@ -222,11 +247,13 @@ class SQLiteResearchRepository:
         *,
         payload: Mapping[str, Any],
         expected_state_version: int,
+        contract_artifact_id: str | None = None,
     ) -> ResearchContract:
         current = self._require_contract(contract_id, version)
         if current.state_version != expected_state_version:
             raise StaleStateVersion("contract state changed concurrently")
-        revised = current.revision(payload=payload)
+        revised = current.revision(payload=payload, contract_artifact_id=contract_artifact_id)
+        self._validate_contract_authority(revised)
         now = _now()
         try:
             with self._revision_transaction():
@@ -401,11 +428,14 @@ class SQLiteResearchRepository:
         row = self.conn.execute("SELECT * FROM research_claims WHERE claim_id=?", (claim_id,)).fetchone()
         if row is None:
             return None
+        raw_machine_gate = row["machine_gate_passed"]
+        if type(raw_machine_gate) is not int or raw_machine_gate not in (0, 1):
+            raise RepositoryConflict("persisted claim machine_gate_passed must be exact SQLite 0 or 1")
         return ResearchClaim(
             claim_id=row["claim_id"], contract_id=row["contract_id"],
             contract_version=row["contract_version"], evaluation_id=row["evaluation_id"],
             statement=row["statement"], status=row["status"], state_version=row["state_version"],
-            machine_gate_passed=bool(row["machine_gate_passed"]),
+            machine_gate_passed=bool(raw_machine_gate),
             independent_reviewer_id=row["independent_reviewer_id"],
         )
 

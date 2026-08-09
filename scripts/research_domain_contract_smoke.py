@@ -25,19 +25,36 @@ def require(value: bool, message: str, failures: list[str]) -> None:
         failures.append(message)
 
 
-def authority_fixture(conn: sqlite3.Connection) -> None:
+def authority_fixture(conn: sqlite3.Connection, artifact_hashes: dict[str, str]) -> None:
     conn.executescript("""
-        CREATE TABLE agent_plans(plan_id TEXT PRIMARY KEY,workspace_id TEXT NOT NULL);
-        CREATE TABLE artifacts(artifact_id TEXT PRIMARY KEY,workspace_id TEXT NOT NULL);
         CREATE TABLE tasks(task_id TEXT PRIMARY KEY,workspace_id TEXT NOT NULL);
         CREATE TABLE runs(run_id TEXT PRIMARY KEY,workspace_id TEXT NOT NULL);
-        CREATE TABLE evaluations(evaluation_id TEXT PRIMARY KEY,workspace_id TEXT NOT NULL);
+        CREATE TABLE agent_plans(
+          plan_id TEXT PRIMARY KEY,workspace_id TEXT NOT NULL,status TEXT NOT NULL,
+          plan_hash TEXT,verified_at TEXT
+        );
+        CREATE TABLE artifacts(
+          artifact_id TEXT PRIMARY KEY,task_id TEXT,run_id TEXT,content_hash TEXT,
+          FOREIGN KEY(task_id) REFERENCES tasks(task_id),FOREIGN KEY(run_id) REFERENCES runs(run_id)
+        );
+        CREATE TABLE evaluations(
+          evaluation_id TEXT PRIMARY KEY,task_id TEXT NOT NULL,run_id TEXT NOT NULL,
+          FOREIGN KEY(task_id) REFERENCES tasks(task_id),FOREIGN KEY(run_id) REFERENCES runs(run_id)
+        );
     """)
-    conn.executemany("INSERT INTO agent_plans VALUES(?,?)", [("plan_1", "ws_1")])
-    conn.executemany("INSERT INTO artifacts VALUES(?,?)", [(f"art_{i}", "ws_1") for i in range(1, 8)])
-    conn.executemany("INSERT INTO tasks VALUES(?,?)", [("task_1", "ws_1")])
-    conn.executemany("INSERT INTO runs VALUES(?,?)", [(f"run_{i}", "ws_1") for i in range(1, 4)])
-    conn.executemany("INSERT INTO evaluations VALUES(?,?)", [("eval_1", "ws_1")])
+    conn.executemany("INSERT INTO tasks VALUES(?,?)", [("task_1", "ws_1"), ("task_other", "ws_other")])
+    conn.executemany("INSERT INTO runs VALUES(?,?)", [(f"run_{i}", "ws_1") for i in range(1, 4)] + [("run_other", "ws_other")])
+    conn.executemany(
+        "INSERT INTO agent_plans VALUES(?,?,?,?,?)",
+        [("plan_1", "ws_1", "submitted", "a" * 64, "2026-08-09T00:00:00+00:00"),
+         ("plan_unverified", "ws_1", "draft", None, None)],
+    )
+    rows = []
+    for artifact_id, content_hash in artifact_hashes.items():
+        other = artifact_id == "art_cross"
+        rows.append((artifact_id, "task_other" if other else "task_1", "run_other" if other else "run_1", content_hash))
+    conn.executemany("INSERT INTO artifacts VALUES(?,?,?,?)", rows)
+    conn.execute("INSERT INTO evaluations VALUES('eval_1','task_1','run_1')")
     conn.commit()
 
 
@@ -53,6 +70,10 @@ def main() -> int:
     failures: list[str] = []
     payload_a = {"z": [3, 2, 1], "a": {"threshold": 0.5, "enabled": True}}
     payload_b = {"a": {"enabled": True, "threshold": 0.5}, "z": [3, 2, 1]}
+    revised_payload = {"research_question": "revised"}
+    atomic_v1_payload = {"protocol": "v1"}
+    atomic_conflict_payload = {"protocol": "conflict"}
+    atomic_v2_payload = {"protocol": "v2"}
     require(canonical_json(payload_a) == canonical_json(payload_b), "canonical JSON ordering drift", failures)
     require(canonical_hash(payload_a) == canonical_hash(payload_b), "canonical hash ordering drift", failures)
     try:
@@ -60,9 +81,24 @@ def main() -> int:
         failures.append("non-finite canonical JSON was accepted")
     except ResearchDomainError:
         pass
+    for bad_payload in ([], "text", None):
+        try:
+            ResearchContract.create(
+                contract_id="contract_non_object", version=1, workspace_id="ws_1",
+                project_ref="project_1", goal_ref="goal_1", requirement_ref="requirement_1",
+                agent_plan_id="plan_1", contract_artifact_id="art_1", payload=bad_payload,  # type: ignore[arg-type]
+            )
+            failures.append(f"non-object Contract payload was accepted: {bad_payload!r}")
+        except ResearchDomainError:
+            pass
     try:
         canonical_json({1: "coerced"})
         failures.append("non-string mapping key was accepted")
+    except ResearchDomainError:
+        pass
+    try:
+        canonical_json({"nested": [{2: "coerced"}]})
+        failures.append("nested non-string mapping key was accepted")
     except ResearchDomainError:
         pass
     try:
@@ -96,6 +132,11 @@ def main() -> int:
 
     immutable = contract(payload_a)
     try:
+        immutable.revision(payload=["not", "object"])  # type: ignore[arg-type]
+        failures.append("non-object Contract revision was accepted")
+    except ResearchDomainError:
+        pass
+    try:
         immutable.status = "active"  # type: ignore[misc]
         failures.append("frozen contract was mutable")
     except FrozenInstanceError:
@@ -112,11 +153,17 @@ def main() -> int:
         pass
 
     with sqlite3.connect(":memory:") as conn:
-        authority_fixture(conn)
+        artifact_hashes = {
+            "art_1": canonical_hash(payload_a), "art_2": "2" * 64, "art_3": "3" * 64,
+            "art_4": canonical_hash(atomic_v1_payload), "art_5": canonical_hash(revised_payload),
+            "art_6": canonical_hash(atomic_conflict_payload), "art_7": canonical_hash(atomic_v2_payload),
+            "art_8": canonical_hash({"unverified": True}), "art_cross": canonical_hash(payload_a),
+            "art_mismatch": "f" * 64,
+        }
+        authority_fixture(conn, artifact_hashes)
         conn.isolation_level = None
         receipt = apply_research_domain_migration(conn)
         repo = SQLiteResearchRepository(conn)
-        conn.execute("INSERT INTO artifacts VALUES('art_cross','ws_other')")
         try:
             repo.add_contract(ResearchContract.create(
                 contract_id="contract_cross", version=1, workspace_id="ws_1",
@@ -124,6 +171,15 @@ def main() -> int:
                 agent_plan_id="plan_1", contract_artifact_id="art_cross", payload=payload_a,
             ))
             failures.append("cross-workspace contract Artifact was accepted")
+        except RepositoryConflict:
+            pass
+        try:
+            repo.add_contract(ResearchContract.create(
+                contract_id="contract_mismatch", version=1, workspace_id="ws_1",
+                project_ref="project_1", goal_ref="goal_1", requirement_ref="requirement_1",
+                agent_plan_id="plan_1", contract_artifact_id="art_mismatch", payload=payload_a,
+            ))
+            failures.append("mismatched Contract Artifact hash was accepted")
         except RepositoryConflict:
             pass
         repo.add_contract(immutable)
@@ -136,8 +192,8 @@ def main() -> int:
         except InvalidTransition:
             pass
         revised = repo.revise_contract(
-            "contract_1", 1, payload={"research_question": "revised"},
-            expected_state_version=c.state_version,
+            "contract_1", 1, payload=revised_payload,
+            expected_state_version=c.state_version, contract_artifact_id="art_5",
         )
         require(revised.version == 2 and revised.supersedes_version == 1, "revision did not create new version", failures)
         require(revised.content_hash != c.content_hash, "revision did not create new hash", failures)
@@ -145,7 +201,7 @@ def main() -> int:
         atomic = ResearchContract.create(
             contract_id="contract_atomic", version=1, workspace_id="ws_1",
             project_ref="project_1", goal_ref="goal_1", requirement_ref="requirement_1",
-            agent_plan_id="plan_1", contract_artifact_id="art_4", payload={"protocol": "v1"},
+            agent_plan_id="plan_1", contract_artifact_id="art_4", payload=atomic_v1_payload,
         )
         repo.add_contract(atomic)
         for target in ("proposed", "review_pending", "approved", "active"):
@@ -153,17 +209,37 @@ def main() -> int:
         repo.add_contract(ResearchContract.create(
             contract_id="contract_atomic", version=2, workspace_id="ws_1",
             project_ref="project_1", goal_ref="goal_1", requirement_ref="requirement_1",
-            agent_plan_id="plan_1", contract_artifact_id="art_4", payload={"protocol": "conflict"},
+            agent_plan_id="plan_1", contract_artifact_id="art_6", payload=atomic_conflict_payload,
             status="rejected", supersedes_version=1,
         ))
         before_conflict = repo.get_contract("contract_atomic", 1)
         try:
-            repo.revise_contract("contract_atomic", 1, payload={"protocol": "v2"}, expected_state_version=atomic.state_version)
+            repo.revise_contract(
+                "contract_atomic", 1, payload=atomic_v2_payload,
+                expected_state_version=atomic.state_version, contract_artifact_id="art_7",
+            )
             failures.append("conflicting revision insert was accepted")
         except RepositoryConflict:
             pass
         require(repo.get_contract("contract_atomic", 1) == before_conflict,
                 "failed revision did not roll back prior UPDATE", failures)
+
+        unverified = ResearchContract.create(
+            contract_id="contract_unverified", version=1, workspace_id="ws_1",
+            project_ref="project_1", goal_ref="goal_1", requirement_ref="requirement_1",
+            agent_plan_id="plan_unverified", contract_artifact_id="art_8",
+            payload={"unverified": True},
+        )
+        repo.add_contract(unverified)
+        unverified = repo.transition_contract("contract_unverified", 1, "proposed", expected_state_version=1)
+        unverified = repo.transition_contract("contract_unverified", 1, "review_pending", expected_state_version=2)
+        try:
+            repo.transition_contract("contract_unverified", 1, "approved", expected_state_version=3)
+            failures.append("unverified Agent Plan approved a Contract")
+        except RepositoryConflict:
+            pass
+        require(repo.get_contract("contract_unverified", 1).status == "review_pending",
+                "failed Plan verification gate mutated Contract", failures)
 
         trial = Trial("trial_1", "contract_1", 2, "task_1")
         repo.add_trial(trial)
@@ -223,6 +299,18 @@ def main() -> int:
 
         claim = ResearchClaim("claim_1", "contract_1", 2, "eval_1", "Bounded claim")
         repo.add_claim(claim)
+        conn.execute("PRAGMA ignore_check_constraints=ON")
+        conn.execute("UPDATE research_claims SET machine_gate_passed=2 WHERE claim_id='claim_1'")
+        conn.execute("PRAGMA ignore_check_constraints=OFF")
+        try:
+            repo.transition_claim(
+                "claim_1", "evidence_pending", expected_state_version=1,
+                machine_gate_passed=True,
+            )
+            failures.append("malformed persisted machine gate transitioned")
+        except RepositoryConflict:
+            pass
+        conn.execute("UPDATE research_claims SET machine_gate_passed=0 WHERE claim_id='claim_1'")
         claim = repo.transition_claim("claim_1", "evidence_pending", expected_state_version=1)
         claim = repo.transition_claim("claim_1", "reviewer_pending", expected_state_version=claim.state_version)
         try:
