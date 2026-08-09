@@ -72,10 +72,13 @@ concurrent execution of one session; therefore checkpoint bytes must never be
 accepted from an untrusted protocol peer or treated as MIS evidence.
 
 Sensitive field names are split at camel-case and arbitrary delimiters. Every
-contiguous token range is checked against exact known compounds, so trailing
-descriptors cannot hide an API key, password, authorization, credential, or
-private-key field. Matching exact token compounds avoids rejecting unrelated
-words such as `passage`, `author`, `credentialing`, or `secretary`.
+contiguous token range is checked against exact known compounds. A bounded set
+of normalized compound prefixes also catches fully unseparated trailing
+descriptors such as `passwordhash`, `authorizationheader`, or `privatekeypem`;
+credential prefixes use a separate bounded descriptor list. This is not a
+generic substring match, so unrelated words such as `passage`, `author`,
+`credentialing`, `secretary`, `xApiLatency`, or `accessibilityKeynote` remain
+valid.
 
 ## License and notice boundary
 

@@ -59,6 +59,37 @@ _SENSITIVE_KEYS = {
     "token",
     "transcript",
 }
+_SENSITIVE_COMPOUND_PREFIXES = (
+    "accesskeyid",
+    "accesskey",
+    "apikey",
+    "authorization",
+    "clientsecret",
+    "password",
+    "privatekey",
+    "secretkey",
+)
+_SENSITIVE_CREDENTIAL_DESCRIPTORS = (
+    "blob",
+    "body",
+    "bytes",
+    "config",
+    "content",
+    "data",
+    "digest",
+    "file",
+    "hash",
+    "header",
+    "id",
+    "key",
+    "material",
+    "path",
+    "ref",
+    "reference",
+    "setting",
+    "text",
+    "value",
+)
 
 REQUEST_OPERATIONS = frozenset({"action.propose", "cancel", "resume"})
 EVENT_TYPES = frozenset(
@@ -725,6 +756,15 @@ def _is_sensitive_key(key: str) -> bool:
             candidate += token
             if candidate in sensitive_compounds:
                 return True
+    joined = "".join(tokens)
+    if joined.startswith(_SENSITIVE_COMPOUND_PREFIXES):
+        return True
+    for credential_prefix in ("credential", "credentials"):
+        if not joined.startswith(credential_prefix):
+            continue
+        descriptor = joined[len(credential_prefix) :]
+        if descriptor.startswith(_SENSITIVE_CREDENTIAL_DESCRIPTORS):
+            return True
     return False
 
 
