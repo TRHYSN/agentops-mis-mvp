@@ -13,7 +13,7 @@ Working branch: feat/open-cekura-windows-v0
 Starting working tree: clean
 Operating system: Windows 11
 Canonical Notion spec: 3b96adfd-d920-81cf-9f99-d2990deea005
-Implementation commit accepted locally: eb6855b0a51596e7bd79915d6a34cd4ad17b47e7
+Implementation commit accepted locally: 7bd651583fa4553c57ce190d0c4b6617e2a73ddf
 Handoff commit: derive with git rev-parse HEAD after this document is committed
 ```
 
@@ -55,17 +55,26 @@ stable `mis_*` mappings to the existing MIS authority objects:
 | ReleaseGateDecision | Approval / Quality Gate |
 | RegressionCase | reviewed Memory candidate for future Plan input |
 
+Campaign compare/gate commands reconstruct the exact typed hierarchy, Turn,
+ToolCall, Evaluation, Artifact, PlanEvidence, Failure, Regression/Memory,
+Approval, Gate-head, and Audit-chain sets before granting new authority. The
+SQLite/filesystem boundary uses a tree-hash journal, transactional outbox,
+SQLite-instance nonce, Windows case-normalized campaign lock domain, and an OS
+process-lifetime lease. Recovery tests cover pre-commit rollback, post-commit
+finalization, same-path database replacement, hard-exit stale stages, live
+writer exclusion, and transitive historical-baseline closure.
+
 The accepted persistent database contains 2 Tasks, 2 Plans, 20 Runs, 56 Tool
-Calls, 160 Evaluations, 20 Artifacts, 3 Approvals, 5 Memories, and 294 Audit
-rows. All 20 Reliability runs, all 160 evaluations, and all 20 evidence
-manifests have non-null MIS mappings.
+Calls, 160 Evaluations, 20 Artifacts, 18 available plan-evidence manifests,
+3 Approvals, 5 Memories, and 297 Audit rows. All 20 Reliability runs, all 160
+evaluations, and all 20 evidence manifests have non-null MIS mappings.
 
 Campaign mappings:
 
-- baseline Task `tskoc_01a16cde18e2c0169a8bcd6e`, Plan
-  `planoc_5165df2ba6f1f9cdf6cabbef`;
-- candidate Task `tskoc_30fa0932ba764d410f47781a`, Plan
-  `planoc_fb1bb4380cd9ef03e9734252`.
+- baseline Task `tskoc_4538c05eba6221ef1acad82d`, Plan
+  `planoc_87a9febc97d60382deb4aadd`;
+- candidate Task `tskoc_266fdeba61d9a998e21ce22d`, Plan
+  `planoc_34608746cda05da5b2427a21`.
 
 ## Scenario and evaluation coverage
 
@@ -85,14 +94,14 @@ references, evaluator metadata, and exact turn/tool/expectation references.
 Evidence root:
 
 ```text
-.agentops_runtime/open-cekura-acceptance-eb6855b0/
+.agentops_runtime/open-cekura-acceptance-7bd65158/
 ```
 
 This directory is intentionally ignored local runtime evidence, not source to
 commit. Its 20 manifests all record:
 
 ```text
-git_commit_sha: eb6855b0a51596e7bd79915d6a34cd4ad17b47e7
+git_commit_sha: 7bd651583fa4553c57ce190d0c4b6617e2a73ddf
 os: Windows-11-10.0.26200-SP0
 python_version: 3.13.5
 node_version: v22.23.2
@@ -100,23 +109,23 @@ node_version: v22.23.2
 
 Measured campaign results:
 
-- `occampaign_acceptance_baseline_eb6855b0`: 10 runs, 5 explainable
+- `occampaign_acceptance_locator_alpha_7bd65158`: 10 runs, 5 explainable
   FailureCases, 5 RegressionCases, task success 90%, **BLOCK**;
-- `occampaign_acceptance_candidate_eb6855b0`: 10 runs, no failures, task
+- `occampaign_acceptance_locator_beta_7bd65158`: 10 runs, no failures, task
   success 100%, **PASS**;
-- comparison gate `ocgate_d09acef3b2a4cb9b64fd348b`: **PASS**, mapped to
-  MIS Approval `apoc_d09acef3b2a4cb9b64fd348b`.
+- comparison gate `ocgate_1ad3b64bc7a4226be7373b6c`: **PASS**, mapped to
+  MIS Approval `apoc_1ad3b64bc7a4226be7373b6c`.
 
-The baseline gate `ocgate_97edc11198eff27f96dfe1db` maps to Approval
-`apoc_97edc11198eff27f96dfe1db` and blocks for facts derived from the run:
+The baseline gate `ocgate_27c8850cab97292dca28d3ce` maps to Approval
+`apoc_27c8850cab97292dca28d3ce` and blocks for facts derived from the run:
 
 - `appointment.mutation_before_confirmation`: `update_booking` before
   confirmation, rule `zero_tolerance.confirmation_before_mutation.v1`;
 - `appointment.duplicate_request`: duplicate `update_booking`, rule
   `zero_tolerance.duplicate_mutation.v1`.
 
-The candidate standalone gate `ocgate_8079697d4fb318b3bdf3aaf7` is PASS and
-maps to Approval `apoc_8079697d4fb318b3bdf3aaf7`. No campaign ID or version
+The candidate standalone gate `ocgate_40675da0261dae52790c1a12` is PASS and
+maps to Approval `apoc_40675da0261dae52790c1a12`. No campaign ID or version
 name is used to hard-code these decisions.
 
 Both persistent campaign trees pass `evidence verify` with 10/10 manifests.
@@ -127,17 +136,17 @@ the observed facts still produce BLOCK/PASS.
 
 RegressionCases and MIS Memory mappings:
 
-- `ocregression_45288c04732eab9c6ba40d60` ->
-  `memoc_66639f6e1c5ea8c93280cf2b` (`final_state_match.v1`);
-- `ocregression_742d93944bc1c596a5b965ac` ->
-  `memoc_a9719f92bd31dcbd6fd9643f` (`task_success.v1`);
-- `ocregression_8a26657e848d0316c4bc7692` ->
-  `memoc_976d80f5def016b0aaeba5ca` (`duplicate_mutation.v1`);
-- `ocregression_d7f66f3a3c1a356dce78f267` ->
-  `memoc_f3dfa896e7c5f613f39f32c9`
+- `ocregression_abea6c26794fd35dc4cbfc99` ->
+  `memoc_559a5e065e28a4b000224815` (`final_state_match.v1`);
+- `ocregression_8dc512e9b2bbd8f5425a57ad` ->
+  `memoc_f525fa4c78fe7d04463f4d18` (`task_success.v1`);
+- `ocregression_fbd81d8b0bf65d6379d1e001` ->
+  `memoc_e9d0857658a992ddb0265510` (`duplicate_mutation.v1`);
+- `ocregression_4a29ca1106805f9326bcb377` ->
+  `memoc_e147c993f2e1d3b2f6a714cc`
   (`confirmation_before_mutation.v1`);
-- `ocregression_f75319695be7d07ae4bcb422` ->
-  `memoc_58f896c8d11cd68d1149134c` (`required_tool_calls.v1`).
+- `ocregression_71b45e3c76bd563b56be523b` ->
+  `memoc_e1ba81665589d49a9d06db50` (`required_tool_calls.v1`).
 
 The exact replay/drift rejection test passed: `1 passed`.
 
@@ -169,15 +178,17 @@ system exists.
 
 ## Local verification record
 
-Commands completed on implementation commit `eb6855b0...`:
+Commands completed on implementation commit `7bd65158...`:
 
 ```text
 python -m pytest open_cekura/tests/unit -q
-  179 passed, 2 skipped
+  196 passed, 2 skipped
 python -m pytest open_cekura/tests/integration -q
-  138 passed, 1 skipped
-python -m pytest open_cekura/tests -q
-  317 passed, 3 skipped
+  180 passed, 1 skipped
+complete unit + integration coverage
+  376 passed, 3 skipped
+python -m pytest open_cekura/tests/unit/test_evidence_hashes.py open_cekura/tests/integration/test_campaign_publication_recovery.py -q
+  61 passed, 1 skipped
 (incubator/research-lab) python -m pytest tests -q
   20 passed
 python -m ruff check open_cekura scripts/open_cekura_ci_acceptance.py scripts/reliability_lab_ui_smoke.py
@@ -186,7 +197,9 @@ python scripts/reliability_lab_ui_smoke.py
   PASS, 0 failures, 0 forbidden patterns
 npm run build
   PASS, 2299 modules transformed
-python scripts/open_cekura_ci_acceptance.py --ui-dist ui/start-building-app/dist --result-path .agentops_runtime/open-cekura-final-acceptance-eb6855b0.json --require-browser
+(ui/start-building-app) npm run test:reliability
+  4 passed
+python scripts/open_cekura_ci_acceptance.py --ui-dist ui/start-building-app/dist --result-path .agentops_runtime/open-cekura-final-acceptance-7bd65158.json --require-browser
   PASS, including tamper negative and real browser readback
 ```
 
