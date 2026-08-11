@@ -363,9 +363,20 @@ def evaluate_timeout(context: EvaluationContext) -> EvaluationResult:
         if observation.turn_id:
             evidence.append(f"turn:{observation.turn_id}")
         if observation.operation == "tool" and observation.tool_name:
-            evidence.append(f"tool:{observation.tool_name}")
+            matching_calls = [
+                call
+                for call in context.tool_calls
+                if call.name == observation.tool_name
+                and (
+                    observation.turn_id is None
+                    or call.turn_id == observation.turn_id
+                )
+            ]
+            evidence.extend(f"tool_call:{call.id}" for call in matching_calls)
         else:
-            evidence.append("adapter:timeout")
+            evidence.append("artifact:timing.json")
+        evidence.append("expectation:timeout_ms")
+    evidence = list(dict.fromkeys(evidence))
     passed = not unexpected and not missing_expected
     reasons: list[str] = []
     if unexpected:

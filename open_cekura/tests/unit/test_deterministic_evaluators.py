@@ -260,7 +260,24 @@ def test_turn_limit_and_timeout_keep_measured_facts() -> None:
     assert timeout_result.status is EvaluationStatus.FAIL
     assert timeout_result.reason_codes == ["timeout_observed"]
     assert timeout_result.metadata["timeouts"][0]["measured_ms"] == 5001
-    assert "tool:lookup_booking" in timeout_result.evidence_refs
+    assert timeout_result.evidence_refs == [
+        "turn:octurn_1",
+        "tool_call:octool_lookup",
+        "expectation:timeout_ms",
+    ]
+    assert all(
+        ref.split(":", 1)[0]
+        in {
+            "artifact",
+            "turn",
+            "tool_call",
+            "evaluation",
+            "expectation",
+            "final_state",
+            "mis",
+        }
+        for ref in timeout_result.evidence_refs
+    )
 
 
 def test_deterministic_results_are_byte_identical_for_identical_context() -> None:
