@@ -24,6 +24,33 @@ customer-facing descriptions.
 - Notion External Base dry-run connector
 - Template + Base switching preview
 
+## OpenCekura Reliability Lab
+
+OpenCekura is the repository's open-source reliability-testing vertical. The
+Reliability Lab runs versioned YAML scenarios against deterministic Mock or
+HTTP agent adapters, observes ToolCalls, produces explainable evaluations and
+regressions, derives release gates, and reads the complete evidence chain in
+the existing Vite workspace at `/workspace/reliability`.
+
+On Windows PowerShell:
+
+```powershell
+python -m pip install -r requirements-open-cekura.txt
+Set-Location ui/start-building-app
+npm ci
+Set-Location ../..
+python -m open_cekura.cli.main doctor
+python -m open_cekura.cli.main scenario validate examples/open-cekura/scenarios/basic.yaml
+python -m open_cekura.cli.main campaign run --suite examples/open-cekura/scenarios --agent mock --version candidate
+```
+
+This is configured, deterministic simulation and evaluation evidence. It is
+not a production reliability certification and is not an official open-source
+edition of Cekura. See the
+[product specification](docs/open-cekura/PRODUCT_SPEC.md),
+[architecture](docs/open-cekura/ARCHITECTURE.md), and
+[Windows runbook](docs/open-cekura/WINDOWS_DEV_RUNBOOK.md).
+
 ## Open Source Base Index
 
 `docs/research/OPEN_SOURCE_BASE_INDEX_V1_1.md` and

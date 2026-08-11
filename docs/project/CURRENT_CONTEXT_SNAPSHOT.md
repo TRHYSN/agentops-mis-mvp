@@ -1,154 +1,87 @@
 # AgentOps MIS Current Context Snapshot
 
-> Status date: 2026-07-23
+> Status date: 2026-08-11
 > Repository: `geogejoy107-jpg/agentops-mis-mvp`
-> Local checkout: `agentops-mis-commercial-handoff-status-mainline`
-> Development line: `codex/local-host-remote-console`
-> Implementation baseline summarized: `9cd199b65d27718716680c5332ad842ae8228da5`
+> Local checkout: Windows fresh clone under `F:\文档\MIS`
+> Development line: `feat/open-cekura-windows-v0`
+> Starting main: `99ce51d693f1d646ea84acc2f7f376bde1a95a9a`
+> Locally accepted implementation: `eb6855b0a51596e7bd79915d6a34cd4ad17b47e7`
 > Snapshot commit: derive from `git rev-parse HEAD`
-> Review surface: Draft PR `#104`
-> Release status: active source development; not a release claim
+> Review surface: Issue `#123`; PR pending at this document revision
+> Release status: local acceptance complete; remote CI and Owner review pending
 
-This snapshot is the current compact continuation point. It supersedes the
-operational branch, commit, CI, and next-action fields in the older
-`PROJECT_STATE.md` and `HANDOFF.md`; those files remain historical governance
-baselines until they are fully reconciled.
+This is the current compact continuation point. It supersedes operational
+branch, commit, CI, and next-action fields in the July 2026 Private Host
+snapshot. That history remains available in Git and is not a statement about
+the current OpenCekura delivery line.
 
-## Product Position
+## Current product line
 
-AgentOps MIS is a local-first control plane that lets humans assign, supervise,
-approve, evaluate, and retain evidence for work executed by AI runtimes on the
-same machine or through governed remote Workers.
+OpenCekura is an AgentOps MIS vertical product named **Reliability Lab**. It
+closes the configured deterministic loop from YAML Scenario through simulation,
+ToolCall observation, explainable evaluation, FailureCase, RegressionCase,
+release gate, content-addressed Evidence, API, and evidence-first UI.
 
-## Authority And Memory Model
+Reliability Lab reuses the existing MIS Task, verified Agent Plan, Run,
+ToolCall, Evaluation, Artifact, Memory, Approval, Audit, auth, workspace,
+SQLite, `/mis-api`, and Vite authorities. It does not create a second control
+plane or frontend.
+
+## Accepted local evidence
+
+- Ten appointment scenarios produce a natural baseline BLOCK and candidate
+  PASS through eight deterministic evaluators and `release_gate.v1`.
+- Persistent campaigns on exact implementation SHA `eb6855b0...` contain 20
+  Runs, 56 ToolCalls, 160 Evaluations, 20 Evidence manifests, 5 generated and
+  replayable regressions, and 3 release-gate decisions.
+- Baseline Task/Plan: `tskoc_01a16cde18e2c0169a8bcd6e` /
+  `planoc_5165df2ba6f1f9cdf6cabbef`.
+- Candidate Task/Plan: `tskoc_30fa0932ba764d410f47781a` /
+  `planoc_fb1bb4380cd9ef03e9734252`.
+- Local Windows doctor, the 317-test OpenCekura suite, the standalone 20-test
+  historical Research Lab suite, UI build/source smoke, API readback, evidence
+  tamper-negative, and real Chrome DOM acceptance pass.
+- The exact measured record, campaign IDs, gate/Approval IDs, regression/Memory
+  mappings, test counts, and limitations are in
+  [`../open-cekura/HANDOFF.md`](../open-cekura/HANDOFF.md).
+
+No credential value, private prompt, raw model response, or unredacted customer
+payload was copied into this snapshot or release evidence.
+
+## Authority model
 
 ```text
-Versioned spec / approved decision
--> workspace Knowledge Index + approved Memory
--> Agent Plan
--> Task / Run / Tool Call
--> Approval / Artifact / Evaluation
--> Memory Candidate / Audit
+Git/GitHub -> code, branch, commit, PR, diff, CI
+AgentOps MIS -> Task, Plan, Run, ToolCall, Evaluation, Artifact,
+                Memory, Approval, Audit
+Versioned docs + reviewed Notion -> approved product contracts and handoff
 ```
 
-- Git and GitHub own code, branch, commit, PR, diff, and CI facts.
-- AgentOps MIS owns runtime, approval, evidence, evaluation, and audit facts.
-- Versioned project documents and reviewed Notion entries own approved project
-  decisions and handoffs.
-- Current tasks may use bounded workspace Knowledge plus approved Memory.
-- Old Codex conversations are non-authoritative source material. They are not a
-  substitute for project context and are eligible for expiry after their
-  durable Project Delta has been captured.
+The local filesystem EvidenceManifest is an unsigned integrity check. MIS
+Artifact/Approval/Audit rows are the separate authority ledger; neither is
+described as production certification.
 
-No credential, private message, transcript, raw prompt, or raw response was
-read or copied to produce this snapshot.
+## Open gate and next action
 
-## Verified Committed Source
+Push the branch, create the PR to `main`, and record the exact GitHub Actions
+run URL/ID, head SHA, and all Ubuntu/Windows x Python 3.10/3.11 conclusions.
+Fix any failure and rerun exact-head acceptance. Leave merge to the Owner.
 
-The current committed line contains these latest product slices:
-
-- `0057efa` and `75857b4`: bounded workspace-scoped context packets from
-  versioned Knowledge summaries plus approved Memory, with hash/ID/count
-  receipts instead of source bodies.
-- `0adbc9f`: workspace-authoritative governed Memory behavior.
-- `136779e`: bounded Worker Sessions release their resources cleanly.
-- `706af7d`: Run Detail exposes a Project Context Receipt so a human can verify
-  which governed context was used without exposing its body.
-- `9cd199b`: server-owned SQLite connections close on both success and failure,
-  and API-launched local Worker daemons bind to the trusted request origin
-  through start and restart.
-
-Real, explicitly confirmed local dogfood produced:
-
-- OpenClaw Run `run_gw_ba8013a9aa17`;
-- Hermes Run `run_gw_5387a296a361`;
-- eight governed context blocks per Run, including three approved seed Memory
-  references;
-- compact Run, Tool, Evaluation, Runtime Event, Audit, artifact, approval, and
-  candidate-memory evidence with raw input/output omitted.
-
-Hermes candidate `mem_gw_80af5cdbee359296` remains pending Human review. Agent
-output therefore has not silently become canonical project knowledge.
-
-## Installed Host Versus Source
-
-The installed Private Host is preview.42 at exact commit
-`9cd199b65d27718716680c5332ad842ae8228da5`, matching the current committed
-source package. Its verified pre-update backup preserved the preview.41
-authority ledger and Owner state.
-
-Installed-package load acceptance completed 2,000 concurrent Human-auth status
-requests with 20 clients. Process file descriptors remained `35 -> 35`, idle
-SQLite handles remained `0 -> 0`, and Host health stayed ready.
-
-Persistent installed Workers then completed:
-
-- Hermes task `tsk_preview42_hermes_acceptance_20260723T1553Z`, Run
-  `run_gw_903c688ae46b`;
-- OpenClaw task `tsk_preview42_openclaw_acceptance_20260723T1553Z`, Run
-  `run_gw_f8e666405437`.
-
-Each Run has one Tool Call, one passing Evaluation, one Artifact, one candidate
-Memory, one verified plan-evidence manifest, eight Runtime Events and eight
-Audit rows. Each consumed eight governed context blocks and three approved
-Memory IDs with all raw-input/output omission gates true.
-
-## Current Uncommitted Work
-
-The implementation worktree is clean before this evidence-only documentation
-update. Candidate archives, extracted staging trees, UI `node_modules` and
-`dist` are temporary local build outputs and are not tracked.
-
-## CI Truth
-
-- Exact `9cd199b` push run `30021569634` passed.
-- Exact `9cd199b` pull-request run `30021573934` passed.
-- The preview.42 candidate was built from that exact clean commit and installed
-  locally.
-- A later documentation-only evidence commit does not change the packaged
-  source identity; it still requires its own lightweight checks and exact CI.
-
-## Storage And Session Retention
-
-- Docker data is outside this cleanup and must not be deleted automatically.
-- The current Codex task
-  `019ec0ec-14bf-7243-a145-8b5659f0193a` is retained for continuation.
-- Selected completed session files may be deleted only after this snapshot and
-  the retention acceptance record exist and pass a no-secret/diff check.
-- Session cleanup uses file metadata only; raw JSONL bodies are not inspected.
-- Deleting an expired session removes chat-resume capability for that session,
-  not Git code, approved Memory, MIS ledger evidence, or this snapshot.
-
-See [`CODEX_SESSION_RETENTION_ACCEPTANCE.md`](./CODEX_SESSION_RETENTION_ACCEPTANCE.md).
-
-## Open Gates
-
-1. Complete physical browser-only preview.42 acceptance from the second Mac.
-2. Confirm the two new Run pages expose the Human Project Context Receipt and
-   Human review links, then sign out and confirm protected reads fail.
-3. Decide whether preview.42 should remain a local candidate or become a
-   published prerelease after physical acceptance.
-4. Keep ordinary no-Tailscale Relay and commercial multi-workspace deployment
-   as separate product tracks.
-
-## Next Single Action
-
-Commit and push the preview.42 evidence-only documentation update, remove
-temporary local build output, then perform physical second-Mac browser
-acceptance without installing AgentOps on the client.
+Voice/WebRTC/SIP/LiveKit/Pipecat and real-world telephone campaigns remain v0.2
+scope and must not block the v0 release line.
 
 ## Project Delta
 
 ```yaml
 type: ContextSnapshot
-title: Current local Host, governed Memory, CI, and reliability truth
+title: OpenCekura Windows v0 local acceptance and remote delivery gate
 status: ActiveDevelopment
 priority: P0
-module: Project Governance
+module: Reliability Lab
 repository: geogejoy107-jpg/agentops-mis-mvp
-branch: codex/local-host-remote-console
-commit: 9cd199b65d27718716680c5332ad842ae8228da5
-updates: PROJECT_STATE.md and HANDOFF.md operational fields
-evidence: Git history, exact CI run identities, bounded MIS runtime receipts, and local verification
-next_action: commit and push preview.42 evidence, then perform physical second-Mac browser acceptance
+branch: feat/open-cekura-windows-v0
+implementation_commit: eb6855b0a51596e7bd79915d6a34cd4ad17b47e7
+issue: 123
+evidence: docs/open-cekura/HANDOFF.md and governed MIS campaign records
+next_action: push, open PR, wait for exact-head remote CI, then hand Owner review
 ```

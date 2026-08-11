@@ -46,6 +46,15 @@ npm --version
 
 OpenCekura Python dependencies are installed from the repository's dedicated requirements file; the base MIS package remains dependency-light. CI must not require API keys. The optional LLM judge reports `SKIPPED` when no supported key is present.
 
+Install fresh-clone dependencies:
+
+```powershell
+python -m pip install -r requirements-open-cekura.txt
+Set-Location ui/start-building-app
+npm ci
+Set-Location ../..
+```
+
 ## Doctor
 
 ```powershell
@@ -58,14 +67,24 @@ Critical checks cover Python, Node, npm, Git, repository root, current branch, e
 ## Scenario and deterministic acceptance
 
 ```powershell
+$openCekuraDb = Join-Path $PWD '.agentops_runtime\open-cekura-runbook\reliability.db'
+$openCekuraArtifacts = Join-Path $PWD '.agentops_runtime\open-cekura-runbook\artifacts'
+$baselineId = 'occampaign_runbook_baseline'
+$candidateId = 'occampaign_runbook_candidate'
+
 python -m open_cekura.cli.main scenario validate examples/open-cekura/scenarios/basic.yaml
-python -m open_cekura.cli.main campaign run --suite examples/open-cekura/scenarios --agent mock --version baseline
-python -m open_cekura.cli.main campaign run --suite examples/open-cekura/scenarios --agent mock --version candidate
-python -m open_cekura.cli.main campaign compare --baseline <baseline-id> --candidate <candidate-id>
-python -m open_cekura.cli.main gate evaluate --campaign <baseline-id>
-python -m open_cekura.cli.main gate evaluate --campaign <candidate-id>
-python -m open_cekura.cli.main evidence verify --campaign <baseline-id>
-python -m open_cekura.cli.main evidence verify --campaign <candidate-id>
+python -m open_cekura.cli.main campaign run --suite examples/open-cekura/scenarios --agent mock --version baseline --campaign-id $baselineId --db $openCekuraDb --artifacts $openCekuraArtifacts
+python -m open_cekura.cli.main campaign run --suite examples/open-cekura/scenarios --agent mock --version candidate --campaign-id $candidateId --db $openCekuraDb --artifacts $openCekuraArtifacts
+python -m open_cekura.cli.main campaign compare --baseline $baselineId --candidate $candidateId --db $openCekuraDb --artifacts $openCekuraArtifacts
+
+python -m open_cekura.cli.main gate evaluate --campaign $baselineId --db $openCekuraDb --artifacts $openCekuraArtifacts
+if ($LASTEXITCODE -ne 3) { throw "Expected baseline gate exit 3, got $LASTEXITCODE" }
+
+python -m open_cekura.cli.main gate evaluate --campaign $candidateId --baseline $baselineId --db $openCekuraDb --artifacts $openCekuraArtifacts
+if ($LASTEXITCODE -ne 0) { throw "Expected candidate gate exit 0, got $LASTEXITCODE" }
+
+python -m open_cekura.cli.main evidence verify --campaign $baselineId --artifacts $openCekuraArtifacts
+python -m open_cekura.cli.main evidence verify --campaign $candidateId --artifacts $openCekuraArtifacts
 ```
 
 Expected semantic outcome:
@@ -78,6 +97,10 @@ Evidence verification: PASS before tampering and FAIL after a covered artifact c
 
 IDs may be fixed in CI for locating artifacts, but outcomes must be computed from observed facts.
 
+Exit code 3 from the baseline `gate evaluate` command is the expected successful
+acceptance of a BLOCK decision, not an infrastructure failure. Evidence
+integrity failure uses exit code 4.
+
 ## Tests
 
 ```powershell
@@ -87,6 +110,16 @@ python -m pytest open_cekura/tests -q
 ```
 
 The integration set includes Scenario → Run → Evaluation → Evidence, baseline/candidate comparison, failure → regression → replay, and API → SQLite. Run the smallest affected test after each fix, then the full OpenCekura suite.
+
+The repository also contains a standalone historical Research Lab package. Its
+tests are run from its package root rather than by adding unrelated paths to
+the root import environment:
+
+```powershell
+Push-Location incubator/research-lab
+python -m pytest tests -q
+Pop-Location
+```
 
 ## Backend and UI
 
@@ -107,6 +140,26 @@ npm run dev
 ```
 
 The Vite proxy targets `http://127.0.0.1:8787` by default. Browse to `/workspace/reliability`. Production/deep-link behavior is served by the existing MIS host; no second frontend server is introduced.
+
+Run the same portable UI/API/campaign acceptance used by CI. On Windows,
+`--require-browser` fails closed unless a preinstalled Chrome or Edge renders
+the actual Reliability Lab DOM; the script never downloads a browser.
+
+```powershell
+python scripts/reliability_lab_ui_smoke.py
+Set-Location ui/start-building-app
+npm run build
+Set-Location ../..
+python scripts/open_cekura_ci_acceptance.py `
+  --ui-dist ui/start-building-app/dist `
+  --result-path .agentops_runtime/open-cekura-final-acceptance.json `
+  --require-browser
+```
+
+The result must contain `ok=true`, `browser_e2e=pass`, the selected installed
+browser name, two campaigns, twenty runs, ten candidate API rows, and
+`run_detail_read_back=true` for transcript, tool, evaluator, manifest, MIS Run,
+and gate evidence.
 
 ## Windows implementation rules
 

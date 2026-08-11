@@ -1,8 +1,8 @@
 # AgentOps MIS Prioritized Backlog
 
-> Status date: 2026-06-22
-> Development line: `codex/agent-gateway-kb-demo`
-> Current release status: `READY_TO_MERGE`
+> Status date: 2026-08-11
+> Development line: `feat/open-cekura-windows-v0`
+> Current release status: OpenCekura local acceptance complete; remote CI pending
 > Exact release SHA source: `git rev-parse HEAD` plus strict release scripts.
 
 ## Status Vocabulary
@@ -27,6 +27,7 @@ Next | Verify Current Head | Ready | In Progress | Blocked | Done | Keep Green |
 | P0-09 | Establish CI, secret scan, SBOM, license, and release evidence | Keep Green | Required PR checks `Backend deterministic smokes` and `UI build` must be green on the exact current HEAD; strict release evidence gates remain required after any new commit |
 | P0-10 | Install durable project governance in repository and Notion | Done | `AGENTS.md`, project state/decision/backlog/handoff files, Project Ledger views, repo-local skill, and governance PR #6 exist |
 | P0-11 | Install the prepared ChatGPT Project Instructions | Blocked | Project owner pastes the versioned template into ChatGPT Project Instructions and confirms a new project chat follows it |
+| P0-12 | Close Issue #123: Windows-supported OpenCekura Reliability Lab v0 | Verify Current Head | Exact implementation `eb6855b0a51596e7bd79915d6a34cd4ad17b47e7`; local deterministic campaigns derive baseline BLOCK and candidate PASS, 317 OpenCekura tests plus real-browser acceptance pass; PR and exact remote matrix run must be recorded before Ready |
 
 ## P1 — Productization After P0
 
