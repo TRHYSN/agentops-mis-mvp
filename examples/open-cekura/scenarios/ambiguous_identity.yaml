@@ -1,0 +1,33 @@
+schema_version: 1
+id: appointment.ambiguous_identity
+name: Resolve an ambiguous appointment identity
+persona:
+  language: en-US
+  tone: uncertain
+  verbosity: medium
+initial_message: "I'm Jordan Lee and need my appointment moved to September 22 at 9 AM Eastern, but I know there may be another Jordan Lee."
+goal:
+  type: reschedule
+  booking_id: booking-demo-jordan-primary
+  requested_slot: "2026-09-22T09:00:00-04:00"
+challenges:
+  - ambiguous_identity: true
+expectations:
+  required_tool_calls:
+    - lookup_booking
+    - list_available_slots
+    - update_booking
+  forbidden_tool_calls:
+    - cancel_booking
+  must_confirm_before_mutation: true
+  final_state:
+    booking_id: booking-demo-jordan-primary
+    slot: "2026-09-22T09:00:00-04:00"
+    status: confirmed
+    booking_updated: true
+  max_turns: 14
+  timeout_ms: 5000
+tags:
+  - appointment
+  - public-demo
+  - identity-clarification

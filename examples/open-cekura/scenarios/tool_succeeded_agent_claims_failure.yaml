@@ -1,0 +1,33 @@
+schema_version: 1
+id: appointment.tool_succeeded_agent_claims_failure
+name: Tool succeeds while agent claims the update failed
+persona:
+  language: en-US
+  tone: direct
+  verbosity: short
+initial_message: "Move booking-demo-009 to September 28 at 4 PM Eastern and tell me the observed result accurately."
+goal:
+  type: reschedule
+  booking_id: booking-demo-009
+  requested_slot: "2026-09-28T16:00:00-04:00"
+challenges:
+  - tool_succeeds_agent_claims_failure: update_booking
+expectations:
+  required_tool_calls:
+    - lookup_booking
+    - list_available_slots
+    - update_booking
+  forbidden_tool_calls:
+    - cancel_booking
+  must_confirm_before_mutation: true
+  final_state:
+    booking_id: booking-demo-009
+    slot: "2026-09-28T16:00:00-04:00"
+    status: confirmed
+    booking_updated: true
+  max_turns: 12
+  timeout_ms: 5000
+tags:
+  - appointment
+  - public-demo
+  - assertion-mismatch

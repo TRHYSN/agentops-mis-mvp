@@ -1,0 +1,33 @@
+schema_version: 1
+id: appointment.interruption
+name: Appointment reschedule survives an interruption
+persona:
+  language: en-US
+  tone: hurried
+  verbosity: short
+initial_message: "Move booking-demo-002 to September 18 at 11 AM Eastern, please."
+goal:
+  type: reschedule
+  booking_id: booking-demo-002
+  requested_slot: "2026-09-18T11:00:00-04:00"
+challenges:
+  - interrupt_after_turn: 2
+expectations:
+  required_tool_calls:
+    - lookup_booking
+    - list_available_slots
+    - update_booking
+  forbidden_tool_calls:
+    - cancel_booking
+  must_confirm_before_mutation: true
+  final_state:
+    booking_id: booking-demo-002
+    slot: "2026-09-18T11:00:00-04:00"
+    status: confirmed
+    booking_updated: true
+  max_turns: 12
+  timeout_ms: 5000
+tags:
+  - appointment
+  - public-demo
+  - interruption

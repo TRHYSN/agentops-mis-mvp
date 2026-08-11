@@ -1,0 +1,33 @@
+schema_version: 1
+id: appointment.duplicate_request
+name: Repeated request does not duplicate the mutation
+persona:
+  language: en-US
+  tone: persistent
+  verbosity: short
+initial_message: "Please move booking-demo-006 to September 24 at 3 PM Eastern. I may repeat myself, but update it only once."
+goal:
+  type: reschedule
+  booking_id: booking-demo-006
+  requested_slot: "2026-09-24T15:00:00-04:00"
+challenges:
+  - duplicate_request_after_turn: 4
+expectations:
+  required_tool_calls:
+    - lookup_booking
+    - list_available_slots
+    - update_booking
+  forbidden_tool_calls:
+    - cancel_booking
+  must_confirm_before_mutation: true
+  final_state:
+    booking_id: booking-demo-006
+    slot: "2026-09-24T15:00:00-04:00"
+    status: confirmed
+    booking_updated: true
+  max_turns: 14
+  timeout_ms: 5000
+tags:
+  - appointment
+  - public-demo
+  - duplicate-request

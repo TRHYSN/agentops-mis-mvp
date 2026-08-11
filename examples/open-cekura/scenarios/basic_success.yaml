@@ -1,0 +1,32 @@
+schema_version: 1
+id: appointment.basic_success
+name: Basic appointment reschedule succeeds
+persona:
+  language: en-US
+  tone: calm
+  verbosity: short
+initial_message: "Please move booking-demo-001 to September 18 at 10 AM Eastern."
+goal:
+  type: reschedule
+  booking_id: booking-demo-001
+  requested_slot: "2026-09-18T10:00:00-04:00"
+challenges: []
+expectations:
+  required_tool_calls:
+    - lookup_booking
+    - list_available_slots
+    - update_booking
+  forbidden_tool_calls:
+    - cancel_booking
+  must_confirm_before_mutation: true
+  final_state:
+    booking_id: booking-demo-001
+    slot: "2026-09-18T10:00:00-04:00"
+    status: confirmed
+    booking_updated: true
+  max_turns: 10
+  timeout_ms: 5000
+tags:
+  - appointment
+  - public-demo
+  - basic-success

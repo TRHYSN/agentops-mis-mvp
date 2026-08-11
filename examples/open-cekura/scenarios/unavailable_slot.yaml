@@ -1,0 +1,33 @@
+schema_version: 1
+id: appointment.unavailable_slot
+name: Recover when the first requested slot is unavailable
+persona:
+  language: en-US
+  tone: flexible
+  verbosity: short
+initial_message: "Move booking-demo-005 on September 23; if 9 AM is unavailable, use 11 AM Eastern."
+goal:
+  type: reschedule
+  booking_id: booking-demo-005
+  requested_slot: "2026-09-23T11:00:00-04:00"
+challenges:
+  - unavailable_slot: true
+expectations:
+  required_tool_calls:
+    - lookup_booking
+    - list_available_slots
+    - update_booking
+  forbidden_tool_calls:
+    - cancel_booking
+  must_confirm_before_mutation: true
+  final_state:
+    booking_id: booking-demo-005
+    slot: "2026-09-23T11:00:00-04:00"
+    status: confirmed
+    booking_updated: true
+  max_turns: 12
+  timeout_ms: 5000
+tags:
+  - appointment
+  - public-demo
+  - unavailable-slot

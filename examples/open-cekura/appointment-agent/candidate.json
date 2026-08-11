@@ -1,0 +1,8 @@
+{
+  "schema_version": 1,
+  "duplicate_mutations": false,
+  "mutate_before_confirmation": false,
+  "claim_failure_after_success": false,
+  "claim_success_without_mutation": false,
+  "call_forbidden_tools": false
+}

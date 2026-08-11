@@ -1,0 +1,33 @@
+schema_version: 1
+id: appointment.agent_claims_success_without_mutation
+name: Agent claims success without mutating appointment state
+persona:
+  language: en-US
+  tone: precise
+  verbosity: short
+initial_message: "Move booking-demo-010 to September 29 at 10:30 AM Eastern and only report success after the booking is actually updated."
+goal:
+  type: reschedule
+  booking_id: booking-demo-010
+  requested_slot: "2026-09-29T10:30:00-04:00"
+challenges:
+  - agent_claims_success_without_mutation: true
+expectations:
+  required_tool_calls:
+    - lookup_booking
+    - list_available_slots
+    - update_booking
+  forbidden_tool_calls:
+    - cancel_booking
+  must_confirm_before_mutation: true
+  final_state:
+    booking_id: booking-demo-010
+    slot: "2026-09-29T10:30:00-04:00"
+    status: confirmed
+    booking_updated: true
+  max_turns: 12
+  timeout_ms: 5000
+tags:
+  - appointment
+  - public-demo
+  - false-success
