@@ -1,4 +1,5 @@
 import { BrowserRouter, Routes, Route, Navigate } from "react-router";
+import { lazy, Suspense } from "react";
 import { AppShell } from "./components/layout/AppShell";
 import { WorkspaceHome } from "./components/pages/WorkspaceHome";
 import { PixelOffice } from "./components/pages/PixelOffice";
@@ -29,6 +30,8 @@ import { Experiments } from "./components/pages/Experiments";
 import { PreferencesProvider } from "./context/PreferencesContext";
 import { AuthGate } from "./components/auth/AuthGate";
 
+const ReliabilityLabRoutes = lazy(() => import("./components/pages/reliability/ReliabilityLabRoutes"));
+
 export default function App() {
   return (
     <PreferencesProvider>
@@ -47,6 +50,14 @@ export default function App() {
               <Route path="/workspace/memory" element={<MemoryLibrary />} />
               <Route path="/workspace/experiments" element={<Experiments />} />
               <Route path="/workspace/experiments/:id" element={<ExperimentDetail />} />
+              <Route
+                path="/workspace/reliability/*"
+                element={(
+                  <Suspense fallback={<div className="text-xs" style={{ color: "var(--mis-muted)" }}>Loading Reliability Lab…</div>}>
+                    <ReliabilityLabRoutes />
+                  </Suspense>
+                )}
+              />
               <Route path="/workspace/reports" element={<Reports />} />
               <Route path="/workspace/account" element={<AccountSecurity />} />
               <Route path="/workspace/customer-projects/:projectId/report" element={<CustomerProjectReport />} />

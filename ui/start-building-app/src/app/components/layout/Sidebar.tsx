@@ -4,7 +4,7 @@ import { NavLink, useLocation } from "react-router";
 import {
   Home, CheckSquare, Bot, ShieldCheck, Brain, BarChart2, Package,
   Activity, List, Wrench, Plug, Database, ClipboardList, Map,
-  ChevronDown, ChevronRight, Zap, TerminalSquare, ClipboardCheck, MonitorCheck, UserRound, FlaskConical,
+  ChevronDown, ChevronRight, Zap, TerminalSquare, ClipboardCheck, MonitorCheck, UserRound, FlaskConical, Radar,
 } from "lucide-react";
 import { pick, usePreferences } from "../../context/PreferencesContext";
 import { useHumanAuth } from "../../context/HumanAuthContext";
@@ -33,6 +33,7 @@ const navGroups: NavGroup[] = [
       { labelKey: "approvals",    path: "/workspace/approvals",    icon: <ShieldCheck size={15} /> },
       { labelKey: "memory",       path: "/workspace/memory",       icon: <Brain size={15} /> },
       { labelKey: "experiments",  path: "/workspace/experiments",  icon: <FlaskConical size={15} /> },
+      { labelKey: "reliabilityLab", path: "/workspace/reliability", icon: <Radar size={15} /> },
       { labelKey: "reports",      path: "/workspace/reports",      icon: <BarChart2 size={15} /> },
       { labelKey: "account",      path: "/workspace/account",      icon: <UserRound size={15} /> },
       { labelKey: "templates",    path: "/admin/templates",        icon: <Package size={15} /> },
@@ -72,6 +73,7 @@ export function Sidebar({ locked = false }: { locked?: boolean }) {
       approvals: "Approvals",
       memory: "Memory",
       experiments: "Experiments",
+      reliabilityLab: "Reliability Lab",
       reports: "Reports",
       account: "Account and access",
       templates: "Templates",
@@ -89,6 +91,7 @@ export function Sidebar({ locked = false }: { locked?: boolean }) {
       lockedNavigation: "Sign in to access workspace data",
     },
     zh: {
+      reliabilityLab: "Reliability Lab",
       clientWorkspace: "前台工作区",
       adminConsole: "后台管理端",
       home: "首页",
