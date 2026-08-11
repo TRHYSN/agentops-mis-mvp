@@ -53,9 +53,10 @@ def main() -> int:
             return 1
 
         bin_dir = venv_path / ("Scripts" if os.name == "nt" else "bin")
-        python = bin_dir / "python"
-        agentops = bin_dir / "agentops"
-        agentops_worker = bin_dir / "agentops-worker"
+        executable_suffix = ".exe" if os.name == "nt" else ""
+        python = bin_dir / f"python{executable_suffix}"
+        agentops = bin_dir / f"agentops{executable_suffix}"
+        agentops_worker = bin_dir / f"agentops-worker{executable_suffix}"
 
         install_cmd = [uv, "pip", "install", "--python", str(python), str(ROOT)] if uv else [str(python), "-m", "pip", "install", str(ROOT)]
         install = run(install_cmd, cwd=tmp_path, env=env)

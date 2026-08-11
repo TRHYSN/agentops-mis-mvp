@@ -13,6 +13,7 @@ import argparse
 import datetime as dt
 import hashlib
 import hmac
+import importlib
 import ipaddress
 import json
 import mimetypes
@@ -180,8 +181,6 @@ from agentops_mis_core.workflow_jobs import (
     workflow_job_stuck_projection,
 )
 from agentops_mis_cli.advance_loop_policy import advance_loop_command_policy, advance_loop_policy_summary
-from agentops_mis_cli import host as private_host_cli
-from agentops_mis_cli import relay_control, relay_restart
 from agentops_mis_cli.codex_runtime import codex_binary_attestation
 from agentops_mis_cli.redaction import redact_full_text as shared_redact_full_text
 from agentops_mis_cli.redaction import redact_text as shared_redact_text
@@ -201,6 +200,27 @@ from agentops_mis_runtime.trust import (
     apply_runtime_connector_trust_update,
     runtime_connector_trust,
 )
+
+
+class _LazyModule:
+    """Load a POSIX-only Private Host module only when its route is used."""
+
+    def __init__(self, module_name: str):
+        self._module_name = module_name
+        self._module = None
+
+    def _load(self):
+        if self._module is None:
+            self._module = importlib.import_module(self._module_name)
+        return self._module
+
+    def __getattr__(self, name: str):
+        return getattr(self._load(), name)
+
+
+private_host_cli = _LazyModule("agentops_mis_cli.host")
+relay_control = _LazyModule("agentops_mis_cli.relay_control")
+relay_restart = _LazyModule("agentops_mis_cli.relay_restart")
 
 ROOT = Path(__file__).resolve().parent
 DB_PATH = Path(os.environ.get("AGENTOPS_DB_PATH") or (ROOT / "agentops_mis.db"))

@@ -14,6 +14,11 @@ from urllib.request import Request, urlopen
 
 ROOT = Path(__file__).resolve().parents[1]
 CLI = ROOT / "scripts" / "agentops"
+CLI_COMMAND = (
+    [sys.executable, "-B", "-m", "agentops_mis_cli"]
+    if os.name == "nt"
+    else [str(CLI)]
+)
 
 
 def stamp() -> str:
@@ -25,7 +30,7 @@ def run_cli(args: list[str], timeout: int = 90) -> subprocess.CompletedProcess[s
     env.pop("AGENTOPS_API_KEY", None)
     env.pop("AGENTOPS_AGENT_ID", None)
     return subprocess.run(
-        [str(CLI), *args],
+        [*CLI_COMMAND, *args],
         cwd=ROOT,
         env=env,
         capture_output=True,
@@ -124,24 +129,38 @@ def main() -> int:
     require(task.get("owner_agent_id") == agent_id, f"task not assigned to smoke worker: {task}")
     require(task.get("status") == "planned", f"task not planned: {task}")
 
-    worker = subprocess.run(
-        [
-            sys.executable,
-            str(ROOT / "scripts" / "agent_worker.py"),
-            "--once",
-            "--adapter",
-            "mock",
-            "--agent-id",
-            agent_id,
-        ],
-        cwd=ROOT,
-        capture_output=True,
-        text=True,
-        timeout=140,
-        check=False,
-    )
-    require(worker.returncode == 0, f"worker failed: {worker.stderr or worker.stdout}")
-    worker_payload = json.loads(worker.stdout or "{}")
+    worker_runs: list[subprocess.CompletedProcess[str]] = []
+    worker_payload: dict = {}
+    for attempt in range(2):
+        worker = subprocess.run(
+            [
+                sys.executable,
+                str(ROOT / "scripts" / "agent_worker.py"),
+                "--once",
+                "--adapter",
+                "mock",
+                "--agent-id",
+                agent_id,
+            ],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            timeout=140,
+            check=False,
+        )
+        worker_runs.append(worker)
+        require(worker.returncode == 0, f"worker failed: {worker.stderr or worker.stdout}")
+        worker_payload = json.loads(worker.stdout or "{}")
+        if worker_payload.get("processed") == 1:
+            break
+        result = ((worker_payload.get("results") or [{}])[0] or {})
+        require(
+            attempt == 0
+            and result.get("reason") == "intake_auto_planned"
+            and result.get("verification_pass") is True,
+            f"worker did not process or produce a verified intake plan: {worker_payload}",
+        )
+
     result = ((worker_payload.get("results") or [{}])[0] or {})
     run_id = result.get("run_id")
     require(worker_payload.get("processed") == 1, f"worker did not process exactly one task: {worker_payload}")
@@ -158,7 +177,11 @@ def main() -> int:
     require(run.get("status") == "completed", f"run not completed: {run}")
     require(len(tool_calls) >= 1, f"missing tool call evidence: {run_detail}")
     require(len(evaluations) >= 1, f"missing evaluation evidence: {run_detail}")
-    require(not secret_leaked("\n".join([register.stdout, register.stderr, created.stdout, created.stderr, worker.stdout, worker.stderr])), "secret-like token leaked")
+    worker_output = [text for proc in worker_runs for text in (proc.stdout, proc.stderr)]
+    require(
+        not secret_leaked("\n".join([register.stdout, register.stderr, created.stdout, created.stderr, *worker_output])),
+        "secret-like token leaked",
+    )
 
     print(json.dumps({
         "ok": True,

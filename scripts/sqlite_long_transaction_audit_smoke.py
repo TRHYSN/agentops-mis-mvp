@@ -230,7 +230,7 @@ def runtime_concurrent_write_smoke() -> dict:
 
         try:
             server.subprocess.run = fake_run
-            with server.db() as conn:
+            with server.db_session() as conn:
                 result = server.run_kb_bot_project_workflow(conn, {"base_url": "http://127.0.0.1:0"})
         finally:
             server.subprocess.run = original_run
