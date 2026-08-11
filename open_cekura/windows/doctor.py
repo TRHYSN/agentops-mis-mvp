@@ -50,6 +50,56 @@ def _tool_path(name: str, environ: Mapping[str, str]) -> str | None:
     return shutil.which(name, path=environ.get("PATH"))
 
 
+def _registered_windows_path_values() -> tuple[str, ...]:
+    """Read current User/Machine PATH values without launching a shell.
+
+    A long-running Windows process does not observe PATH changes made by an
+    installer after that process started.  The registry is the authoritative
+    source for new terminals, so the doctor refreshes those two non-secret
+    values when it owns environment discovery.
+    """
+
+    if os.name != "nt":
+        return ()
+    try:
+        import winreg
+    except ImportError:
+        return ()
+    locations = (
+        (winreg.HKEY_CURRENT_USER, r"Environment"),
+        (
+            winreg.HKEY_LOCAL_MACHINE,
+            r"SYSTEM\CurrentControlSet\Control\Session Manager\Environment",
+        ),
+    )
+    values: list[str] = []
+    for hive, key_name in locations:
+        try:
+            with winreg.OpenKey(hive, key_name) as key:
+                raw, _kind = winreg.QueryValueEx(key, "Path")
+        except OSError:
+            continue
+        if isinstance(raw, str) and raw:
+            values.append(winreg.ExpandEnvironmentStrings(raw))
+    return tuple(values)
+
+
+def _merged_path(*values: str) -> str:
+    entries: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        for raw_entry in value.split(os.pathsep):
+            entry = raw_entry.strip().strip('"')
+            if not entry:
+                continue
+            identity = os.path.normcase(os.path.normpath(entry))
+            if identity in seen:
+                continue
+            seen.add(identity)
+            entries.append(entry)
+    return os.pathsep.join(entries)
+
+
 def _run(
     runner: CommandRunner,
     argv: Sequence[str],
@@ -158,6 +208,11 @@ def run_doctor(
 
     root = Path(repo_root).resolve()
     runtime_environment = dict(os.environ if environ is None else environ)
+    if environ is None:
+        runtime_environment["PATH"] = _merged_path(
+            runtime_environment.get("PATH", ""),
+            *_registered_windows_path_values(),
+        )
     git_path = _tool_path("git", runtime_environment)
     node_path = _tool_path("node", runtime_environment)
     npm_path = _tool_path("npm", runtime_environment)

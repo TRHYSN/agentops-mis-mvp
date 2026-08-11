@@ -179,6 +179,40 @@ def test_run_doctor_fails_required_node_and_npm_checks_when_tools_are_missing(
         assert checks[check_id].status == "FAIL"
 
 
+def test_run_doctor_refreshes_registered_windows_path_when_environment_is_implicit(
+    doctor_repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    windows_doctor,
+) -> None:
+    registered_tools = doctor_repo / "registered tools"
+    registered_tools.mkdir()
+    for tool in ("git", "node", "npm"):
+        for suffix in ("", ".exe", ".cmd", ".bat"):
+            executable = registered_tools / f"{tool}{suffix}"
+            executable.write_text("stub", encoding="utf-8")
+            executable.chmod(0o755)
+    stale_path = doctor_repo / "stale process path"
+    stale_path.mkdir()
+    monkeypatch.setenv("PATH", str(stale_path))
+    monkeypatch.setenv("PATHEXT", ".COM;.EXE;.BAT;.CMD")
+    monkeypatch.setattr(
+        windows_doctor,
+        "_registered_windows_path_values",
+        lambda: (str(registered_tools),),
+        raising=False,
+    )
+
+    report = windows_doctor.run_doctor(
+        repo_root=doctor_repo,
+        command_runner=_command_runner(doctor_repo),
+    )
+
+    checks = _checks_by_id(report)
+    assert checks["node"].status == "PASS"
+    assert checks["npm"].status == "PASS"
+    assert checks["git"].status == "PASS"
+
+
 def test_run_doctor_reports_a_dirty_worktree_as_a_required_failure(
     doctor_repo: Path,
     monkeypatch: pytest.MonkeyPatch,
