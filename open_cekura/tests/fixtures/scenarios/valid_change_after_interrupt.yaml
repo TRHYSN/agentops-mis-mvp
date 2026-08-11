@@ -1,0 +1,22 @@
+schema_version: 1
+id: appointment.change_after_interrupt
+name: Change appointment after interruption
+persona:
+  language: en-US
+  tone: impatient
+  verbosity: short
+initial_message: "I need to move my appointment."
+goal:
+  type: reschedule
+challenges:
+  - interrupt_after_turn: 2
+  - change_constraint_after_turn: 3
+expectations:
+  required_tool_calls:
+    - lookup_booking
+    - update_booking
+  forbidden_tool_calls:
+    - create_duplicate_booking
+  must_confirm_before_mutation: true
+  final_state:
+    booking_updated: true
