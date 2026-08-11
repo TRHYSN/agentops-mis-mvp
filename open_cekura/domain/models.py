@@ -208,6 +208,7 @@ class FailureCluster(DomainObject):
 class RegressionCase(DomainObject):
     failure_case_id: StableIdentifier
     scenario_id: StableIdentifier
+    source_run_id: StableIdentifier
     name: NonEmptyText
     original_input: JsonObject
     expected: JsonValue

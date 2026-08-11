@@ -137,6 +137,7 @@ def domain_objects():
             id="ocregression_confirmation",
             failure_case_id="ocfailure_confirmation",
             scenario_id="appointment.change_after_interrupt",
+            source_run_id="ocrun_change_after_interrupt",
             name="Confirm before update",
             original_input={"message": "Move my appointment."},
             expected={"confirmed": True},
@@ -257,6 +258,7 @@ def test_derived_objects_keep_explicit_parent_ids() -> None:
         "RegressionCase": {
             "failure_case_id": "ocfailure_confirmation",
             "scenario_id": "appointment.change_after_interrupt",
+            "source_run_id": "ocrun_change_after_interrupt",
         },
         "ReleaseGateDecision": {
             "campaign_id": "occampaign_candidate",
