@@ -434,6 +434,63 @@ def test_writer_rejects_sensitive_config_fields_without_echoing_values(
     assert not root.exists()
 
 
+@pytest.mark.parametrize("location", ["scenario", "transcript"])
+def test_writer_rejects_inline_secret_patterns_before_creating_artifacts(
+    tmp_path: Path,
+    location: str,
+) -> None:
+    bundle, manifest_module = _evidence_modules()
+    inputs = _inputs(bundle, manifest_module)
+    if location == "scenario":
+        secret = "sk-inline-scenario-secret"
+        changed = inputs.scenario_yaml.replace(
+            b"Please find booking booking-123.",
+            f"OPENAI_API_KEY={secret}".encode(),
+        )
+        inputs = replace(inputs, scenario_yaml=changed)
+    else:
+        secret = "bearer-inline-transcript-secret"
+        changed_turn = inputs.transcript[0].model_copy(
+            update={"content": f"Authorization: Bearer {secret}"}
+        )
+        inputs = replace(inputs, transcript=(changed_turn,))
+    root = tmp_path / "artifacts"
+
+    with pytest.raises(bundle.EvidenceInputError) as captured:
+        bundle.write_run_bundle(root, inputs)
+
+    assert secret not in str(captured.value)
+    assert not root.exists()
+
+
+@pytest.mark.parametrize(
+    "sensitive_text",
+    [
+        "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789",
+        "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.signaturevalue123",
+        "Bearer bare-token-value-123456789",
+        "https://alice:p4ssword-secret@example.invalid/private",
+    ],
+    ids=["github-token", "jwt", "bare-bearer", "credential-url"],
+)
+def test_writer_rejects_additional_inline_credential_patterns(
+    tmp_path: Path,
+    sensitive_text: str,
+) -> None:
+    bundle, manifest_module = _evidence_modules()
+    inputs = _inputs(bundle, manifest_module)
+    changed_turn = inputs.transcript[0].model_copy(
+        update={"content": f"Do not persist {sensitive_text}"}
+    )
+    root = tmp_path / "artifacts"
+
+    with pytest.raises(bundle.EvidenceInputError) as captured:
+        bundle.write_run_bundle(root, replace(inputs, transcript=(changed_turn,)))
+
+    assert sensitive_text not in str(captured.value)
+    assert not root.exists()
+
+
 @pytest.mark.parametrize(
     "field_name",
     [

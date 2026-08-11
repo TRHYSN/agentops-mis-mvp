@@ -12,6 +12,7 @@ agentops_mis.db
 .agentops_runtime/
 .playwright-cli/
 mis-project/
+/artifacts/open-cekura/
 
 # Downloaded / generated UI runtime artifacts.
 node_modules/

@@ -16,6 +16,9 @@ VALID_SCENARIO = (
     / "scenarios"
     / "valid_change_after_interrupt.yaml"
 )
+PUBLIC_BASIC_SCENARIO = (
+    REPO_ROOT / "examples" / "open-cekura" / "scenarios" / "basic.yaml"
+)
 
 
 def run_cli(*args: str) -> subprocess.CompletedProcess[str]:
@@ -42,6 +45,15 @@ def test_scenario_validate_command_reports_contract_identity() -> None:
         "source": str(VALID_SCENARIO.resolve()),
         "token_omitted": True,
     }
+
+
+def test_documented_public_basic_scenario_command_succeeds() -> None:
+    result = run_cli("scenario", "validate", str(PUBLIC_BASIC_SCENARIO))
+
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["scenario_id"] == "appointment.basic_success"
+    assert payload["source"] == str(PUBLIC_BASIC_SCENARIO.resolve())
 
 
 def test_scenario_validate_command_fails_nonzero_on_incompatible_version(tmp_path: Path) -> None:

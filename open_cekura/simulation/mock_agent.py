@@ -28,7 +28,7 @@ from .agent_adapter import (
     AgentReply,
     ToolCallObservation,
 )
-from .personas import CONFIRMATION_MESSAGE, MUTATING_TOOL_NAMES, user_messages_for
+from .personas import MUTATING_TOOL_NAMES, user_messages_for
 
 
 DEFAULT_BOOKING_ID = "booking-001"

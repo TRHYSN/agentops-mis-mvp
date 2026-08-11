@@ -15,13 +15,25 @@ import yaml
 from pydantic import BaseModel, TypeAdapter, ValidationError
 
 from open_cekura.domain.enums import EvaluationStatus, RunFinalState
+from open_cekura.domain.ids import stable_id
 from open_cekura.domain.models import (
+    AgentUnderTest,
     AgentVersion,
+    Campaign,
     ConversationTurn,
     EvaluationResult,
     EvidenceManifest,
     ObservedToolCall,
+    RegressionCase,
+    ReleaseGateDecision,
+    ScenarioSuite,
 )
+from open_cekura.evaluation.aggregation import (
+    EvaluationResultGroup,
+    RunMetricFacts,
+    aggregate_campaign_metrics,
+)
+from open_cekura.release_gate.policy import CampaignGateInput, evaluate_release_gate
 from open_cekura.scenarios.schema import ScenarioDefinition
 
 
@@ -45,6 +57,18 @@ CAMPAIGN_FILENAMES = frozenset(
     (CAMPAIGN_SUMMARY_FILENAME, *CAMPAIGN_ARTIFACT_FILENAMES)
 )
 SUPPORTED_MANIFEST_SCHEMA_VERSION = 1
+
+# Offline verification is intentionally bounded before allocation/parsing.  These
+# limits cover the public v0 evidence contract while preventing a local artifact
+# tree from driving unbounded directory walks or reads.
+MAX_CAMPAIGN_ENTRIES = 1_100
+MAX_RUNS_PER_CAMPAIGN = 1_000
+MAX_RUN_ENTRIES = 32
+MAX_MANIFEST_BYTES = 1 * 1024 * 1024
+MAX_RUN_ARTIFACT_BYTES = 16 * 1024 * 1024
+MAX_CAMPAIGN_ARTIFACT_BYTES = 16 * 1024 * 1024
+MAX_JSON_NESTING = 128
+MAX_COMPARISON_DEPTH = 8
 
 _SAFE_COMPONENT = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$")
 _WINDOWS_RESERVED_NAMES = frozenset(
@@ -96,6 +120,32 @@ _SENSITIVE_SUFFIXES = (
     "_session_token",
     "_token",
 )
+_SENSITIVE_ASSIGNMENT = re.compile(
+    r"(?i)(?:^|[\s?&;,])"
+    r"(?:[a-z][a-z0-9]{1,31}[_-])?"
+    r"(?:api[_-]?key|access[_-]?token|auth[_-]?token|client[_-]?secret|"
+    r"password|private[_-]?key|refresh[_-]?token|session[_-]?token)"
+    r"\s*[:=]\s*[\"']?[^\s\"'&,;]{4,}"
+)
+_AUTHORIZATION_VALUE = re.compile(
+    r"(?i)\bauthorization\s*:\s*(?:bearer|basic)\s+[^\s,;]{4,}"
+)
+_PRIVATE_KEY_MARKER = re.compile(r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----")
+_OPENAI_STYLE_SECRET = re.compile(r"(?<![A-Za-z0-9_-])sk-[A-Za-z0-9_-]{8,}")
+_GITHUB_STYLE_SECRET = re.compile(
+    r"(?<![A-Za-z0-9_])(?:gh[pousr]_[A-Za-z0-9]{20,}|"
+    r"github_pat_[A-Za-z0-9_]{20,})"
+)
+_JWT_SECRET = re.compile(
+    r"(?<![A-Za-z0-9_-])[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\."
+    r"[A-Za-z0-9_-]{8,}(?![A-Za-z0-9_-])"
+)
+_BARE_BEARER_SECRET = re.compile(
+    r"(?i)\bbearer\s+[A-Za-z0-9._~+/-]{8,}={0,2}(?![A-Za-z0-9._~+/-])"
+)
+_CREDENTIAL_URL = re.compile(
+    r"(?i)\b[a-z][a-z0-9+.-]*://[^\s/:@]+:[^\s/@]+@[^\s/]+"
+)
 
 
 class EvidenceError(ValueError):
@@ -112,6 +162,10 @@ class EvidenceInputError(EvidenceError):
 
 class EvidenceWriteError(EvidenceError):
     """An artifact could not be committed atomically."""
+
+
+class _EvidenceLimitExceeded(EvidenceError):
+    """A local artifact exceeds a documented verifier resource bound."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -138,15 +192,54 @@ class RunVerification:
 
 
 @dataclass(frozen=True, slots=True)
+class VerifiedCampaignArtifact:
+    """Immutable bytes read and checked during one campaign verification pass."""
+
+    name: str
+    sha256: str
+    content: bytes
+
+
+@dataclass(frozen=True, slots=True)
 class VerificationReport:
     root: Path
     campaign_id: str
     runs: tuple[RunVerification, ...]
     issues: tuple[VerificationIssue, ...]
+    campaign_artifacts: tuple[VerifiedCampaignArtifact, ...] = ()
 
     @property
     def ok(self) -> bool:
         return not any(issue.severity == "error" for issue in self.issues)
+
+
+def verified_campaign_json(
+    report: VerificationReport,
+    artifact_name: str,
+) -> object:
+    """Hydrate one campaign JSON value from the verifier's immutable snapshot."""
+
+    if not isinstance(report, VerificationReport) or not report.ok:
+        raise EvidenceInputError("campaign verification report is not successful")
+    if artifact_name not in CAMPAIGN_FILENAMES:
+        raise EvidenceInputError("artifact_name is not a campaign contract file")
+    matching = [
+        artifact for artifact in report.campaign_artifacts if artifact.name == artifact_name
+    ]
+    if len(matching) != 1:
+        raise EvidenceInputError("verified campaign artifact snapshot is unavailable")
+    snapshot = matching[0]
+    if sha256_bytes(snapshot.content) != snapshot.sha256:
+        raise EvidenceInputError("verified campaign artifact snapshot is corrupt")
+    try:
+        return json.loads(
+            snapshot.content.decode("utf-8"),
+            parse_constant=_reject_json_constant,
+        )
+    except (UnicodeError, json.JSONDecodeError, ValueError, RecursionError) as error:
+        raise EvidenceInputError(
+            "verified campaign artifact snapshot is invalid"
+        ) from error
 
 
 def canonical_json_bytes(value: object) -> bytes:
@@ -198,7 +291,25 @@ def contains_sensitive_fields(value: object) -> bool:
                 continue
             visited_containers.add(id(current))
             pending.extend(current)
+        elif isinstance(current, str) and _contains_sensitive_text(current):
+            return True
     return False
+
+
+def _contains_sensitive_text(value: str) -> bool:
+    return any(
+        pattern.search(value) is not None
+        for pattern in (
+            _SENSITIVE_ASSIGNMENT,
+            _AUTHORIZATION_VALUE,
+            _PRIVATE_KEY_MARKER,
+            _OPENAI_STYLE_SECRET,
+            _GITHUB_STYLE_SECRET,
+            _JWT_SECRET,
+            _BARE_BEARER_SECRET,
+            _CREDENTIAL_URL,
+        )
+    )
 
 
 def deterministic_final_state(
@@ -428,6 +539,57 @@ def _reject_linked_existing_ancestry(path: Path) -> None:
             )
 
 
+def _bounded_directory_entries(path: Path, limit: int) -> list[Path]:
+    if type(limit) is not int or limit < 1:
+        raise _EvidenceLimitExceeded
+    entries: list[Path] = []
+    iterator = path.iterdir()
+    try:
+        for entry in iterator:
+            if len(entries) >= limit:
+                raise _EvidenceLimitExceeded
+            entries.append(entry)
+    finally:
+        close = getattr(iterator, "close", None)
+        if close is not None:
+            close()
+    return entries
+
+
+def _read_bounded(path: Path, limit: int) -> bytes:
+    if type(limit) is not int or limit < 1:
+        raise _EvidenceLimitExceeded
+    with path.open("rb") as stream:
+        content = stream.read(limit + 1)
+    if len(content) > limit:
+        raise _EvidenceLimitExceeded
+    return content
+
+
+def _json_nesting_exceeds_limit(content: bytes) -> bool:
+    depth = 0
+    in_string = False
+    escaped = False
+    for byte in content:
+        if in_string:
+            if escaped:
+                escaped = False
+            elif byte == 0x5C:  # backslash
+                escaped = True
+            elif byte == 0x22:  # double quote
+                in_string = False
+            continue
+        if byte == 0x22:
+            in_string = True
+        elif byte in (0x5B, 0x7B):  # [ {
+            depth += 1
+            if depth > MAX_JSON_NESTING:
+                return True
+        elif byte in (0x5D, 0x7D):  # ] }
+            depth = max(0, depth - 1)
+    return False
+
+
 def verify_run_bundles(
     root: str | Path,
     campaign_id: str,
@@ -490,9 +652,19 @@ def verify_run_bundles(
     run_paths: list[Path] = []
     try:
         campaign_entries = sorted(
-            campaign_path.iterdir(),
+            _bounded_directory_entries(campaign_path, MAX_CAMPAIGN_ENTRIES),
             key=lambda entry: (entry.name.casefold(), entry.name),
         )
+    except _EvidenceLimitExceeded:
+        campaign_issues.append(
+            _issue(
+                "evidence_limit_exceeded",
+                "error",
+                campaign_id,
+                "campaign directory exceeds the verifier entry limit",
+            )
+        )
+        campaign_entries = []
     except OSError:
         campaign_issues.append(
             _issue(
@@ -520,7 +692,20 @@ def verify_run_bundles(
             continue
         if entry.is_dir():
             try:
-                child_names = {child.name.casefold() for child in entry.iterdir()}
+                child_names = {
+                    child.name.casefold()
+                    for child in _bounded_directory_entries(entry, MAX_RUN_ENTRIES)
+                }
+            except _EvidenceLimitExceeded:
+                campaign_issues.append(
+                    _issue(
+                        "evidence_limit_exceeded",
+                        "error",
+                        "<untrusted-entry>",
+                        "run directory exceeds the verifier entry limit",
+                    )
+                )
+                continue
             except OSError:
                 campaign_issues.append(
                     _issue(
@@ -576,6 +761,16 @@ def verify_run_bundles(
             )
         )
 
+    if len(run_paths) > MAX_RUNS_PER_CAMPAIGN:
+        campaign_issues.append(
+            _issue(
+                "evidence_limit_exceeded",
+                "error",
+                campaign_id,
+                "campaign exceeds the verifier run limit",
+            )
+        )
+        run_paths = run_paths[:MAX_RUNS_PER_CAMPAIGN]
     if not run_paths:
         campaign_issues.append(
             _issue(
@@ -609,9 +804,27 @@ def verify_campaign(
     campaign_id: str,
     *,
     strict: bool = False,
+    _campaign_stack: frozenset[str] | None = None,
 ) -> VerificationReport:
     """Verify run bundles and the four hash-linked campaign evidence files."""
 
+    campaign_stack = _campaign_stack or frozenset()
+    if campaign_id in campaign_stack:
+        validate_path_component(campaign_id, label="campaign_id")
+        return VerificationReport(
+            root=absolute_safe_root(root),
+            campaign_id=campaign_id,
+            runs=(),
+            issues=(
+                _issue(
+                    "campaign_comparison_cycle",
+                    "error",
+                    CAMPAIGN_SUMMARY_FILENAME,
+                    "campaign comparison contains a verification cycle",
+                ),
+            ),
+        )
+    current_stack = campaign_stack | {campaign_id}
     run_report = verify_run_bundles(root, campaign_id, strict=strict)
     campaign_path = run_report.root / campaign_id
     if (
@@ -624,7 +837,27 @@ def verify_campaign(
     issues = list(run_report.issues)
     entries: dict[str, Path] = {}
     try:
-        entries = {entry.name: entry for entry in campaign_path.iterdir()}
+        entries = {
+            entry.name: entry
+            for entry in _bounded_directory_entries(
+                campaign_path, MAX_CAMPAIGN_ENTRIES
+            )
+        }
+    except _EvidenceLimitExceeded:
+        issues.append(
+            _issue(
+                "evidence_limit_exceeded",
+                "error",
+                campaign_id,
+                "campaign directory exceeds the verifier entry limit",
+            )
+        )
+        return VerificationReport(
+            root=run_report.root,
+            campaign_id=campaign_id,
+            runs=run_report.runs,
+            issues=tuple(issues),
+        )
     except OSError:
         issues = [*run_report.issues]
         issues.append(
@@ -676,7 +909,18 @@ def verify_campaign(
             )
             continue
         try:
-            artifact_bytes[artifact_name] = artifact_path.read_bytes()
+            artifact_bytes[artifact_name] = _read_bounded(
+                artifact_path, MAX_CAMPAIGN_ARTIFACT_BYTES
+            )
+        except _EvidenceLimitExceeded:
+            issues.append(
+                _issue(
+                    "evidence_limit_exceeded",
+                    "error",
+                    artifact_name,
+                    "campaign artifact exceeds the verifier byte limit",
+                )
+            )
         except OSError:
             issues.append(
                 _issue(
@@ -698,11 +942,29 @@ def verify_campaign(
         artifact_bytes,
         issues,
     )
+    _verify_campaign_summary_facts(
+        campaign_id,
+        payloads.get(CAMPAIGN_SUMMARY_FILENAME),
+        payloads,
+        run_report.runs,
+        issues,
+        campaign_root=run_report.root,
+        strict=strict,
+        campaign_stack=current_stack,
+    )
     return VerificationReport(
         root=run_report.root,
         campaign_id=campaign_id,
         runs=run_report.runs,
         issues=tuple(issues),
+        campaign_artifacts=tuple(
+            VerifiedCampaignArtifact(
+                name=name,
+                sha256=sha256_bytes(content),
+                content=content,
+            )
+            for name, content in sorted(artifact_bytes.items())
+        ),
     )
 
 
@@ -711,6 +973,16 @@ def _campaign_json_payload(
     artifact_bytes: bytes,
     issues: list[VerificationIssue],
 ) -> object | None:
+    if _json_nesting_exceeds_limit(artifact_bytes):
+        issues.append(
+            _issue(
+                "evidence_limit_exceeded",
+                "error",
+                artifact_name,
+                "campaign JSON exceeds the verifier nesting limit",
+            )
+        )
+        return None
     try:
         payload = json.loads(
             artifact_bytes.decode("utf-8"),
@@ -861,6 +1133,711 @@ def _verify_campaign_summary(
             )
 
 
+_STRUCTURED_SUMMARY_FIELDS = frozenset(
+    {
+        "schema_version",
+        "campaign",
+        "campaign_created_at",
+        "workspace_id",
+        "agent",
+        "agent_version",
+        "agent_config_sha256",
+        "scenario_suite",
+        "scenario_ids",
+        "run_ids",
+        "metrics",
+        "gate_input",
+        "manifest_ids",
+        "plan_evidence",
+        "mis_task_id",
+        "mis_plan_id",
+        "git_commit_sha",
+        "failure_count",
+        "regression_count",
+    }
+)
+
+
+def _verify_campaign_summary_facts(
+    campaign_id: str,
+    envelope: object | None,
+    campaign_payloads: Mapping[str, object | None],
+    runs: Sequence[RunVerification],
+    issues: list[VerificationIssue],
+    *,
+    campaign_root: Path,
+    strict: bool,
+    campaign_stack: frozenset[str],
+) -> None:
+    """Cross-check governed summary facts against independently hashed run evidence."""
+
+    if not isinstance(envelope, dict) or not isinstance(envelope.get("summary"), dict):
+        return
+    summary = envelope["summary"]
+    present = _STRUCTURED_SUMMARY_FIELDS.intersection(summary)
+    if not present:
+        # The low-level evidence writer also supports small caller-defined summaries.
+        # Those remain hash envelopes, not governed campaign facts.
+        if _runs_have_governed_mappings(runs):
+            issues.append(
+                _issue(
+                    "governed_campaign_summary_required",
+                    "error",
+                    CAMPAIGN_SUMMARY_FILENAME,
+                    "governed run mappings require a structured campaign summary",
+                )
+            )
+        return
+    if not _STRUCTURED_SUMMARY_FIELDS.issubset(summary):
+        _campaign_facts_issue(issues, "structured campaign summary is incomplete")
+        return
+    allowed_fields = _STRUCTURED_SUMMARY_FIELDS | {"comparison"}
+    if not set(summary).issubset(allowed_fields):
+        _campaign_facts_issue(issues, "structured campaign summary has unknown fields")
+        return
+
+    try:
+        campaign = Campaign.model_validate_json(canonical_json_bytes(summary["campaign"]))
+        agent = AgentUnderTest.model_validate_json(canonical_json_bytes(summary["agent"]))
+        agent_version = AgentVersion.model_validate_json(
+            canonical_json_bytes(summary["agent_version"])
+        )
+        scenario_suite = ScenarioSuite.model_validate_json(
+            canonical_json_bytes(summary["scenario_suite"])
+        )
+        gate_input = CampaignGateInput.model_validate_json(
+            canonical_json_bytes(summary["gate_input"])
+        )
+    except (ValidationError, TypeError, ValueError, RecursionError):
+        _campaign_facts_issue(issues, "structured campaign summary is invalid")
+        return
+
+    verified_runs = [run for run in runs if run.ok and run.manifest is not None]
+    if len(verified_runs) != len(runs) or not verified_runs:
+        return
+
+    groups: list[EvaluationResultGroup] = []
+    run_facts: list[RunMetricFacts] = []
+    scenario_by_run: dict[str, str] = {}
+    scenario_digest_by_id: dict[str, str] = {}
+    scenarios_by_id: dict[str, ScenarioDefinition] = {}
+    final_state_by_run: dict[str, dict[str, object]] = {}
+    manifest_ids: list[str] = []
+    git_commits: set[str] = set()
+    agent_versions: list[AgentVersion] = []
+    failure_count = 0
+    evaluations_by_id: dict[str, EvaluationResult] = {}
+    plan_evidence: list[dict[str, object | None]] = []
+
+    for run in verified_runs:
+        loaded = _load_campaign_run_facts(run, issues)
+        if loaded is None:
+            return
+        scenario, loaded_agent_version, turns, tool_calls, timing, evaluations = loaded
+        deterministic = [
+            result.model_copy(update={"mis_evaluation_id": None})
+            for result in evaluations
+            if not _is_optional_judge(result.evaluator_id)
+        ]
+        judges = [
+            result.model_copy(update={"mis_evaluation_id": None})
+            for result in evaluations
+            if _is_optional_judge(result.evaluator_id)
+        ]
+        try:
+            groups.append(
+                EvaluationResultGroup(
+                    run_id=run.run_id,
+                    deterministic_results=deterministic,
+                    judge_results=judges,
+                )
+            )
+            duration_ms = timing.get("duration_ms")
+            if type(duration_ms) is not int or duration_ms < 0:
+                raise ValueError("duration_ms must be a non-negative integer")
+            run_facts.append(
+                RunMetricFacts(
+                    run_id=run.run_id,
+                    turn_count=len(turns),
+                    latency_ms=duration_ms,
+                )
+            )
+        except (ValidationError, TypeError, ValueError):
+            _campaign_facts_issue(issues, "run evidence cannot produce campaign metrics")
+            return
+        scenario_by_run[run.run_id] = scenario.id
+        observed_final_state = timing.get("observed_final_state")
+        if not isinstance(observed_final_state, dict):
+            _campaign_facts_issue(issues, "run final state cannot be reconstructed")
+            return
+        scenarios_by_id[scenario.id] = scenario
+        final_state_by_run[run.run_id] = observed_final_state
+        manifest = run.manifest
+        assert manifest is not None
+        expected_task_id = stable_id(
+            "tskoc", str(summary["workspace_id"]), campaign_id
+        )
+        expected_plan_id = stable_id("planoc", expected_task_id, campaign_id)
+        expected_mis_run_id = stable_id("runoc", expected_task_id, run.run_id)
+        mapping_matches = all(
+            call.mis_tool_call_id
+            == stable_id("tcloc", expected_mis_run_id, call.id)
+            for call in tool_calls
+        ) and all(
+            result.mis_evaluation_id
+            == (
+                None
+                if result.status is EvaluationStatus.SKIPPED
+                else stable_id("evaloc", expected_mis_run_id, result.id)
+            )
+            for result in evaluations
+        )
+        mapping_matches = mapping_matches and manifest.mis_artifact_id == stable_id(
+            "artoc", expected_mis_run_id, "evidence-manifest.v1"
+        )
+        if manifest.mis_plan_evidence_manifest_id is not None:
+            mapping_matches = (
+                mapping_matches
+                and manifest.mis_plan_evidence_manifest_id
+                == stable_id("pemoc", expected_plan_id, expected_mis_run_id)
+            )
+        if not mapping_matches:
+            _campaign_facts_issue(issues, "run MIS mappings are not deterministic")
+            return
+        manifest_ids.append(manifest.id)
+        scenario_digest_by_id[scenario.id] = manifest.scenario_sha256
+        git_commits.add(manifest.git_commit_sha)
+        agent_versions.append(loaded_agent_version)
+        failure_count += sum(
+            max(1, len(result.reason_codes))
+            for result in evaluations
+            if result.status in {EvaluationStatus.FAIL, EvaluationStatus.ERROR}
+        )
+        evaluations_by_id.update({result.id: result for result in evaluations})
+        plan_evidence.append(
+            {
+                "run_id": run.run_id,
+                "status": (
+                    "verified"
+                    if manifest.mis_plan_evidence_manifest_id is not None
+                    else "unavailable"
+                ),
+                "reason": (
+                    None
+                    if manifest.mis_plan_evidence_manifest_id is not None
+                    else "run_has_no_completed_tool_call"
+                ),
+                "mis_plan_evidence_manifest_id": (
+                    manifest.mis_plan_evidence_manifest_id
+                ),
+            }
+        )
+
+    try:
+        metrics = aggregate_campaign_metrics(groups, run_facts)
+    except (ValidationError, TypeError, ValueError):
+        _campaign_facts_issue(issues, "run evidence cannot produce campaign metrics")
+        return
+
+    regressions_payload = campaign_payloads.get("regression_cases.json")
+    if not isinstance(regressions_payload, list):
+        return
+    try:
+        regressions = TypeAdapter(list[RegressionCase]).validate_json(
+            canonical_json_bytes(regressions_payload)
+        )
+    except (ValidationError, TypeError, ValueError, RecursionError):
+        _campaign_facts_issue(issues, "regression evidence does not satisfy its contract")
+        return
+
+    release_gate_payload = campaign_payloads.get("release_gate.json")
+    try:
+        release_gate = ReleaseGateDecision.model_validate_json(
+            canonical_json_bytes(release_gate_payload)
+        )
+    except (ValidationError, TypeError, ValueError, RecursionError):
+        _campaign_facts_issue(issues, "release gate evidence does not satisfy its contract")
+        return
+
+    expected_evaluator_versions = sorted(
+        {
+            result.evaluator_id
+            for group in groups
+            for result in group.deterministic_results
+        }
+    )
+    expected_run_ids = set(scenario_by_run)
+    expected_scenario_ids = set(scenario_by_run.values())
+    expected_plan_evidence = {
+        canonical_json_bytes(row) for row in plan_evidence
+    }
+    actual_plan_evidence = summary.get("plan_evidence")
+    actual_plan_rows = (
+        {canonical_json_bytes(row) for row in actual_plan_evidence}
+        if isinstance(actual_plan_evidence, list)
+        else set()
+    )
+    expected_task_id = stable_id("tskoc", str(summary["workspace_id"]), campaign_id)
+    expected_plan_id = stable_id("planoc", expected_task_id, campaign_id)
+    diff_payload = campaign_payloads.get("baseline_candidate_diff.json")
+    comparison = summary.get("comparison")
+    ordered_scenarios = _string_list(summary.get("scenario_ids"))
+    expected_suite_id = stable_id(
+        "ocsuite",
+        "|".join(
+            f"{scenario_id}:{scenario_digest_by_id.get(scenario_id, '')}"
+            for scenario_id in ordered_scenarios
+        ),
+    )
+    expected_agent_id = stable_id(
+        "ocagent", str(summary["workspace_id"]), "appointment-agent"
+    )
+    expected_agent_version_id = stable_id(
+        "ocagentv",
+        expected_agent_id,
+        agent_version.version.strip(),
+        agent_version.config_sha256,
+    )
+    baseline_campaign_id = (
+        diff_payload.get("baseline_campaign_id")
+        if isinstance(diff_payload, dict)
+        else None
+    )
+    expected_approval_id = stable_id(
+        "apoc",
+        campaign_id,
+        baseline_campaign_id if isinstance(baseline_campaign_id, str) else "standalone",
+        "release_gate.v1",
+    )
+    try:
+        baseline_gate_input = _baseline_gate_input(
+            diff_payload,
+            scenario_ids=expected_scenario_ids,
+            evaluator_versions=expected_evaluator_versions,
+            campaign_root=campaign_root,
+            strict=strict,
+            campaign_stack=campaign_stack,
+        )
+        expected_release_gate = evaluate_release_gate(
+            gate_input,
+            baseline=baseline_gate_input,
+            created_at=campaign.created_at,
+            mis_approval_id=expected_approval_id,
+        )
+        expected_diff = _expected_comparison_payload(gate_input, baseline_gate_input)
+    except _CampaignBaselineError:
+        issues.append(
+            _issue(
+                "campaign_baseline_unverified",
+                "error",
+                "baseline_candidate_diff.json",
+                "comparison baseline campaign is unavailable or unverified",
+            )
+        )
+        return
+    except (ValidationError, TypeError, ValueError, RecursionError):
+        _campaign_facts_issue(issues, "release gate facts cannot be reconstructed")
+        return
+    comparison_matches = (
+        comparison == diff_payload == expected_diff
+        if baseline_gate_input is not None
+        else comparison is None and diff_payload == expected_diff
+    )
+    regression_mappings_match = all(
+        _regression_matches_verified_facts(
+            regression,
+            expected_task_id=expected_task_id,
+            scenario_by_run=scenario_by_run,
+            evaluations_by_id=evaluations_by_id,
+            scenarios_by_id=scenarios_by_id,
+            final_state_by_run=final_state_by_run,
+        )
+        for regression in regressions
+    )
+    facts_match = all(
+        (
+            summary.get("schema_version") == 1,
+            campaign.id == campaign_id,
+            campaign.status.value == "completed",
+            campaign.created_at == agent_version.created_at,
+            agent.created_at == agent_version.created_at,
+            scenario_suite.created_at == agent_version.created_at,
+            summary.get("campaign_created_at") == _utc_json_time(campaign.created_at),
+            gate_input.campaign_id == campaign_id,
+            campaign.agent_version_id == agent_version.id,
+            campaign.scenario_suite_id == scenario_suite.id,
+            campaign.mis_task_id is None,
+            campaign.mis_plan_id is None,
+            summary.get("mis_task_id") == expected_task_id,
+            summary.get("mis_plan_id") == expected_plan_id,
+            agent_version.agent_id == agent.id,
+            agent.id == expected_agent_id,
+            agent.name == "AI Appointment Agent",
+            agent.description
+            == "Appointment agent exercised by the public deterministic demo.",
+            agent_version.id == expected_agent_version_id,
+            scenario_suite.id == expected_suite_id,
+            scenario_suite.name == "AI Appointment Agent Reliability Test",
+            scenario_suite.description
+            == "Deterministic appointment-agent reliability scenarios.",
+            agent.workspace_id == summary.get("workspace_id"),
+            all(version == agent_version for version in agent_versions),
+            summary.get("agent_config_sha256") == agent_version.config_sha256,
+            set(_string_list(summary.get("run_ids"))) == expected_run_ids,
+            len(_string_list(summary.get("run_ids"))) == len(expected_run_ids),
+            set(_string_list(summary.get("manifest_ids"))) == set(manifest_ids),
+            len(_string_list(summary.get("manifest_ids"))) == len(manifest_ids),
+            set(_string_list(summary.get("scenario_ids"))) == expected_scenario_ids,
+            len(_string_list(summary.get("scenario_ids")))
+            == len(expected_scenario_ids),
+            git_commits == {summary.get("git_commit_sha")},
+            summary.get("metrics") == metrics.model_dump(mode="json"),
+            gate_input.metrics == metrics,
+            gate_input.scenario_by_run == scenario_by_run,
+            set(gate_input.scenario_ids) == expected_scenario_ids,
+            gate_input.evaluator_versions == expected_evaluator_versions,
+            gate_input.evidence_verified is True,
+            summary.get("failure_count") == failure_count,
+            summary.get("regression_count") == len(regressions),
+            len(regressions) == failure_count,
+            expected_plan_evidence == actual_plan_rows,
+            comparison_matches,
+            regression_mappings_match,
+            release_gate == expected_release_gate,
+            release_gate.campaign_id == campaign_id,
+            release_gate.baseline_campaign_id
+            == (
+                baseline_campaign_id
+                if isinstance(baseline_campaign_id, str)
+                else None
+            ),
+            release_gate.policy_version == "release_gate.v1",
+            release_gate.mis_approval_id == expected_approval_id,
+            release_gate.evidence_refs == gate_input.evidence_refs,
+            release_gate.created_at == campaign.created_at,
+            release_gate.metrics.get("task_success_rate")
+            == metrics.task_success_rate,
+            release_gate.metrics.get("deterministic_error_rate")
+            == metrics.deterministic_error_rate,
+            release_gate.metrics.get("forbidden_call_violations")
+            == metrics.forbidden_call_violation_count,
+            release_gate.metrics.get("duplicate_mutation_violations")
+            == metrics.duplicate_mutation_violation_count,
+            release_gate.metrics.get("confirmation_violations")
+            == metrics.confirmation_violation_count,
+            release_gate.metrics.get("timeout_rate") == metrics.timeout_rate,
+            release_gate.metrics.get("median_turns") == metrics.median_turns,
+        )
+    )
+    if not facts_match:
+        _campaign_facts_issue(
+            issues,
+            "campaign summary facts do not match verified run evidence",
+        )
+
+
+def _load_campaign_run_facts(
+    run: RunVerification,
+    issues: list[VerificationIssue],
+) -> tuple[
+    ScenarioDefinition,
+    AgentVersion,
+    list[ConversationTurn],
+    list[ObservedToolCall],
+    dict[str, object],
+    list[EvaluationResult],
+] | None:
+    manifest = run.manifest
+    if manifest is None:
+        return None
+    contents: dict[str, bytes] = {}
+    for artifact_name in (
+        "scenario.yaml",
+        "agent_version.json",
+        "transcript.json",
+        "tool_calls.json",
+        "timing.json",
+        "evaluations.json",
+    ):
+        path = run.manifest_path.parent / artifact_name
+        try:
+            content = _read_bounded(path, MAX_RUN_ARTIFACT_BYTES)
+        except (_EvidenceLimitExceeded, OSError):
+            _campaign_facts_issue(issues, "run evidence changed during verification")
+            return None
+        if sha256_bytes(content) != manifest.artifacts.get(artifact_name):
+            _campaign_facts_issue(issues, "run evidence changed during verification")
+            return None
+        contents[artifact_name] = content
+    try:
+        scenario = ScenarioDefinition.model_validate(
+            yaml.safe_load(contents["scenario.yaml"].decode("utf-8"))
+        )
+        agent_envelope = json.loads(
+            contents["agent_version.json"].decode("utf-8"),
+            parse_constant=_reject_json_constant,
+        )
+        if not isinstance(agent_envelope, dict):
+            raise ValueError("agent envelope must be an object")
+        loaded_agent_version = AgentVersion.model_validate_json(
+            canonical_json_bytes(agent_envelope.get("agent_version"))
+        )
+        turns = TypeAdapter(list[ConversationTurn]).validate_json(
+            contents["transcript.json"]
+        )
+        tool_calls = TypeAdapter(list[ObservedToolCall]).validate_json(
+            contents["tool_calls.json"]
+        )
+        timing = TypeAdapter(dict[str, object]).validate_json(contents["timing.json"])
+        evaluations = TypeAdapter(list[EvaluationResult]).validate_json(
+            contents["evaluations.json"]
+        )
+    except (
+        UnicodeError,
+        json.JSONDecodeError,
+        yaml.YAMLError,
+        ValidationError,
+        TypeError,
+        ValueError,
+        RecursionError,
+    ):
+        _campaign_facts_issue(issues, "run evidence cannot be reconstructed")
+        return None
+    return scenario, loaded_agent_version, turns, tool_calls, timing, evaluations
+
+
+def _string_list(value: object) -> list[str]:
+    if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+        return []
+    return value
+
+
+def _regression_matches_verified_facts(
+    regression: RegressionCase,
+    *,
+    expected_task_id: str,
+    scenario_by_run: Mapping[str, str],
+    evaluations_by_id: Mapping[str, EvaluationResult],
+    scenarios_by_id: Mapping[str, ScenarioDefinition],
+    final_state_by_run: Mapping[str, dict[str, object]],
+) -> bool:
+    evaluation = evaluations_by_id.get(
+        regression.evidence_refs[-1].split(":", 1)[1]
+        if regression.evidence_refs
+        and regression.evidence_refs[-1].startswith("evaluation:")
+        else ""
+    )
+    if evaluation is None:
+        matching = [
+            result
+            for result in evaluations_by_id.values()
+            if f"evaluation:{result.id}" in regression.evidence_refs
+        ]
+        evaluation = matching[0] if len(matching) == 1 else None
+    if evaluation is None or evaluation.run_id != regression.source_run_id:
+        return False
+    if scenario_by_run.get(regression.source_run_id) != regression.scenario_id:
+        return False
+    reason_codes = evaluation.reason_codes or ["evaluation_failed"]
+    if regression.reason_code not in reason_codes:
+        return False
+    expected_failure_id = stable_id(
+        "ocfailure",
+        regression.source_run_id,
+        evaluation.id,
+        regression.reason_code,
+    )
+    expected_regression_id = stable_id(
+        "ocregression", expected_failure_id, evaluation.evaluator_id
+    )
+    scenario = scenarios_by_id.get(regression.scenario_id)
+    observed_final_state = final_state_by_run.get(regression.source_run_id)
+    if scenario is None or observed_final_state is None:
+        return False
+    scenario_json = scenario.model_dump(mode="json")
+    expected_evidence_refs = list(
+        dict.fromkeys(
+            [*evaluation.evidence_refs, f"evaluation:{evaluation.id}"]
+        )
+    )
+    try:
+        expected_regression = RegressionCase(
+            schema_version=1,
+            id=expected_regression_id,
+            failure_case_id=expected_failure_id,
+            scenario_id=scenario.id,
+            source_run_id=evaluation.run_id,
+            name=f"Regression: {scenario.name} [{regression.reason_code}]",
+            original_input={
+                "initial_message": scenario.initial_message,
+                "persona": scenario_json["persona"],
+                "goal": scenario_json["goal"],
+                "challenges": scenario_json["challenges"],
+            },
+            expected={
+                "evaluation_status": "pass",
+                "final_state": scenario.expectations.final_state,
+            },
+            observed={
+                "evaluation_status": evaluation.status.value,
+                "final_state": observed_final_state,
+                "metadata": evaluation.metadata,
+            },
+            reason_code=regression.reason_code,
+            evaluator_id=evaluation.evaluator_id,
+            evidence_refs=expected_evidence_refs,
+            mis_memory_id=stable_id(
+                "memoc", expected_task_id, expected_regression_id
+            ),
+            created_at=evaluation.created_at,
+        )
+    except ValidationError:
+        return False
+    return regression == expected_regression
+
+
+def _baseline_gate_input(
+    diff_payload: object,
+    *,
+    scenario_ids: set[str],
+    evaluator_versions: list[str],
+    campaign_root: Path,
+    strict: bool,
+    campaign_stack: frozenset[str],
+) -> CampaignGateInput | None:
+    if not isinstance(diff_payload, dict):
+        raise ValueError("comparison evidence must be an object")
+    baseline_campaign_id = diff_payload.get("baseline_campaign_id")
+    if baseline_campaign_id is None:
+        if diff_payload.get("comparison") != "no_comparison":
+            raise ValueError("standalone comparison evidence is invalid")
+        return None
+    if not isinstance(baseline_campaign_id, str):
+        raise ValueError("baseline campaign ID is invalid")
+    if baseline_campaign_id in campaign_stack:
+        raise _CampaignBaselineError
+    if len(campaign_stack) >= MAX_COMPARISON_DEPTH:
+        raise _CampaignBaselineError
+    try:
+        baseline_report = verify_campaign(
+            campaign_root,
+            baseline_campaign_id,
+            strict=strict,
+            _campaign_stack=campaign_stack,
+        )
+    except EvidenceError:
+        raise _CampaignBaselineError from None
+    if not baseline_report.ok:
+        raise _CampaignBaselineError
+    try:
+        baseline_envelope = verified_campaign_json(
+            baseline_report, CAMPAIGN_SUMMARY_FILENAME
+        )
+        if not isinstance(baseline_envelope, dict) or not isinstance(
+            baseline_envelope.get("summary"), dict
+        ):
+            raise _CampaignBaselineError
+        baseline_summary = baseline_envelope["summary"]
+        baseline_gate = CampaignGateInput.model_validate_json(
+            canonical_json_bytes(baseline_summary.get("gate_input"))
+        )
+    except (EvidenceInputError, ValidationError, TypeError, ValueError, RecursionError):
+        raise _CampaignBaselineError from None
+    if (
+        baseline_gate.campaign_id != baseline_campaign_id
+        or set(baseline_gate.scenario_ids) != scenario_ids
+        or baseline_gate.evaluator_versions != evaluator_versions
+        or diff_payload.get("baseline_metrics")
+        != baseline_gate.metrics.model_dump(mode="json")
+    ):
+        raise _CampaignBaselineError
+    return baseline_gate
+
+
+def _expected_comparison_payload(
+    candidate: CampaignGateInput,
+    baseline: CampaignGateInput | None,
+) -> dict[str, object]:
+    if baseline is None:
+        return {
+            "schema_version": 1,
+            "campaign_id": candidate.campaign_id,
+            "baseline": None,
+            "comparison": "no_comparison",
+        }
+    baseline_metrics = baseline.metrics
+    candidate_metrics = candidate.metrics
+    return {
+        "schema_version": 1,
+        "baseline_campaign_id": baseline.campaign_id,
+        "candidate_campaign_id": candidate.campaign_id,
+        "baseline_metrics": baseline_metrics.model_dump(mode="json"),
+        "candidate_metrics": candidate_metrics.model_dump(mode="json"),
+        "delta": {
+            "task_success_percentage_points": _metric_rate_delta(
+                baseline_metrics.task_success_rate,
+                candidate_metrics.task_success_rate,
+                scale=100.0,
+            ),
+            "median_turns_ratio": _metric_ratio_delta(
+                baseline_metrics.median_turns,
+                candidate_metrics.median_turns,
+            ),
+            "timeout_rate": _metric_rate_delta(
+                baseline_metrics.timeout_rate,
+                candidate_metrics.timeout_rate,
+            ),
+        },
+    }
+
+
+def _metric_rate_delta(
+    baseline: float | None,
+    candidate: float | None,
+    *,
+    scale: float = 1.0,
+) -> float | None:
+    if baseline is None or candidate is None:
+        return None
+    return (candidate - baseline) * scale
+
+
+def _metric_ratio_delta(
+    baseline: float | None,
+    candidate: float | None,
+) -> float | None:
+    if baseline is None or candidate is None or baseline <= 0:
+        return None
+    return (candidate - baseline) / baseline
+
+
+class _CampaignBaselineError(ValueError):
+    """A comparison baseline cannot establish verified campaign facts."""
+
+
+def _runs_have_governed_mappings(runs: Sequence[RunVerification]) -> bool:
+    return any(
+        run.manifest is not None
+        and isinstance(run.manifest.mis_artifact_id, str)
+        and run.manifest.mis_artifact_id.startswith("artoc_")
+        for run in runs
+    )
+
+
+def _campaign_facts_issue(
+    issues: list[VerificationIssue],
+    message: str,
+) -> None:
+    issues.append(
+        _issue(
+            "campaign_summary_facts_mismatch",
+            "error",
+            CAMPAIGN_SUMMARY_FILENAME,
+            message,
+        )
+    )
+
+
 def _verify_run(campaign_id: str, run_path: Path, *, strict: bool) -> RunVerification:
     run_id = run_path.name
     manifest_path = run_path / MANIFEST_FILENAME
@@ -868,8 +1845,19 @@ def _verify_run(campaign_id: str, run_path: Path, *, strict: bool) -> RunVerific
     entries: dict[str, Path] = {}
     try:
         listed_entries = sorted(
-            run_path.iterdir(),
+            _bounded_directory_entries(run_path, MAX_RUN_ENTRIES),
             key=lambda entry: (entry.name.casefold(), entry.name),
+        )
+    except _EvidenceLimitExceeded:
+        listed_entries = []
+        issues.append(
+            _run_issue(
+                run_id,
+                "evidence_limit_exceeded",
+                "error",
+                "",
+                "run directory exceeds the verifier entry limit",
+            )
         )
     except OSError:
         listed_entries = []
@@ -957,10 +1945,29 @@ def _verify_run(campaign_id: str, run_path: Path, *, strict: bool) -> RunVerific
         )
 
     try:
-        manifest_bytes = manifest_entry.read_bytes()
+        manifest_bytes = _read_bounded(manifest_entry, MAX_MANIFEST_BYTES)
+        if _json_nesting_exceeds_limit(manifest_bytes):
+            raise _EvidenceLimitExceeded
         raw_manifest = json.loads(
             manifest_bytes.decode("utf-8"),
             parse_constant=_reject_json_constant,
+        )
+    except _EvidenceLimitExceeded:
+        issues.append(
+            _run_issue(
+                run_id,
+                "evidence_limit_exceeded",
+                "error",
+                MANIFEST_FILENAME,
+                "evidence manifest exceeds a verifier resource limit",
+            )
+        )
+        return RunVerification(
+            campaign_id=campaign_id,
+            run_id=run_id,
+            manifest_path=manifest_path,
+            manifest=None,
+            issues=tuple(issues),
         )
     except (OSError, UnicodeError, json.JSONDecodeError, ValueError, RecursionError):
         issues.append(
@@ -1121,7 +2128,22 @@ def _verify_run(campaign_id: str, run_path: Path, *, strict: bool) -> RunVerific
         ):
             continue
         try:
-            artifact_bytes = artifact_path.read_bytes()
+            artifact_bytes = _read_bounded(artifact_path, MAX_RUN_ARTIFACT_BYTES)
+            if artifact_name.endswith(".json") and _json_nesting_exceeds_limit(
+                artifact_bytes
+            ):
+                raise _EvidenceLimitExceeded
+        except _EvidenceLimitExceeded:
+            issues.append(
+                _run_issue(
+                    run_id,
+                    "evidence_limit_exceeded",
+                    "error",
+                    artifact_name,
+                    "covered artifact exceeds a verifier resource limit",
+                )
+            )
+            continue
         except OSError:
             issues.append(
                 _run_issue(
@@ -1670,11 +2692,13 @@ __all__ = [
     "RunVerification",
     "VerificationIssue",
     "VerificationReport",
+    "VerifiedCampaignArtifact",
     "canonical_json_bytes",
     "contains_sensitive_fields",
     "deterministic_final_state",
     "sha256_bytes",
     "validate_path_component",
     "verify_campaign",
+    "verified_campaign_json",
     "verify_run_bundles",
 ]

@@ -45,6 +45,7 @@ from .manifest import (
     sha256_bytes,
     tool_call_turns_resolve,
     validate_path_component,
+    verified_campaign_json,
     verify_campaign,
     verify_run_bundles,
 )
@@ -241,9 +242,15 @@ def _prepare_artifacts(
     if not isinstance(inputs.scenario_yaml, bytes) or not inputs.scenario_yaml:
         raise EvidenceInputError("scenario_yaml must contain exact non-empty bytes")
     try:
-        scenario_payload = yaml.safe_load(inputs.scenario_yaml.decode("utf-8"))
+        scenario_text = inputs.scenario_yaml.decode("utf-8")
+    except UnicodeError as error:
+        raise EvidenceInputError("scenario_yaml must satisfy Scenario v1") from error
+    if contains_sensitive_fields(scenario_text):
+        raise EvidenceInputError("run evidence contains a prohibited sensitive value")
+    try:
+        scenario_payload = yaml.safe_load(scenario_text)
         scenario = ScenarioDefinition.model_validate(scenario_payload)
-    except (UnicodeError, yaml.YAMLError, ValidationError, RecursionError) as error:
+    except (yaml.YAMLError, ValidationError, RecursionError) as error:
         raise EvidenceInputError("scenario_yaml must satisfy Scenario v1") from error
     if not isinstance(inputs.environment, EvidenceEnvironment):
         raise EvidenceInputError("environment must be EvidenceEnvironment")
@@ -555,6 +562,7 @@ __all__ = [
     "VerificationIssue",
     "VerificationReport",
     "verify_campaign",
+    "verified_campaign_json",
     "verify_run_bundles",
     "write_campaign_bundle",
     "write_run_bundle",

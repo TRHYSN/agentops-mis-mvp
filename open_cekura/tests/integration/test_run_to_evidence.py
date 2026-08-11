@@ -215,6 +215,29 @@ def test_full_campaign_verification_fails_closed_when_campaign_becomes_unreadabl
     assert "campaign_unreadable" in _issue_codes(report)
 
 
+@pytest.mark.parametrize(
+    ("limit_name", "limit_value"),
+    [
+        ("MAX_CAMPAIGN_ENTRIES", 1),
+        ("MAX_RUN_ARTIFACT_BYTES", 8),
+        ("MAX_JSON_NESTING", 1),
+    ],
+)
+def test_verification_fails_closed_at_documented_resource_limits(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    limit_name: str,
+    limit_value: int,
+) -> None:
+    bundle, manifest, root, _ = _write_bundle(tmp_path)
+    monkeypatch.setattr(manifest, limit_name, limit_value)
+
+    report = bundle.verify_campaign(root, "occampaign_candidate")
+
+    assert report.ok is False
+    assert "evidence_limit_exceeded" in _issue_codes(report)
+
+
 @pytest.mark.parametrize("scope", ["manifest", "campaign"])
 def test_verification_rejects_escaped_lone_surrogate_without_crashing(
     tmp_path: Path,
@@ -264,6 +287,7 @@ def test_verification_rejects_excessive_json_depth_without_crashing(
         "malformed_manifest",
         "invalid_campaign_json",
         "invalid_json_artifact",
+        "evidence_limit_exceeded",
     }.intersection(_issue_codes(report))
 
 
