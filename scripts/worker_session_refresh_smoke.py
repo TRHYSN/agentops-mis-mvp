@@ -93,8 +93,12 @@ def run_worker(base_url: str, agent_id: str, token: str) -> dict:
         "--poll-interval",
         "0.1",
         "--use-session",
+        # The oversized refresh margin forces a new session before each loop
+        # iteration.  Keep the TTL long enough to cover one complete task so
+        # runner scheduling cannot turn this refresh test into a mid-task
+        # expiry race.
         "--session-ttl-sec",
-        "2",
+        "30",
         "--session-refresh-margin-sec",
         "3600",
         "--no-enforce-intake",
