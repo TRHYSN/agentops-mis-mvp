@@ -1,0 +1,93 @@
+name: OpenCekura Windows and Ubuntu
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - feat/open-cekura-windows-v0
+
+permissions:
+  contents: read
+
+concurrency:
+  group: open-cekura-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  open-cekura-acceptance:
+    name: OpenCekura (${{ matrix.os }}, Python ${{ matrix.python-version }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - windows-latest
+        python-version:
+          - "3.10"
+          - "3.11"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.event.pull_request.head.repo.full_name || github.repository }}
+          ref: ${{ github.head_ref || github.ref_name }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install minimal OpenCekura Python dependencies
+        run: python -m pip install -r requirements-open-cekura.txt
+
+      - name: Run OpenCekura unit tests
+        run: python -m pytest open_cekura/tests/unit -q
+
+      - name: Run OpenCekura integration tests
+        run: python -m pytest open_cekura/tests/integration -q
+
+      - name: Validate the documented Scenario v1 fixture
+        run: python -m open_cekura.cli.main scenario validate examples/open-cekura/scenarios/basic.yaml
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: ui/start-building-app/package-lock.json
+
+      - name: Install UI dependencies
+        working-directory: ui/start-building-app
+        run: npm ci
+
+      - name: Run Windows Doctor
+        if: runner.os == 'Windows'
+        run: python -m open_cekura.windows.doctor
+
+      - name: Verify Reliability Lab source contract
+        run: python scripts/reliability_lab_ui_smoke.py
+
+      - name: Build the existing MIS UI
+        working-directory: ui/start-building-app
+        run: npm run build
+
+      - name: Run Ubuntu portable acceptance
+        if: runner.os != 'Windows'
+        run: python scripts/open_cekura_ci_acceptance.py --ui-dist ui/start-building-app/dist --result-path open-cekura-ci-acceptance.json
+
+      - name: Run Windows browser acceptance
+        if: runner.os == 'Windows'
+        run: python scripts/open_cekura_ci_acceptance.py --ui-dist ui/start-building-app/dist --result-path open-cekura-ci-acceptance.json --require-browser
+
+      - name: Upload bounded acceptance evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: open-cekura-${{ matrix.os }}-py${{ matrix.python-version }}
+          path: open-cekura-ci-acceptance.json
+          if-no-files-found: ignore
+          retention-days: 14
