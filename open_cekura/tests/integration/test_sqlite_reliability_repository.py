@@ -669,6 +669,68 @@ def persist_graph(repo: Any, graph: dict[str, Any]) -> None:
     repo.upsert_evidence_manifest(graph["manifest"])
 
 
+def test_release_gate_list_returns_newest_decisions_first(tmp_path: Path) -> None:
+    _, sqlite_repository = storage_modules()
+    conn = open_database(tmp_path / "gate-order.db")
+    try:
+        repo = sqlite_repository.SQLiteRepository(conn, workspace_id="ws-a")
+        repo.initialize_schema()
+        graph = domain_graph()
+        persist_graph(repo, graph)
+        for index in range(7):
+            gate_id = f"ocgate_recent_{index}"
+            approval_id = f"ap_recent_{index}"
+            conn.execute(
+                """INSERT INTO approvals(
+                    approval_id,task_id,run_id,decision,subject_type,subject_id
+                ) VALUES(?,?,?,?,?,?)""",
+                (
+                    approval_id,
+                    "tsk_a",
+                    "run_a",
+                    "approved",
+                    "reliability_release_gate",
+                    gate_id,
+                ),
+            )
+            conn.execute(
+                """INSERT INTO reliability_release_gates(
+                    workspace_id,gate_id,schema_version,campaign_id,
+                    baseline_campaign_id,decision,policy_version,blockers_json,
+                    warnings_json,metrics_json,evidence_refs_json,mis_approval_id,
+                    created_at
+                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (
+                    "ws-a",
+                    gate_id,
+                    1,
+                    graph["campaign"].id,
+                    None,
+                    "pass",
+                    "release_gate.v1",
+                    "[]",
+                    "[]",
+                    "{}",
+                    "[]",
+                    approval_id,
+                    (NOW + timedelta(minutes=index + 1)).isoformat(),
+                ),
+            )
+
+        recent = repo.list_release_gates(limit=6)
+
+        assert [row["gate_id"] for row in recent] == [
+            "ocgate_recent_6",
+            "ocgate_recent_5",
+            "ocgate_recent_4",
+            "ocgate_recent_3",
+            "ocgate_recent_2",
+            "ocgate_recent_1",
+        ]
+    finally:
+        conn.close()
+
+
 def test_schema_is_idempotent_normalized_and_has_no_shadow_ledgers(
     tmp_path: Path,
 ) -> None:

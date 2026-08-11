@@ -1887,7 +1887,7 @@ class SQLiteRepository:
         if campaign_id is not None:
             sql += " AND campaign_id=?"
             params.append(campaign_id)
-        sql += " ORDER BY created_at,gate_id LIMIT ? OFFSET ?"
+        sql += " ORDER BY created_at DESC,gate_id DESC LIMIT ? OFFSET ?"
         params.extend((limit, offset))
         return [self._gate_public(row) for row in self._fetchall(sql, params)]
 
