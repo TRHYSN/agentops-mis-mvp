@@ -1,6 +1,7 @@
 # OpenCekura Windows v0 Handoff
 
-Status: local implementation and acceptance complete; PR and remote CI evidence pending.
+Status: implementation and remote acceptance complete; PR #125 is open for
+Owner review and has not been merged.
 
 ## Immutable source context
 
@@ -14,6 +15,7 @@ Starting working tree: clean
 Operating system: Windows 11
 Canonical Notion spec: 3b96adfd-d920-81cf-9f99-d2990deea005
 Implementation commit accepted locally: 7bd651583fa4553c57ce190d0c4b6617e2a73ddf
+Remote acceptance head: 31eef4d1821af0c553e61d638cc1acf30db053e3
 Handoff commit: derive with git rev-parse HEAD after this document is committed
 ```
 
@@ -207,12 +209,77 @@ The three skips are fail-closed link/reparse-point tests because the current
 Windows account cannot create file or directory links. CI Python 3.10/3.11 is
 the portability authority; local Python 3.13 results do not replace it.
 
+Post-acceptance integration and CI fixes leading to remote-tested head
+`31eef4d1...` were also verified:
+
+```text
+python -m pytest open_cekura/tests/unit -q
+  197 passed, 2 skipped
+clean WSL clone: python3 scripts/private_host_bundle_smoke.py
+  PASS, including installed Host startup and upgrade/rollback
+Linux-equivalent server + scripts/worker_session_refresh_smoke.py
+  PASS, 2 runs, 3 distinct sessions, refresh count 2, final revoke true
+python -m open_cekura.windows.doctor
+python -m open_cekura.cli.main doctor
+  both local entry points PASS on clean c366bf04; remote Windows jobs PASS on 31eef4d1
+```
+
 ## Remote delivery truth
 
-The remote PR and GitHub Actions run do not exist at this document revision.
-They must be filled with the real PR URL, run ID/URL, exact tested head SHA, and
-all four Ubuntu/Windows x Python 3.10/3.11 job conclusions after push. Do not
-interpret workflow source or local tests as remote CI evidence.
+Canonical pull request:
+
+```text
+PR: https://github.com/geogejoy107-jpg/agentops-mis-mvp/pull/125
+Base: main
+Head: feat/open-cekura-windows-v0
+Remote-tested head: 31eef4d1821af0c553e61d638cc1acf30db053e3
+State at acceptance: OPEN, MERGEABLE, merge state CLEAN, not merged
+```
+
+PR #124 was the original fork PR. It was closed without merge after GitHub
+required repository-admin approval before fork workflows could run; #125 uses
+the exact upstream branch and is the only canonical review surface.
+
+OpenCekura Windows and Ubuntu PR run:
+
+```text
+Run: 31538272116
+URL: https://github.com/geogejoy107-jpg/agentops-mis-mvp/actions/runs/31538272116
+Head: 31eef4d1821af0c553e61d638cc1acf30db053e3
+Conclusion: SUCCESS
+ubuntu-latest / Python 3.10: SUCCESS, job 93934520758
+ubuntu-latest / Python 3.11: SUCCESS, job 93934520919
+windows-latest / Python 3.10: SUCCESS, job 93934520815
+windows-latest / Python 3.11: SUCCESS, job 93934520831
+```
+
+Every matrix job installed minimal dependencies, ran unit and integration
+tests, validated Scenario v1, tested the real TypeScript gate-head selector,
+built the existing MIS UI, and uploaded bounded evidence. Both Ubuntu jobs ran
+portable acceptance; both Windows jobs passed Windows Doctor and real Chrome
+browser acceptance. The same head's independent push run `31538266896` also
+finished SUCCESS in all four matrix jobs.
+
+AgentOps MIS CI PR run:
+
+```text
+Run: 31538272115
+URL: https://github.com/geogejoy107-jpg/agentops-mis-mvp/actions/runs/31538272115
+Head: 31eef4d1821af0c553e61d638cc1acf30db053e3
+Conclusion: SUCCESS (6/6 jobs)
+Backend deterministic smokes: SUCCESS, job 93934584077
+UI build + Private Host bundle smoke: SUCCESS, job 93934584218
+Runtime compatibility / Python 3.10: SUCCESS, job 93934584102
+Runtime compatibility / Python 3.11: SUCCESS, job 93934584032
+Relay recovery on real Linux systemd: SUCCESS, job 93934583989
+Relay production install/recovery: SUCCESS, job 93934584082
+```
+
+No workflow required repository secrets, an external model, or a downloaded
+browser. The earlier Windows code-page failure, omitted Reliability runtime in
+the Private Host bundle, and a two-second session-refresh smoke race were each
+root-caused, regression-tested, fixed, and re-run before the successful head
+above was accepted.
 
 The implementation agent must not merge the PR; Owner review is the final
 merge authority.
