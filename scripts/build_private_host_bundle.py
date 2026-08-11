@@ -55,7 +55,11 @@ RUNTIME_PREFIXES = (
     "incubator/research-lab/examples/",
     "incubator/research-lab/research_lab/",
     "knowledge/",
+    "open_cekura/",
     "static/",
+)
+RUNTIME_EXCLUDED_PREFIXES = (
+    "open_cekura/tests/",
 )
 FORBIDDEN_PARTS = {
     ".git",
@@ -111,6 +115,8 @@ def source_selection() -> list[str]:
     for path in tracked_files():
         rel = safe_relative(path)
         if is_forbidden(rel):
+            continue
+        if path.startswith(RUNTIME_EXCLUDED_PREFIXES):
             continue
         if path in RUNTIME_FILES or path.startswith(RUNTIME_PREFIXES):
             selected.append(path)
