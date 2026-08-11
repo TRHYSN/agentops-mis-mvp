@@ -161,7 +161,7 @@ def domain_objects():
             mis_approval_id="ap_gate_candidate",
         ),
         models.EvidenceManifest(
-            **shared,
+            **{**shared, "schema_version": 2},
             id="ocmanifest_change_after_interrupt",
             campaign_id="occampaign_candidate",
             run_id="ocrun_change_after_interrupt",
@@ -201,6 +201,7 @@ def test_stable_ids_are_deterministic_and_length_delimited() -> None:
 
 
 def test_all_fifteen_domain_objects_round_trip_canonical_json() -> None:
+    models, _, _ = domain_modules()
     objects = domain_objects()
 
     assert len(objects) == 15
@@ -208,7 +209,9 @@ def test_all_fifteen_domain_objects_round_trip_canonical_json() -> None:
 
     for item in objects:
         assert isinstance(item, BaseModel)
-        assert item.schema_version == 1
+        assert item.schema_version == (
+            2 if isinstance(item, models.EvidenceManifest) else 1
+        )
         assert item.id
         assert item.created_at.tzinfo is timezone.utc
 
@@ -273,6 +276,18 @@ def test_derived_objects_keep_explicit_parent_ids() -> None:
     for class_name, parents in expected_parents.items():
         for field_name, expected in parents.items():
             assert getattr(objects[class_name], field_name) == expected
+
+
+def test_evidence_manifest_v2_rejects_pre_release_v1() -> None:
+    models, _, _ = domain_modules()
+    manifest = next(
+        item for item in domain_objects() if isinstance(item, models.EvidenceManifest)
+    )
+    payload = manifest.model_dump(mode="python")
+    payload["schema_version"] = 1
+
+    with pytest.raises(ValidationError, match="schema_version"):
+        models.EvidenceManifest.model_validate(payload)
 
 
 def test_models_forbid_unknown_fields_and_coercion() -> None:
@@ -350,7 +365,7 @@ def test_manifest_requires_matching_core_artifact_hashes() -> None:
 
     with pytest.raises(ValidationError, match="scenario_sha256"):
         models.EvidenceManifest(
-            schema_version=1,
+            schema_version=2,
             id="ocmanifest_invalid",
             campaign_id="occampaign_invalid",
             run_id="ocrun_invalid",

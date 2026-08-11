@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from datetime import datetime, timedelta, timezone
 from typing import Annotated, Literal
 
@@ -18,7 +19,7 @@ from pydantic import (
     model_validator,
 )
 
-from open_cekura.domain.enums import RunFinalState, TurnRole
+from open_cekura.domain.enums import AdapterKind, RunFinalState, TurnRole
 from open_cekura.domain.ids import stable_id
 from open_cekura.domain.models import (
     AgentVersion,
@@ -125,6 +126,7 @@ async def run_scenario(
     success_claim: bool | None = None
     completed = False
     timeout_seconds = scenario.expectations.timeout_ms / 1000.0
+    lifecycle_started_ns = time.perf_counter_ns()
 
     try:
         try:
@@ -142,6 +144,8 @@ async def run_scenario(
             adapter_error = f"adapter_timeout:start:{exc}"
         except AdapterTransportError as exc:
             adapter_error = f"adapter_transport:start:{exc}"
+        except AdapterContractError as exc:
+            adapter_error = f"adapter_contract:start:{exc}"
 
         if adapter_error is None:
             for message in user_messages_for(scenario):
@@ -173,6 +177,9 @@ async def run_scenario(
                 except AdapterTransportError as exc:
                     adapter_error = f"adapter_transport:send:{exc}"
                     break
+                except AdapterContractError as exc:
+                    adapter_error = f"adapter_contract:send:{exc}"
+                    break
 
                 assistant_turn = _turn(
                     run_id=run_id,
@@ -203,6 +210,9 @@ async def run_scenario(
                     break
                 except AdapterTransportError as exc:
                     adapter_error = f"adapter_transport:observe_tool_calls:{exc}"
+                    break
+                except AdapterContractError as exc:
+                    adapter_error = f"adapter_contract:observe_tool_calls:{exc}"
                     break
 
                 for observation in observations:
@@ -246,8 +256,15 @@ async def run_scenario(
             adapter_error = adapter_error or f"adapter_timeout:close:{exc}"
         except AdapterTransportError as exc:
             adapter_error = adapter_error or f"adapter_transport:close:{exc}"
+        except AdapterContractError as exc:
+            adapter_error = adapter_error or f"adapter_contract:close:{exc}"
 
-    duration_ms = sum(call.duration_ms for call in tool_calls)
+    lifecycle_duration_ms = (time.perf_counter_ns() - lifecycle_started_ns) // 1_000_000
+    duration_ms = (
+        lifecycle_duration_ms
+        if agent_version.adapter_kind is AdapterKind.HTTP
+        else sum(call.duration_ms for call in tool_calls)
+    )
     finished_at = started_at + timedelta(milliseconds=duration_ms)
     if adapter_error is not None or timed_out or not completed:
         status = RunFinalState.ERROR

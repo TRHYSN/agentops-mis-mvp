@@ -72,6 +72,29 @@ Writing a campaign follows this order within bounded transactions:
 
 Failure to create an authoritative mapping is recorded explicitly. It is not hidden by fabricating an ID. Test repositories may use an isolated SQLite file but must initialize the same MIS schema plus the vertical schema.
 
+Gate recomputation treats filesystem bundles as evidence, never as authority.
+Before creating a new MIS Approval, the campaign service reconstructs the typed
+campaign hierarchy and reconciles exact Turn, ToolCall, Run, Evaluation,
+Failure, Regression/Memory, Manifest, Artifact, PlanEvidence, Gate, Approval,
+Audit-chain, and current-Gate-head sets with both vertical projection and core
+MIS. Any missing, extra, stale, or conflicting fact aborts the transaction.
+Campaign evidence schema v2 preserves create-once gate snapshots under
+`gates/<gate_id>/`; a hash-linked index selects the current root aliases without
+deleting prior decisions.
+
+SQLite and the filesystem are joined by a recoverable publication protocol, not
+by an impossible cross-resource atomic transaction. A complete verified
+campaign generation is staged under a same-volume private slot, sealed by a
+durable tree-hash journal, and linked to a publication outbox row inside the MIS
+transaction. Same-volume directory swaps expose the generation. Recovery uses
+the committed outbox as authority to restore the old tree or finish and reverify
+the new tree before cleanup. The journal is bound to a persistent random
+SQLite-instance identity rather than its pathname. A filesystem-normalized
+campaign slot and a process-lifetime OS file lease serialize the exact final
+namespace across workspaces and Windows case aliases. A dead writer's unsealed
+stage is reclaimable only after that lease can be acquired; a live writer and a
+sealed journal with missing or replaced SQLite authority both fail closed.
+
 ## Stable IDs and serialization
 
 IDs use a type prefix plus a deterministic digest for replay-derived objects. New user-level entities may use a generated stable ID supplied once and persisted. Re-running the same campaign request with an explicit idempotency key must not create duplicate ledger objects.

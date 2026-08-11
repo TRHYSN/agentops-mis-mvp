@@ -46,6 +46,21 @@ npm --version
 
 OpenCekura Python dependencies are installed from the repository's dedicated requirements file; the base MIS package remains dependency-light. CI must not require API keys. The optional LLM judge reports `SKIPPED` when no supported key is present.
 
+OpenCekura v0 writes run `EvidenceManifest` schema v2. Pre-release local v1
+databases and artifact roots are intentionally not migrated because v1 used a
+different digest meaning. Archive or remove only the explicitly selected
+pre-release test directory, create a fresh database/artifact root, and rerun the
+campaigns; never edit an old manifest or its MIS Artifact hash in place.
+
+Campaign publication uses a non-blocking Windows file lease under
+`artifacts/.open-cekura-publications/` and a random authority identity stored in
+the SQLite database. A hard-exited writer releases the OS lease automatically,
+allowing the next command to remove only an unsealed private stage. A sealed
+journal is never resolved against a missing database or a newly created
+database at the same path; restore the original database or preserve the
+journal and campaign tree for operator review. Do not manually remove a slot
+while another campaign command is running.
+
 Install fresh-clone dependencies:
 
 ```powershell

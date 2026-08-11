@@ -16,6 +16,7 @@ from open_cekura.release_gate.policy import (
     ReleaseGateError,
     evaluate_release_gate,
 )
+from open_cekura.release_gate import policy as release_gate_policy
 from open_cekura.tests.integration.test_simulation_evaluation import evaluate_profile
 from open_cekura.simulation.mock_agent import MockAgentConfig
 
@@ -52,6 +53,7 @@ def gate_input(config: MockAgentConfig, profile: str) -> CampaignGateInput:
         metrics=aggregate_campaign_metrics(groups, facts),
         scenario_by_run=scenario_by_run,
         scenario_ids=sorted(rows),
+        scenario_sha256_by_id={scenario_id: "a" * 64 for scenario_id in rows},
         evaluator_versions=sorted(evaluator_versions),
         evidence_verified=True,
         evidence_refs=[f"artifact:{profile}/campaign_summary.json"],
@@ -83,6 +85,65 @@ def test_public_baseline_blocks_and_candidate_passes_from_observed_facts() -> No
     assert "FAIL\nBlockers:" in render_gate_decision(baseline_decision)
     assert "appointment.duplicate_request" in render_gate_decision(baseline_decision)
     assert render_gate_decision(candidate_decision) == "PASS"
+
+
+def test_stored_v1_policy_dispatch_is_explicit_and_immutable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidate = gate_input(MockAgentConfig.candidate(), "candidate_dispatch")
+    stored = evaluate_release_gate(candidate, created_at=NOW)
+
+    monkeypatch.setattr(release_gate_policy, "POLICY_VERSION", "release_gate.v2")
+
+    dispatched = release_gate_policy.evaluate_release_gate_for_policy(
+        stored.policy_version,
+        candidate,
+        created_at=NOW,
+    )
+
+    assert dispatched == stored
+    assert tuple(release_gate_policy.RELEASE_GATE_POLICY_REGISTRY) == (
+        "release_gate.v1",
+    )
+    with pytest.raises(TypeError):
+        release_gate_policy.RELEASE_GATE_POLICY_REGISTRY["release_gate.v2"] = (
+            evaluate_release_gate
+        )
+
+
+def test_policy_dispatch_rejects_a_mislabeled_decision(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidate = gate_input(MockAgentConfig.candidate(), "candidate_bad_dispatch")
+    stored = evaluate_release_gate(candidate, created_at=NOW)
+
+    def mislabeled_policy(*args: object, **kwargs: object):
+        del args, kwargs
+        return stored.model_copy(update={"policy_version": "release_gate.v2"})
+
+    monkeypatch.setattr(
+        release_gate_policy,
+        "RELEASE_GATE_POLICY_REGISTRY",
+        {"release_gate.v1": mislabeled_policy},
+    )
+
+    with pytest.raises(ReleaseGateError, match="returned policy version"):
+        release_gate_policy.evaluate_release_gate_for_policy(
+            "release_gate.v1",
+            candidate,
+            created_at=NOW,
+        )
+
+
+def test_unknown_stored_policy_version_fails_closed() -> None:
+    candidate = gate_input(MockAgentConfig.candidate(), "candidate_unknown_policy")
+
+    with pytest.raises(ReleaseGateError, match="unsupported release gate policy"):
+        release_gate_policy.evaluate_release_gate_for_policy(
+            "release_gate.v999",
+            candidate,
+            created_at=NOW,
+        )
 
 
 def test_evaluator_error_and_unverified_evidence_can_never_pass() -> None:
@@ -132,6 +193,45 @@ def test_evaluator_error_and_unverified_evidence_can_never_pass() -> None:
     }
 
 
+def test_comparison_rejects_a_baseline_with_deterministic_evaluator_errors() -> None:
+    baseline = gate_input(MockAgentConfig.candidate(), "baseline_errored")
+    candidate = gate_input(MockAgentConfig.candidate(), "candidate_clean")
+    first_group = baseline.metrics.result_groups[0]
+    first_result = first_group.deterministic_results[0]
+    errored = first_result.model_copy(
+        update={
+            "status": EvaluationStatus.ERROR,
+            "score": None,
+            "threshold": None,
+            "reason_codes": ["evaluator_error"],
+        }
+    )
+    groups = [
+        first_group.model_copy(
+            update={
+                "deterministic_results": [
+                    errored,
+                    *first_group.deterministic_results[1:],
+                ]
+            }
+        ),
+        *baseline.metrics.result_groups[1:],
+    ]
+    facts = [
+        RunMetricFacts(run_id=group.run_id, turn_count=4, latency_ms=100)
+        for group in groups
+    ]
+    unsafe_baseline = baseline.model_copy(
+        update={"metrics": aggregate_campaign_metrics(groups, facts)}
+    )
+
+    with pytest.raises(
+        ReleaseGateError,
+        match="baseline deterministic evaluator error rate",
+    ):
+        evaluate_release_gate(candidate, baseline=unsafe_baseline, created_at=NOW)
+
+
 def test_comparison_warns_on_turn_and_small_timeout_regressions() -> None:
     baseline = gate_input(MockAgentConfig.candidate(), "baseline_clean")
     candidate = gate_input(MockAgentConfig.candidate(), "candidate_slow")
@@ -164,6 +264,21 @@ def test_incompatible_comparison_contracts_fail_closed() -> None:
     )
 
     with pytest.raises(ReleaseGateError, match="scenario sets"):
+        evaluate_release_gate(incompatible, baseline=baseline, created_at=NOW)
+
+
+def test_same_scenario_ids_with_changed_contract_digests_fail_closed() -> None:
+    baseline = gate_input(MockAgentConfig.candidate(), "baseline_clean")
+    candidate = gate_input(MockAgentConfig.candidate(), "candidate_clean")
+    changed_digests = {
+        scenario_id: ("0" * 64 if index == 0 else "a" * 64)
+        for index, scenario_id in enumerate(candidate.scenario_ids)
+    }
+    incompatible = candidate.model_copy(
+        update={"scenario_sha256_by_id": changed_digests}
+    )
+
+    with pytest.raises(ReleaseGateError, match="scenario contract digests"):
         evaluate_release_gate(incompatible, baseline=baseline, created_at=NOW)
 
 

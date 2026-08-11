@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from datetime import datetime
+from types import MappingProxyType
+from typing import Mapping, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -11,15 +13,26 @@ from open_cekura.domain.ids import stable_id
 from open_cekura.domain.models import (
     GateFact,
     ReleaseGateDecision,
+    Sha256Digest,
     StableIdentifier,
 )
 from open_cekura.evaluation.aggregation import CampaignMetrics
-from open_cekura.evaluation.rules import DETERMINISTIC_EVALUATORS
-
-
-POLICY_VERSION = "release_gate.v1"
-_REQUIRED_EVALUATORS = frozenset(spec.evaluator_id for spec in DETERMINISTIC_EVALUATORS)
-_ZERO_TOLERANCE = {
+_RELEASE_GATE_V1_POLICY_VERSION = "release_gate.v1"
+POLICY_VERSION = _RELEASE_GATE_V1_POLICY_VERSION
+_RELEASE_GATE_V1_REQUIRED_EVALUATORS = frozenset(
+    {
+        "task_success.v1",
+        "required_tool_calls.v1",
+        "forbidden_tool_calls.v1",
+        "duplicate_mutation.v1",
+        "confirmation_before_mutation.v1",
+        "final_state_match.v1",
+        "turn_count_limit.v1",
+        "timeout.v1",
+    }
+)
+_RELEASE_GATE_V1_ZERO_TOLERANCE = MappingProxyType(
+    {
     "forbidden_tool_calls.v1": (
         "zero_tolerance.forbidden_tool_calls.v1",
         "forbidden tool call",
@@ -32,7 +45,8 @@ _ZERO_TOLERANCE = {
         "zero_tolerance.confirmation_before_mutation.v1",
         "mutation before confirmation",
     ),
-}
+    }
+)
 
 
 class ReleaseGateError(ValueError):
@@ -48,6 +62,7 @@ class CampaignGateInput(_GateContract):
     metrics: CampaignMetrics
     scenario_by_run: dict[StableIdentifier, StableIdentifier]
     scenario_ids: list[StableIdentifier]
+    scenario_sha256_by_id: dict[StableIdentifier, Sha256Digest]
     evaluator_versions: list[StableIdentifier]
     evidence_verified: bool
     evidence_refs: list[str] = Field(default_factory=list)
@@ -63,6 +78,10 @@ class CampaignGateInput(_GateContract):
             raise ValueError("scenario_ids must be unique")
         if set(self.scenario_ids) != set(self.scenario_by_run.values()):
             raise ValueError("scenario_ids must equal the mapped scenario set")
+        if set(self.scenario_sha256_by_id) != set(self.scenario_ids):
+            raise ValueError(
+                "scenario_sha256_by_id must map every scenario contract exactly once"
+            )
         observed_versions = {
             result.evaluator_id
             for group in self.metrics.result_groups
@@ -70,14 +89,14 @@ class CampaignGateInput(_GateContract):
         }
         if set(self.evaluator_versions) != observed_versions:
             raise ValueError("evaluator_versions must match deterministic results")
-        if not _REQUIRED_EVALUATORS.issubset(observed_versions):
-            missing = sorted(_REQUIRED_EVALUATORS - observed_versions)
+        if not _RELEASE_GATE_V1_REQUIRED_EVALUATORS.issubset(observed_versions):
+            missing = sorted(_RELEASE_GATE_V1_REQUIRED_EVALUATORS - observed_versions)
             raise ValueError(f"deterministic evaluation set is incomplete: {missing}")
         for group in self.metrics.result_groups:
             group_versions = {
                 result.evaluator_id for result in group.deterministic_results
             }
-            if not _REQUIRED_EVALUATORS.issubset(group_versions):
+            if not _RELEASE_GATE_V1_REQUIRED_EVALUATORS.issubset(group_versions):
                 raise ValueError(
                     f"run {group.run_id} has an incomplete deterministic evaluation set"
                 )
@@ -93,7 +112,7 @@ def _zero_tolerance_facts(candidate: CampaignGateInput) -> list[GateFact]:
     for group in candidate.metrics.result_groups:
         scenario_id = candidate.scenario_by_run[group.run_id]
         for result in group.deterministic_results:
-            rule = _ZERO_TOLERANCE.get(result.evaluator_id)
+            rule = _RELEASE_GATE_V1_ZERO_TOLERANCE.get(result.evaluator_id)
             if rule is None or result.status is not EvaluationStatus.FAIL:
                 continue
             rule_id, label = rule
@@ -127,10 +146,23 @@ def _comparison_is_compatible(
 ) -> None:
     if set(candidate.scenario_ids) != set(baseline.scenario_ids):
         raise ReleaseGateError("baseline and candidate scenario sets are incompatible")
+    if candidate.scenario_sha256_by_id != baseline.scenario_sha256_by_id:
+        raise ReleaseGateError(
+            "baseline and candidate scenario contract digests are incompatible"
+        )
     if set(candidate.evaluator_versions) != set(baseline.evaluator_versions):
         raise ReleaseGateError("baseline and candidate evaluator sets are incompatible")
     if not baseline.evidence_verified:
         raise ReleaseGateError("baseline evidence is not verified")
+    baseline_error_rate = baseline.metrics.deterministic_error_rate
+    if baseline_error_rate is None:
+        raise ReleaseGateError(
+            "baseline deterministic evaluator error rate is unavailable"
+        )
+    if baseline_error_rate > 0.0:
+        raise ReleaseGateError(
+            "baseline deterministic evaluator error rate must be zero"
+        )
 
 
 def evaluate_release_gate(
@@ -290,12 +322,12 @@ def evaluate_release_gate(
             "ocgate",
             candidate.campaign_id,
             baseline.campaign_id if baseline is not None else "standalone",
-            POLICY_VERSION,
+            _RELEASE_GATE_V1_POLICY_VERSION,
         ),
         campaign_id=candidate.campaign_id,
         baseline_campaign_id=baseline.campaign_id if baseline is not None else None,
         decision=decision,
-        policy_version=POLICY_VERSION,
+        policy_version=_RELEASE_GATE_V1_POLICY_VERSION,
         blockers=blockers,
         warnings=warnings,
         metrics=summary_metrics,
@@ -305,9 +337,65 @@ def evaluate_release_gate(
     )
 
 
+class ReleaseGatePolicy(Protocol):
+    """Frozen callable contract for a stored release-gate policy version."""
+
+    def __call__(
+        self,
+        candidate: CampaignGateInput,
+        *,
+        baseline: CampaignGateInput | None = None,
+        created_at: datetime,
+        mis_approval_id: str | None = None,
+    ) -> ReleaseGateDecision: ...
+
+
+RELEASE_GATE_POLICY_REGISTRY: Mapping[str, ReleaseGatePolicy] = MappingProxyType(
+    {_RELEASE_GATE_V1_POLICY_VERSION: evaluate_release_gate}
+)
+
+
+def evaluate_release_gate_for_policy(
+    policy_version: str,
+    candidate: CampaignGateInput,
+    *,
+    baseline: CampaignGateInput | None = None,
+    created_at: datetime,
+    mis_approval_id: str | None = None,
+) -> ReleaseGateDecision:
+    """Recompute a stored gate with its exact frozen policy implementation."""
+
+    evaluator = RELEASE_GATE_POLICY_REGISTRY.get(policy_version)
+    if evaluator is None:
+        raise ReleaseGateError(
+            f"unsupported release gate policy version: {policy_version!r}"
+        )
+    decision = evaluator(
+        candidate,
+        baseline=baseline,
+        created_at=created_at,
+        mis_approval_id=mis_approval_id,
+    )
+    expected_id = stable_id(
+        "ocgate",
+        candidate.campaign_id,
+        baseline.campaign_id if baseline is not None else "standalone",
+        policy_version,
+    )
+    if decision.policy_version != policy_version or decision.id != expected_id:
+        raise ReleaseGateError(
+            "stored release gate policy returned policy version or identity "
+            "inconsistent with the requested version"
+        )
+    return decision
+
+
 __all__ = [
     "CampaignGateInput",
     "POLICY_VERSION",
+    "RELEASE_GATE_POLICY_REGISTRY",
     "ReleaseGateError",
+    "ReleaseGatePolicy",
     "evaluate_release_gate",
+    "evaluate_release_gate_for_policy",
 ]

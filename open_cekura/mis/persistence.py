@@ -903,6 +903,12 @@ def _safe_metadata(mis: Any, value: Any) -> Any:
     return _redact_metadata_tree(mis, mis.safe_json_metadata(value))
 
 
+def safe_mis_metadata(mis: Any, value: Any) -> Any:
+    """Return the canonical bounded/redacted core-MIS metadata projection."""
+
+    return _safe_metadata(mis, value)
+
+
 def _redact_metadata_tree(mis: Any, value: Any) -> Any:
     if isinstance(value, dict):
         redacted: dict[str, Any] = {}
@@ -1007,4 +1013,5 @@ __all__ = [
     "MISBridgeError",
     "PersistedCampaignMappings",
     "persist_campaign_execution",
+    "safe_mis_metadata",
 ]

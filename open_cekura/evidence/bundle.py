@@ -30,8 +30,12 @@ from .manifest import (
     EvidenceInputError,
     EvidencePathError,
     EvidenceWriteError,
+    GATE_SNAPSHOT_FILENAMES,
+    GATE_SNAPSHOTS_DIRNAME,
     MANIFEST_FILENAME,
+    MAX_GATE_HISTORY_ENTRIES,
     RUN_ARTIFACT_FILENAMES,
+    SUPPORTED_MANIFEST_SCHEMA_VERSION,
     RunVerification,
     VerificationIssue,
     VerificationReport,
@@ -89,6 +93,13 @@ class CampaignBundleInputs:
     baseline_candidate_diff: Mapping[str, JsonValue] | None
     release_gate: Mapping[str, JsonValue]
     regression_cases: tuple[JsonValue, ...]
+    gate_history: tuple["GateSnapshotInputs", ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class GateSnapshotInputs:
+    release_gate: Mapping[str, JsonValue]
+    baseline_candidate_diff: Mapping[str, JsonValue]
 
 
 @dataclass(frozen=True, slots=True)
@@ -132,14 +143,24 @@ def write_campaign_bundle(
     root: str | Path,
     inputs: CampaignBundleInputs,
 ) -> CampaignBundle:
-    """Create or replace the four campaign evidence files, summary last."""
+    """Create current campaign views and immutable gate snapshots, summary last."""
 
     if not isinstance(inputs, CampaignBundleInputs):
         raise EvidenceInputError("inputs must be CampaignBundleInputs")
     validate_path_component(inputs.campaign_id, label="campaign_id")
-    artifact_bytes, artifact_hashes = _prepare_campaign_artifacts(inputs)
+    artifact_bytes, artifact_hashes, gate_snapshots = _prepare_campaign_artifacts(inputs)
     campaign_path = _prepare_campaign_path(root, inputs.campaign_id)
     artifact_root = absolute_safe_root(root)
+
+    gates_path = _prepare_gate_snapshots_path(campaign_path, artifact_root)
+    for gate_id, snapshot in gate_snapshots.items():
+        gate_path = _prepare_gate_snapshot_path(gates_path, gate_id, artifact_root)
+        for artifact_name in sorted(GATE_SNAPSHOT_FILENAMES):
+            _atomic_create_once_bytes(
+                gate_path / artifact_name,
+                snapshot[artifact_name],
+                artifact_root=artifact_root,
+            )
 
     for artifact_name in CAMPAIGN_ARTIFACT_FILENAMES:
         _atomic_write_bytes(
@@ -165,7 +186,7 @@ def write_campaign_bundle(
 
 def _prepare_campaign_artifacts(
     inputs: CampaignBundleInputs,
-) -> tuple[dict[str, bytes], dict[str, str]]:
+) -> tuple[dict[str, bytes], dict[str, str], dict[str, dict[str, bytes]]]:
     if not isinstance(inputs.campaign_summary, Mapping):
         raise EvidenceInputError("campaign_summary must be a JSON object")
     if inputs.baseline_candidate_diff is not None and not isinstance(
@@ -179,6 +200,10 @@ def _prepare_campaign_artifacts(
         raise EvidenceInputError("release_gate must be a JSON object")
     if not isinstance(inputs.regression_cases, tuple):
         raise EvidenceInputError("regression_cases must be a tuple of JSON values")
+    if not isinstance(inputs.gate_history, tuple) or any(
+        not isinstance(snapshot, GateSnapshotInputs) for snapshot in inputs.gate_history
+    ):
+        raise EvidenceInputError("gate_history must contain GateSnapshotInputs values")
 
     summary_payload = dict(inputs.campaign_summary)
     diff_payload = (
@@ -193,6 +218,11 @@ def _prepare_campaign_artifacts(
     )
     release_gate_payload = dict(inputs.release_gate)
     regression_payload = list(inputs.regression_cases)
+    history_payload, gate_snapshots = _prepare_gate_history(
+        inputs,
+        current_gate=release_gate_payload,
+        current_diff=diff_payload,
+    )
     if any(
         contains_sensitive_fields(payload)
         for payload in (
@@ -200,7 +230,12 @@ def _prepare_campaign_artifacts(
             diff_payload,
             release_gate_payload,
             regression_payload,
+            history_payload,
         )
+    ) or any(
+        contains_sensitive_fields(payload)
+        for snapshot in inputs.gate_history
+        for payload in (snapshot.release_gate, snapshot.baseline_candidate_diff)
     ):
         raise EvidenceInputError(
             "campaign evidence contains a prohibited sensitive field"
@@ -209,6 +244,7 @@ def _prepare_campaign_artifacts(
     try:
         artifact_bytes = {
             "baseline_candidate_diff.json": canonical_json_bytes(diff_payload),
+            "gate_history.json": canonical_json_bytes(history_payload),
             "release_gate.json": canonical_json_bytes(release_gate_payload),
             "regression_cases.json": canonical_json_bytes(regression_payload),
         }
@@ -222,7 +258,7 @@ def _prepare_campaign_artifacts(
     try:
         artifact_bytes[CAMPAIGN_SUMMARY_FILENAME] = canonical_json_bytes(
             {
-                "schema_version": 1,
+                "schema_version": 2,
                 "campaign_id": inputs.campaign_id,
                 "summary": summary_payload,
                 "artifacts": covered_hashes,
@@ -233,7 +269,77 @@ def _prepare_campaign_artifacts(
     artifact_hashes = {
         name: sha256_bytes(content) for name, content in artifact_bytes.items()
     }
-    return artifact_bytes, artifact_hashes
+    return artifact_bytes, artifact_hashes, gate_snapshots
+
+
+def _prepare_gate_history(
+    inputs: CampaignBundleInputs,
+    *,
+    current_gate: dict[str, JsonValue],
+    current_diff: dict[str, JsonValue],
+) -> tuple[dict[str, JsonValue], dict[str, dict[str, bytes]]]:
+    snapshots = [
+        *inputs.gate_history,
+        GateSnapshotInputs(
+            release_gate=current_gate,
+            baseline_candidate_diff=current_diff,
+        ),
+    ]
+    snapshot_bytes: dict[str, dict[str, bytes]] = {}
+    entries: dict[str, JsonValue] = {}
+    current_gate_id = ""
+    for index, snapshot in enumerate(snapshots):
+        gate_payload = dict(snapshot.release_gate)
+        diff_payload = dict(snapshot.baseline_candidate_diff)
+        try:
+            gate_bytes = canonical_json_bytes(gate_payload)
+            diff_bytes = canonical_json_bytes(diff_payload)
+        except (TypeError, ValueError, UnicodeError, RecursionError) as error:
+            raise EvidenceInputError("gate history must contain finite JSON data") from error
+        gate_id = _gate_snapshot_id(inputs.campaign_id, gate_payload, gate_bytes, diff_bytes)
+        candidate_id = gate_payload.get("campaign_id")
+        if candidate_id is not None and candidate_id != inputs.campaign_id:
+            raise EvidenceInputError("gate history campaign mapping is inconsistent")
+        prepared = {
+            "release_gate.json": gate_bytes,
+            "baseline_candidate_diff.json": diff_bytes,
+        }
+        existing = snapshot_bytes.get(gate_id)
+        if existing is not None and existing != prepared:
+            raise EvidenceInputError("gate history contains a conflicting stable gate ID")
+        snapshot_bytes[gate_id] = prepared
+        entries[gate_id] = {
+            "release_gate_sha256": sha256_bytes(gate_bytes),
+            "baseline_candidate_diff_sha256": sha256_bytes(diff_bytes),
+        }
+        if index == len(snapshots) - 1:
+            current_gate_id = gate_id
+    if len(entries) > MAX_GATE_HISTORY_ENTRIES:
+        raise EvidenceInputError("gate history exceeds the supported entry limit")
+    return (
+        {
+            "schema_version": 1,
+            "campaign_id": inputs.campaign_id,
+            "current_gate_id": current_gate_id,
+            "entries": entries,
+        },
+        snapshot_bytes,
+    )
+
+
+def _gate_snapshot_id(
+    campaign_id: str,
+    gate_payload: Mapping[str, JsonValue],
+    gate_bytes: bytes,
+    diff_bytes: bytes,
+) -> str:
+    declared = gate_payload.get("id")
+    fallback_digest = sha256_bytes(gate_bytes + bytes((0,)) + diff_bytes)
+    gate_id = declared if isinstance(declared, str) and declared else f"gate_{fallback_digest[:24]}"
+    validate_path_component(gate_id, label="gate_id")
+    if gate_payload.get("campaign_id") not in {None, campaign_id}:
+        raise EvidenceInputError("gate snapshot belongs to another campaign")
+    return gate_id
 
 
 def _prepare_artifacts(
@@ -393,7 +499,7 @@ def _prepare_artifacts(
     )
     try:
         manifest = EvidenceManifest(
-            schema_version=1,
+            schema_version=SUPPORTED_MANIFEST_SCHEMA_VERSION,
             id=inputs.manifest_id,
             campaign_id=inputs.campaign_id,
             run_id=inputs.run_id,
@@ -402,7 +508,7 @@ def _prepare_artifacts(
             git_commit_sha=inputs.git_commit_sha,
             environment=inputs.environment,
             scenario_sha256=artifact_hashes["scenario.yaml"],
-            agent_config_sha256=artifact_hashes["agent_version.json"],
+            agent_config_sha256=sha256_bytes(config_bytes),
             evaluator_versions=evaluator_versions,
             artifacts=artifact_hashes,
             started_at=inputs.started_at,
@@ -463,6 +569,102 @@ def _prepare_campaign_path(root: str | Path, campaign_id: str) -> Path:
             "campaign directory escapes the artifact root"
         ) from error
     return resolved_campaign_path
+
+
+def _prepare_gate_snapshots_path(
+    campaign_path: Path, artifact_root: Path
+) -> Path:
+    gates_path = campaign_path / GATE_SNAPSHOTS_DIRNAME
+    if is_symlink_or_reparse(gates_path):
+        raise EvidencePathError("gate snapshot directory is a symlink or reparse point")
+    try:
+        gates_path.mkdir(exist_ok=True)
+    except OSError as error:
+        raise EvidencePathError("gate snapshot directory cannot be created") from error
+    if is_symlink_or_reparse(gates_path) or not gates_path.is_dir():
+        raise EvidencePathError("gate snapshot directory must be a real directory")
+    resolved = gates_path.resolve(strict=True)
+    try:
+        resolved.relative_to(artifact_root)
+    except ValueError as error:
+        raise EvidencePathError("gate snapshot directory escapes the artifact root") from error
+    return resolved
+
+
+def _prepare_gate_snapshot_path(
+    gates_path: Path, gate_id: str, artifact_root: Path
+) -> Path:
+    validate_path_component(gate_id, label="gate_id")
+    gate_path = gates_path / gate_id
+    if is_symlink_or_reparse(gate_path):
+        raise EvidencePathError("gate history entry is a symlink or reparse point")
+    try:
+        gate_path.mkdir(exist_ok=True)
+    except OSError as error:
+        raise EvidencePathError("gate history entry cannot be created") from error
+    if is_symlink_or_reparse(gate_path) or not gate_path.is_dir():
+        raise EvidencePathError("gate history entry must be a real directory")
+    resolved = gate_path.resolve(strict=True)
+    try:
+        resolved.relative_to(artifact_root)
+    except ValueError as error:
+        raise EvidencePathError("gate history entry escapes the artifact root") from error
+    return resolved
+
+
+def _atomic_create_once_bytes(
+    destination: Path,
+    content: bytes,
+    *,
+    artifact_root: Path,
+) -> None:
+    destination = _validated_atomic_destination(destination, artifact_root)
+    if destination.exists():
+        _require_existing_snapshot_bytes(destination, content)
+        return
+    temporary_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="wb",
+            dir=destination.parent,
+            prefix=f".{destination.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as temporary:
+            temporary_path = Path(temporary.name)
+            temporary.write(content)
+            temporary.flush()
+            os.fsync(temporary.fileno())
+        destination = _validated_atomic_destination(destination, artifact_root)
+        try:
+            os.link(temporary_path, destination)
+        except FileExistsError:
+            _require_existing_snapshot_bytes(destination, content)
+        _best_effort_directory_fsync(destination.parent)
+    except EvidenceError:
+        raise
+    except OSError as error:
+        raise EvidenceWriteError(
+            f"failed to create immutable snapshot {destination.name}"
+        ) from error
+    finally:
+        if temporary_path is not None:
+            try:
+                temporary_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+
+def _require_existing_snapshot_bytes(destination: Path, expected: bytes) -> None:
+    if is_symlink_or_reparse(destination) or not destination.is_file():
+        raise EvidencePathError("gate snapshot must remain a regular file")
+    try:
+        with destination.open("rb") as stream:
+            actual = stream.read(len(expected) + 1)
+    except OSError as error:
+        raise EvidenceWriteError("gate snapshot cannot be read") from error
+    if actual != expected:
+        raise EvidenceWriteError("stable gate snapshot conflicts with existing evidence")
 
 
 def _atomic_write_bytes(
@@ -556,6 +758,7 @@ __all__ = [
     "EvidenceWriteError",
     "CampaignBundle",
     "CampaignBundleInputs",
+    "GateSnapshotInputs",
     "RunBundle",
     "RunBundleInputs",
     "RunVerification",

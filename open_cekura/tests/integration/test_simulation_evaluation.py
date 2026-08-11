@@ -27,17 +27,28 @@ def evaluate_profile(config: MockAgentConfig, profile: str):
         config_sha256=config.canonical_sha256(),
         created_at=NOW,
     )
-    rows = {}
-    for scenario in load_suite(SCENARIOS):
-        simulation = asyncio.run(
-            run_scenario(
-                scenario=scenario,
-                agent_version=version,
-                adapter=MockAgentAdapter(config),
-                campaign_id=f"occampaign_{profile}",
-                created_at=NOW,
+    scenarios = load_suite(SCENARIOS)
+
+    async def simulate_suite():
+        simulations = []
+        for scenario in scenarios:
+            simulations.append(
+                await run_scenario(
+                    scenario=scenario,
+                    agent_version=version,
+                    adapter=MockAgentAdapter(config),
+                    campaign_id=f"occampaign_{profile}",
+                    created_at=NOW,
+                )
             )
-        )
+        return simulations
+
+    rows = {}
+    for scenario, simulation in zip(
+        scenarios,
+        asyncio.run(simulate_suite()),
+        strict=True,
+    ):
         context = context_from_simulation(simulation, evaluated_at=NOW)
         rows[scenario.id] = evaluate_deterministic(context)
     return rows

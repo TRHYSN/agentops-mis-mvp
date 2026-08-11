@@ -201,6 +201,45 @@ def test_confirmation_must_be_a_user_turn_before_each_mutation() -> None:
     assert result.metadata["violations"][0]["tool_name"] == "update_booking"
 
 
+def test_negated_proceed_language_is_not_confirmation() -> None:
+    context = passing_context()
+    denied_turns = [
+        *context.turns[:2],
+        context.turns[2].model_copy(update={"content": "No, do not proceed."}),
+        context.turns[3],
+    ]
+
+    result = results_by_id(
+        context.model_copy(update={"turns": denied_turns})
+    )["confirmation_before_mutation.v1"]
+
+    assert result.status is EvaluationStatus.FAIL
+    assert result.reason_codes == ["confirmation_missing_before_mutation"]
+
+
+def test_failed_mutation_attempt_still_requires_prior_confirmation() -> None:
+    context = passing_context()
+    failed_early_mutation = context.tool_calls[1].model_copy(
+        update={
+            "id": "octool_failed_early_update",
+            "turn_id": "octurn_1",
+            "result": None,
+            "error": "backend_rejected_mutation",
+        }
+    )
+    unconfirmed = context.model_copy(
+        update={
+            "turns": context.turns[:2],
+            "tool_calls": [context.tool_calls[0], failed_early_mutation],
+        }
+    )
+
+    result = results_by_id(unconfirmed)["confirmation_before_mutation.v1"]
+
+    assert result.status is EvaluationStatus.FAIL
+    assert "tool_call:octool_failed_early_update" in result.evidence_refs
+
+
 def test_final_state_reports_each_mismatched_json_path() -> None:
     context = passing_context().model_copy(
         update={"final_state": {"booking_updated": False, "booking": {"slot": "old"}}}

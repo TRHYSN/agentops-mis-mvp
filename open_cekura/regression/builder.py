@@ -103,6 +103,7 @@ def build_regression_case(
             "persona": scenario_json["persona"],
             "goal": scenario_json["goal"],
             "challenges": scenario_json["challenges"],
+            "expectations": scenario_json["expectations"],
         },
         expected=failure.expected,
         observed=failure.observed,
@@ -135,6 +136,7 @@ async def replay_regression(
         "persona": scenario_json["persona"],
         "goal": scenario_json["goal"],
         "challenges": scenario_json["challenges"],
+        "expectations": scenario_json["expectations"],
     }
     if regression.original_input != snapshot:
         raise ValueError("scenario no longer matches the regression input snapshot")

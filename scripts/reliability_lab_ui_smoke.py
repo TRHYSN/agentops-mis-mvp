@@ -19,6 +19,7 @@ SIDEBAR = APP_ROOT / "components" / "layout" / "Sidebar.tsx"
 FEATURE_ROOT = APP_ROOT / "components" / "pages" / "reliability"
 ROUTES = FEATURE_ROOT / "ReliabilityLabRoutes.tsx"
 RUN_DETAIL = FEATURE_ROOT / "ReliabilityRunDetail.tsx"
+CAMPAIGN_DETAIL = FEATURE_ROOT / "ReliabilityCampaignDetail.tsx"
 API = APP_ROOT / "data" / "reliabilityApi.ts"
 
 FEATURE_PAGES = {
@@ -124,6 +125,7 @@ def main() -> int:
     sidebar = read_source(SIDEBAR, "sidebar", failures)
     routes = read_source(ROUTES, "feature-local route table", failures)
     run_detail = read_source(RUN_DETAIL, "Reliability Run Detail", failures)
+    campaign_detail = read_source(CAMPAIGN_DETAIL, "Reliability Campaign Detail", failures)
     api = read_source(API, "Reliability API client", failures)
 
     for label, path in FEATURE_PAGES.items():
@@ -186,6 +188,38 @@ def main() -> int:
         present = marker in api
         evidence["api_paths"][label] = present
         require(present, f"reliabilityApi.ts missing encoded {label} path marker: {marker}", failures)
+
+    current_gate_contract = {
+        "campaign_current_gate_id": "current_gate_id: string | null;" in api,
+        "release_gate_is_current": "is_current?: boolean;" in api,
+        "run_detail_campaign": "campaign: ReliabilityCampaign;" in api,
+        "shared_explicit_selector": "selectReliabilityCurrentGate" in api,
+        "campaign_detail_selector": "selectReliabilityCurrentGate(campaign, gates)" in campaign_detail,
+        "run_detail_selector": "selectReliabilityCurrentGate(detail?.campaign, detail?.release_gates)" in run_detail,
+        "campaign_missing_state": "Current release gate unavailable" in campaign_detail,
+        "run_missing_state": "Current release gate unavailable" in run_detail,
+    }
+    evidence["current_gate_contract"] = current_gate_contract
+    for marker, present in current_gate_contract.items():
+        require(present, f"Reliability Lab missing explicit current-gate contract marker: {marker}", failures)
+
+    inferred_gate_patterns = {
+        "campaign_first_gate": re.compile(r"\bgates\s*\[\s*0\s*\]"),
+        "run_positional_gate": re.compile(r"\brelease_gates\s*\[[^\]]+\]"),
+        "gate_sort_by_created_at": re.compile(r"(?:release_gates|gates)[\s\S]{0,160}\.sort\([^\n]*created_at"),
+        "gate_sort_by_gate_id": re.compile(r"(?:release_gates|gates)[\s\S]{0,160}\.sort\([^\n]*gate_id"),
+    }
+    inferred_gate_hits = [
+        name
+        for name, pattern in inferred_gate_patterns.items()
+        if pattern.search(f"{campaign_detail}\n{run_detail}")
+    ]
+    evidence["inferred_current_gate_hits"] = inferred_gate_hits
+    require(
+        not inferred_gate_hits,
+        f"Reliability detail views must not infer a current gate from collection order: {inferred_gate_hits}",
+        failures,
+    )
 
     feature_sources: list[str] = []
     if FEATURE_ROOT.exists():

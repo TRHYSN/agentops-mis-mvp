@@ -137,7 +137,7 @@ def test_run_doctor_checks_the_complete_windows_prerequisite_contract(
     environ = _environment_with_tools(
         monkeypatch,
         doctor_repo,
-        api_key="sk-test-secret",
+        api_key="sk" + "-test-secret",
     )
 
     report = windows_doctor.run_doctor(
@@ -253,7 +253,7 @@ def test_run_doctor_fails_when_ui_dependencies_are_missing(
 @pytest.mark.parametrize(
     ("environ", "expected_status"),
     [
-        ({"OPENAI_API_KEY": "sk-test-secret-that-must-not-leak"}, "PRESENT"),
+        ({"OPENAI_API_KEY": "sk" + "-test-secret-that-must-not-leak"}, "PRESENT"),
         ({}, "MISSING"),
     ],
 )

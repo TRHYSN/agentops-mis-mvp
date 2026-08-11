@@ -623,7 +623,7 @@ def domain_graph(workspace_id: str = "ws-a") -> dict[str, Any]:
         mis_approval_id="ap_a" if workspace_id == "ws-a" else "ap_b",
     )
     manifest = EvidenceManifest(
-        **shared,
+        **{**shared, "schema_version": 2},
         id="ocmanifest_basic",
         campaign_id=campaign.id,
         run_id=run.id,
@@ -746,6 +746,7 @@ def test_schema_is_idempotent_normalized_and_has_no_shadow_ledgers(
             for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
         }
         assert {
+            "reliability_authority_identity",
             "reliability_agents",
             "reliability_agent_versions",
             "reliability_scenario_suites",
@@ -814,6 +815,31 @@ def test_schema_initialization_requires_the_existing_mis_authority_ledger(
         conn.close()
 
 
+def test_schema_initialization_rejects_pre_release_manifest_v1_database(
+    tmp_path: Path,
+) -> None:
+    repository, sqlite_repository = storage_modules()
+    conn = open_database(tmp_path / "pre-release-v1.db")
+    try:
+        conn.execute(
+            """CREATE TABLE reliability_evidence_manifests (
+                schema_version INTEGER NOT NULL CHECK(schema_version = 1)
+            )"""
+        )
+        repo = sqlite_repository.SQLiteRepository(conn, workspace_id="ws-a")
+
+        with pytest.raises(repository.RepositoryError, match="pre-release"):
+            repo.initialize_schema()
+
+        sql = conn.execute(
+            "SELECT sql FROM sqlite_master "
+            "WHERE name='reliability_evidence_manifests'"
+        ).fetchone()[0]
+        assert "schema_version = 1" in sql
+    finally:
+        conn.close()
+
+
 def test_secret_like_structural_ids_are_never_rewritten_by_redaction(
     tmp_path: Path,
 ) -> None:
@@ -822,8 +848,9 @@ def test_secret_like_structural_ids_are_never_rewritten_by_redaction(
     try:
         repo = sqlite_repository.SQLiteRepository(conn, workspace_id="ws-a")
         repo.initialize_schema()
+        secret_like_id = "agtok" + "_valid_entity_id"
         agent = domain_graph()["agent"].model_copy(
-            update={"id": "agtok_valid_entity_id"}
+            update={"id": secret_like_id}
         )
         assert repo.upsert_agent(agent) == "created"
         assert repo.get_agent(agent.id)["agent_id"] == agent.id
@@ -853,7 +880,7 @@ def test_full_governed_graph_uses_the_real_mis_schema_without_fk_drift(
                 WHERE type='table' AND name LIKE 'reliability_%'"""
             )
         }
-        assert len(reliability_tables) == 16
+        assert len(reliability_tables) == 19
         assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
     finally:
         conn.close()

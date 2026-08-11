@@ -5,7 +5,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from open_cekura.campaigns.runner import execute_mock_campaign
-from open_cekura.domain.enums import CampaignStatus, EvaluationStatus, GateDecision
+from open_cekura.domain.enums import (
+    CampaignStatus,
+    EvaluationStatus,
+    GateDecision,
+    RunFinalState,
+)
 from open_cekura.release_gate.policy import evaluate_release_gate
 from open_cekura.simulation.mock_agent import MockAgentConfig
 
@@ -46,6 +51,15 @@ def test_campaign_closes_simulation_evaluation_failure_and_regression_loop() -> 
         for regression in record.regressions
     )
     assert {record.scenario.id for record in baseline.records if record.failures} == {
+        "appointment.agent_claims_success_without_mutation",
+        "appointment.duplicate_request",
+        "appointment.mutation_before_confirmation",
+    }
+    assert {
+        record.scenario.id
+        for record in baseline.records
+        if record.simulation.run.status is RunFinalState.FAIL
+    } == {
         "appointment.agent_claims_success_without_mutation",
         "appointment.duplicate_request",
         "appointment.mutation_before_confirmation",

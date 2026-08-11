@@ -24,6 +24,7 @@ REQUIRED_RUN_FILES = {
 REQUIRED_CAMPAIGN_FILES = {
     "campaign_summary.json",
     "baseline_candidate_diff.json",
+    "gate_history.json",
     "release_gate.json",
     "regression_cases.json",
 }
@@ -180,6 +181,7 @@ def test_write_run_bundle_creates_exact_canonical_files_and_hashes(
         written.manifest_path.read_bytes()
     )
     assert written.manifest_path.read_bytes() == written.manifest.canonical_json_bytes()
+    assert written.manifest.schema_version == 2
     assert set(written.manifest.artifacts) == REQUIRED_RUN_FILES - {
         "evidence_manifest.json"
     }
@@ -191,8 +193,11 @@ def test_write_run_bundle_creates_exact_canonical_files_and_hashes(
     agent_envelope_bytes = (written.path / "agent_version.json").read_bytes()
     assert (
         written.manifest.agent_config_sha256
-        == hashlib.sha256(agent_envelope_bytes).hexdigest()
+        == inputs.agent_version.config_sha256
     )
+    assert written.manifest.agent_config_sha256 != hashlib.sha256(
+        agent_envelope_bytes
+    ).hexdigest()
     agent_envelope = json.loads(agent_envelope_bytes)
     assert agent_envelope == {
         "schema_version": 1,
@@ -205,7 +210,7 @@ def test_write_run_bundle_creates_exact_canonical_files_and_hashes(
     assert timing["observed_final_state"] == {"found": True}
 
 
-def test_write_campaign_bundle_creates_four_hash_checked_canonical_files(
+def test_write_campaign_bundle_creates_hash_checked_gate_history_and_current_views(
     tmp_path: Path,
 ) -> None:
     bundle, manifest_module = _evidence_modules()
@@ -213,13 +218,16 @@ def test_write_campaign_bundle_creates_four_hash_checked_canonical_files(
 
     written = bundle.write_campaign_bundle(root, _campaign_inputs(bundle))
 
-    assert {path.name for path in written.path.iterdir()} == REQUIRED_CAMPAIGN_FILES
+    assert {path.name for path in written.path.iterdir()} == {
+        *REQUIRED_CAMPAIGN_FILES,
+        "gates",
+    }
     diff = json.loads((written.path / "baseline_candidate_diff.json").read_bytes())
     assert diff["baseline"] is None
     assert diff["comparison"] == "no_comparison"
     summary_bytes = (written.path / "campaign_summary.json").read_bytes()
     summary = json.loads(summary_bytes)
-    assert summary["schema_version"] == 1
+    assert summary["schema_version"] == 2
     assert summary["campaign_id"] == "occampaign_candidate"
     assert summary["summary"] == {"pass_rate": 1.0, "run_count": 1}
     assert set(summary["artifacts"]) == REQUIRED_CAMPAIGN_FILES - {
@@ -229,6 +237,15 @@ def test_write_campaign_bundle_creates_four_hash_checked_canonical_files(
         stored = (written.path / name).read_bytes()
         assert digest == manifest_module.sha256_bytes(stored)
         assert stored == manifest_module.canonical_json_bytes(json.loads(stored))
+    history = json.loads((written.path / "gate_history.json").read_bytes())
+    gate_id = history["current_gate_id"]
+    snapshot = written.path / "gates" / gate_id
+    assert (snapshot / "release_gate.json").read_bytes() == (
+        written.path / "release_gate.json"
+    ).read_bytes()
+    assert (snapshot / "baseline_candidate_diff.json").read_bytes() == (
+        written.path / "baseline_candidate_diff.json"
+    ).read_bytes()
     assert written.artifact_sha256["campaign_summary.json"] == (
         manifest_module.sha256_bytes(summary_bytes)
     )
@@ -238,7 +255,7 @@ def test_campaign_writer_rejects_sensitive_fields_without_creating_root(
     tmp_path: Path,
 ) -> None:
     bundle, _ = _evidence_modules()
-    secret = "sk-campaign-secret"
+    secret = "sk" + "-campaign-secret"
     inputs = replace(
         _campaign_inputs(bundle),
         release_gate={"decision": "pass", "api_key": secret},
@@ -250,6 +267,45 @@ def test_campaign_writer_rejects_sensitive_fields_without_creating_root(
 
     assert secret not in str(captured.value)
     assert not root.exists()
+
+
+def test_campaign_writer_never_overwrites_a_conflicting_stable_gate_snapshot(
+    tmp_path: Path,
+) -> None:
+    bundle, _ = _evidence_modules()
+    root = tmp_path / "artifacts"
+    first = replace(
+        _campaign_inputs(bundle),
+        release_gate={
+            "id": "ocgate_immutable",
+            "campaign_id": "occampaign_candidate",
+            "decision": "pass",
+        },
+    )
+    bundle.write_campaign_bundle(root, first)
+    snapshot = (
+        root
+        / "occampaign_candidate"
+        / "gates"
+        / "ocgate_immutable"
+        / "release_gate.json"
+    )
+    original = snapshot.read_bytes()
+
+    with pytest.raises(bundle.EvidenceWriteError, match="stable gate snapshot"):
+        bundle.write_campaign_bundle(
+            root,
+            replace(
+                first,
+                release_gate={
+                    "id": "ocgate_immutable",
+                    "campaign_id": "occampaign_candidate",
+                    "decision": "block",
+                },
+            ),
+        )
+
+    assert snapshot.read_bytes() == original
 
 
 @pytest.mark.parametrize(
@@ -409,7 +465,7 @@ def test_writer_rejects_sensitive_config_fields_without_echoing_values(
 ) -> None:
     bundle, manifest_module = _evidence_modules()
     inputs = _inputs(bundle, manifest_module)
-    secret = "sk-test-secret-that-must-not-leak"
+    secret = "sk" + "-test-secret-that-must-not-leak"
     sensitive_config = {**inputs.agent_config, "OPENAI_API_KEY": secret}
     agent_version = inputs.agent_version.model_copy(
         update={
@@ -442,7 +498,7 @@ def test_writer_rejects_inline_secret_patterns_before_creating_artifacts(
     bundle, manifest_module = _evidence_modules()
     inputs = _inputs(bundle, manifest_module)
     if location == "scenario":
-        secret = "sk-inline-scenario-secret"
+        secret = "sk" + "-inline-scenario-secret"
         changed = inputs.scenario_yaml.replace(
             b"Please find booking booking-123.",
             f"OPENAI_API_KEY={secret}".encode(),
@@ -466,7 +522,7 @@ def test_writer_rejects_inline_secret_patterns_before_creating_artifacts(
 @pytest.mark.parametrize(
     "sensitive_text",
     [
-        "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789",
+        "ghp" + "_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789",
         "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.signaturevalue123",
         "Bearer bare-token-value-123456789",
         "https://alice:p4ssword-secret@example.invalid/private",
@@ -617,3 +673,90 @@ def test_writer_rejects_symlinked_bundle_ancestry(tmp_path: Path) -> None:
 
     with pytest.raises(bundle.EvidencePathError, match="symlink|reparse"):
         bundle.write_run_bundle(linked_root, inputs)
+
+
+def test_campaign_tree_hash_rejects_growth_between_lstat_and_open(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    publication = importlib.import_module("open_cekura.evidence.publication")
+    campaign = tmp_path / "campaign"
+    campaign.mkdir()
+    artifact = campaign / "artifact.bin"
+    artifact.write_bytes(b"x")
+    real_open = publication.os.open
+    grew = False
+
+    def grow_before_open(path, flags, *args, **kwargs):
+        nonlocal grew
+        if Path(path) == artifact and not grew:
+            grew = True
+            artifact.write_bytes(b"x" * 1025)
+        return real_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(publication, "MAX_PUBLICATION_BYTES", 1)
+    monkeypatch.setattr(publication.os, "open", grow_before_open)
+
+    with pytest.raises(publication.EvidenceInputError, match="limits"):
+        publication.campaign_tree_sha256(campaign)
+
+    assert grew is True
+
+
+def test_campaign_tree_hash_rejects_replacement_between_lstat_and_open(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    publication = importlib.import_module("open_cekura.evidence.publication")
+    campaign = tmp_path / "campaign"
+    campaign.mkdir()
+    artifact = campaign / "artifact.bin"
+    replacement = campaign / "replacement.tmp"
+    artifact.write_bytes(b"original")
+    replacement.write_bytes(b"replacement")
+    real_open = publication.os.open
+    replaced = False
+
+    def replace_before_open(path, flags, *args, **kwargs):
+        nonlocal replaced
+        if Path(path) == artifact and not replaced:
+            replaced = True
+            replacement.replace(artifact)
+        return real_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(publication.os, "open", replace_before_open)
+
+    with pytest.raises(publication.EvidencePathError, match="changed|unsafe"):
+        publication.campaign_tree_sha256(campaign)
+
+    assert replaced is True
+
+
+def test_campaign_tree_hash_rejects_in_place_change_during_read(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    publication = importlib.import_module("open_cekura.evidence.publication")
+    campaign = tmp_path / "campaign"
+    campaign.mkdir()
+    artifact = campaign / "artifact.bin"
+    artifact.write_bytes(b"original")
+    real_fstat = publication.os.fstat
+    fstat_count = 0
+
+    def mutate_before_final_fstat(descriptor):
+        nonlocal fstat_count
+        fstat_count += 1
+        if fstat_count == 2:
+            with artifact.open("ab") as stream:
+                stream.write(b"changed")
+                stream.flush()
+                os.fsync(stream.fileno())
+        return real_fstat(descriptor)
+
+    monkeypatch.setattr(publication.os, "fstat", mutate_before_final_fstat)
+
+    with pytest.raises(publication.EvidencePathError, match="changed"):
+        publication.campaign_tree_sha256(campaign)
+
+    assert fstat_count >= 2

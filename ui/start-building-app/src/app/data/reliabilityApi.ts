@@ -103,6 +103,7 @@ export interface ReliabilityCampaign {
   status: string;
   mis_task_id: string | null;
   mis_plan_id: string | null;
+  current_gate_id: string | null;
   run_count: number;
   created_at: string;
 }
@@ -221,6 +222,7 @@ export interface ReliabilityReleaseGate {
   metrics: Record<string, ReliabilityJson>;
   evidence_refs: string[];
   mis_approval_id: string | null;
+  is_current?: boolean;
   created_at: string;
 }
 
@@ -261,6 +263,7 @@ export interface ReliabilityMisLinks {
 
 export interface ReliabilityRunDetail {
   run: ReliabilityRun;
+  campaign: ReliabilityCampaign;
   turns: ReliabilityTurn[];
   tool_calls: ReliabilityToolCall[];
   evaluations: ReliabilityEvaluation[];
@@ -302,6 +305,20 @@ export type ReliabilityRunResponse = ReliabilityEnvelope & {
     evaluator_count: number;
   };
 };
+
+export function selectReliabilityCurrentGate(
+  campaign: Pick<ReliabilityCampaign, "current_gate_id"> | null | undefined,
+  gates: readonly ReliabilityReleaseGate[] | null | undefined,
+): ReliabilityReleaseGate | null {
+  const candidates = gates ?? [];
+  const currentGateId = campaign?.current_gate_id?.trim();
+  if (currentGateId) {
+    return candidates.find((gate) => gate.gate_id === currentGateId) ?? null;
+  }
+
+  const explicitlyCurrent = candidates.filter((gate) => gate.is_current === true);
+  return explicitlyCurrent.length === 1 ? explicitlyCurrent[0] : null;
+}
 
 const DEFAULT_PAGE = "?limit=100&offset=0";
 

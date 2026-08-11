@@ -71,6 +71,10 @@ jobs:
       - name: Verify Reliability Lab source contract
         run: python scripts/reliability_lab_ui_smoke.py
 
+      - name: Test Reliability Lab gate-head selection
+        working-directory: ui/start-building-app
+        run: npm run test:reliability
+
       - name: Build the existing MIS UI
         working-directory: ui/start-building-app
         run: npm run build

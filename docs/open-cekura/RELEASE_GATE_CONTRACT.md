@@ -27,7 +27,7 @@ A `ReleaseGateDecision` is a versioned, explanatory domain object:
 
 ## Inputs
 
-The policy consumes persisted campaign summaries and deterministic EvaluationResults. A comparison gate additionally consumes the baseline summary. Inputs identify scenario-set compatibility, agent versions, evaluator versions, and evidence manifests. Missing, incompatible, or evaluator-error inputs cannot be treated as a passing comparison.
+The policy consumes persisted campaign summaries and deterministic EvaluationResults. A comparison gate additionally consumes the baseline summary. Inputs identify exact scenario SHA-256 mappings, agent versions, evaluator versions, and evidence manifests. Matching scenario IDs with changed contract bytes are incompatible. Missing, incompatible, or evaluator-error inputs cannot be treated as a passing comparison; both candidate and baseline deterministic error rates must be available and zero.
 
 Campaign IDs are locators only. Policy logic must never branch on a name, ID, fixture path, or the words “baseline” and “candidate.”
 
@@ -104,6 +104,21 @@ This is proved through tool-call observations, final state, evaluations, compari
 ## MIS mapping and audit
 
 The decision is mapped to the existing MIS quality-gate/Approval authority. The gate record references its campaign Task/Plan, relevant Runs and Evaluations, Evidence Artifact, and Audit entries. OpenCekura does not create a parallel approval ledger. Gate recomputation creates a versioned decision or idempotent replay; it does not erase the historical decision.
+
+Before a new Approval is persisted, filesystem facts are reconciled with the
+typed vertical projection and the exact core MIS ToolCall, Evaluation, Artifact,
+PlanEvidence, Gate, Approval, Memory, and Audit sets. The explicit Gate head is
+bound to the latest chained head-transition Audit, so coordinated rollback to
+an older otherwise-valid Gate and Audit fails closed. Filesystem evidence cannot
+promote itself to MIS authority merely by being internally rehashed.
+
+Campaign evidence schema v2 stores each decision and its exact comparison diff
+once under `gates/<gate_id>/`. `gate_history.json` hashes the full snapshot set
+and explicitly names the current gate; the root gate and diff are current
+aliases. Replaying the same candidate/baseline/policy preserves all snapshot and
+index bytes. Reusing a stable gate ID with different content fails closed. Gate
+`created_at` is deterministic campaign provenance, not a chronological ordering
+signal; consumers use the explicit current gate ID.
 
 ## Exit behavior
 

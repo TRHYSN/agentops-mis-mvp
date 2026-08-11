@@ -16,10 +16,19 @@ MUTATING_TOOL_NAMES = frozenset(
     {"update_booking", "cancel_booking", "create_duplicate_booking"}
 )
 CONFIRMATION_MESSAGE = "[confirmation] Yes, I confirm the requested mutation."
+NEUTRAL_CONTINUATION_MESSAGE = (
+    "[continuation] Please continue with the appointment request."
+)
 
 
 def user_messages_for(scenario: ScenarioDefinition) -> tuple[str, ...]:
-    """Build a stable user script without branching on scenario identity."""
+    """Build a stable user script without branching on scenario identity.
+
+    ``*_after_turn`` values count already-recorded ConversationTurn rows.  A
+    script message and its adapter reply therefore advance the next USER
+    boundary by two rows.  Neutral messages make otherwise-unreachable
+    thresholds operational without changing equal-threshold ordering.
+    """
 
     scheduled: list[tuple[int, int, str]] = []
     for position, challenge in enumerate(scenario.challenges):
@@ -67,7 +76,13 @@ def user_messages_for(scenario: ScenarioDefinition) -> tuple[str, ...]:
             )
 
     messages = [scenario.initial_message]
-    messages.extend(item[2] for item in sorted(scheduled))
+    recorded_turns_at_next_user_boundary = 2
+    for threshold, _, message in sorted(scheduled):
+        while recorded_turns_at_next_user_boundary < threshold:
+            messages.append(NEUTRAL_CONTINUATION_MESSAGE)
+            recorded_turns_at_next_user_boundary += 2
+        messages.append(message)
+        recorded_turns_at_next_user_boundary += 2
     needs_confirmation = (
         scenario.expectations.must_confirm_before_mutation
         and bool(MUTATING_TOOL_NAMES.intersection(scenario.expectations.required_tool_calls))
@@ -77,4 +92,9 @@ def user_messages_for(scenario: ScenarioDefinition) -> tuple[str, ...]:
     return tuple(messages)
 
 
-__all__ = ["CONFIRMATION_MESSAGE", "MUTATING_TOOL_NAMES", "user_messages_for"]
+__all__ = [
+    "CONFIRMATION_MESSAGE",
+    "MUTATING_TOOL_NAMES",
+    "NEUTRAL_CONTINUATION_MESSAGE",
+    "user_messages_for",
+]

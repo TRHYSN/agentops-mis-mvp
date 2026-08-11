@@ -208,6 +208,11 @@ _ROW_CONTAINER_PUBLIC_KEYS = frozenset(
 
 
 RELIABILITY_SCHEMA_SQL = """
+CREATE TABLE IF NOT EXISTS reliability_authority_identity (
+    singleton_id INTEGER PRIMARY KEY CHECK(singleton_id = 1),
+    authority_id TEXT NOT NULL UNIQUE
+);
+
 CREATE TABLE IF NOT EXISTS reliability_agents (
     workspace_id TEXT NOT NULL,
     agent_id TEXT NOT NULL,
@@ -467,10 +472,40 @@ CREATE TABLE IF NOT EXISTS reliability_release_gates (
     FOREIGN KEY(mis_approval_id) REFERENCES approvals(approval_id)
 );
 
+CREATE TABLE IF NOT EXISTS reliability_campaign_gate_heads (
+    workspace_id TEXT NOT NULL,
+    campaign_id TEXT NOT NULL,
+    current_gate_id TEXT NOT NULL,
+    mis_audit_id TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY(workspace_id, campaign_id),
+    FOREIGN KEY(workspace_id, campaign_id)
+        REFERENCES reliability_campaigns(workspace_id, campaign_id),
+    FOREIGN KEY(workspace_id, current_gate_id)
+        REFERENCES reliability_release_gates(workspace_id, gate_id),
+    FOREIGN KEY(mis_audit_id) REFERENCES audit_logs(audit_id)
+);
+
+CREATE TABLE IF NOT EXISTS reliability_evidence_publications (
+    workspace_id TEXT NOT NULL,
+    publication_id TEXT NOT NULL,
+    campaign_id TEXT NOT NULL,
+    gate_id TEXT NOT NULL,
+    tree_sha256 TEXT NOT NULL CHECK(length(tree_sha256) = 64),
+    status TEXT NOT NULL CHECK(status IN ('prepared', 'published')),
+    created_at TEXT NOT NULL,
+    published_at TEXT,
+    PRIMARY KEY(workspace_id, publication_id),
+    FOREIGN KEY(workspace_id, campaign_id)
+        REFERENCES reliability_campaigns(workspace_id, campaign_id),
+    FOREIGN KEY(workspace_id, gate_id)
+        REFERENCES reliability_release_gates(workspace_id, gate_id)
+);
+
 CREATE TABLE IF NOT EXISTS reliability_evidence_manifests (
     workspace_id TEXT NOT NULL,
     manifest_id TEXT NOT NULL,
-    schema_version INTEGER NOT NULL CHECK(schema_version = 1),
+    schema_version INTEGER NOT NULL CHECK(schema_version = 2),
     campaign_id TEXT NOT NULL,
     run_id TEXT NOT NULL,
     mis_artifact_id TEXT,
@@ -515,6 +550,8 @@ CREATE INDEX IF NOT EXISTS idx_reliability_regressions_run
     ON reliability_regressions(workspace_id, source_run_id, created_at, regression_id);
 CREATE INDEX IF NOT EXISTS idx_reliability_gates_campaign
     ON reliability_release_gates(workspace_id, campaign_id, created_at, gate_id);
+CREATE INDEX IF NOT EXISTS idx_reliability_publications_campaign
+    ON reliability_evidence_publications(workspace_id, campaign_id, created_at, publication_id);
 CREATE INDEX IF NOT EXISTS idx_reliability_manifests_run
     ON reliability_evidence_manifests(workspace_id, run_id, created_at, manifest_id);
 CREATE UNIQUE INDEX IF NOT EXISTS uq_reliability_campaign_mis_task
@@ -598,10 +635,42 @@ class SQLiteRepository:
             if not int(self.conn.execute("PRAGMA foreign_keys").fetchone()[0]):
                 raise RepositoryError("SQLite foreign key enforcement is required")
         self._validate_authority_schema()
+        manifest_table = self.conn.execute(
+            "SELECT sql FROM sqlite_master "
+            "WHERE type='table' AND name='reliability_evidence_manifests'"
+        ).fetchone()
+        if manifest_table is not None and re.search(
+            r"CHECK\s*\(\s*schema_version\s*=\s*2\s*\)",
+            str(manifest_table[0] or ""),
+            flags=re.IGNORECASE,
+        ) is None:
+            raise RepositoryError(
+                "OpenCekura pre-release EvidenceManifest schema v1 database is "
+                "unsupported; create a fresh database and regenerate campaign "
+                "evidence"
+            )
         for statement in RELIABILITY_SCHEMA_SQL.split(";"):
             statement = statement.strip()
             if statement:
                 self.conn.execute(statement)
+        self.conn.execute(
+            """INSERT OR IGNORE INTO reliability_authority_identity(
+                singleton_id,authority_id
+            ) VALUES(1,'ocdbauth_' || lower(hex(randomblob(16))))"""
+        )
+
+    def publication_authority_id(self) -> str:
+        row = self.conn.execute(
+            "SELECT authority_id FROM reliability_authority_identity "
+            "WHERE singleton_id=1"
+        ).fetchone()
+        if (
+            row is None
+            or not isinstance(row[0], str)
+            or re.fullmatch(r"ocdbauth_[0-9a-f]{32}", row[0]) is None
+        ):
+            raise RepositoryError("SQLite reliability authority identity is invalid")
+        return row[0]
 
     def _validate_authority_schema(self) -> None:
         missing: list[str] = []
@@ -1558,11 +1627,14 @@ class SQLiteRepository:
         offset = self._offset(offset)
         return self._public_tree(
             self._fetchall(
-                """SELECT c.*,
+                """SELECT c.*,h.current_gate_id,
                 (SELECT COUNT(*) FROM reliability_conversation_runs r
                  WHERE r.workspace_id=c.workspace_id AND r.campaign_id=c.campaign_id)
                  AS run_count
-            FROM reliability_campaigns c WHERE c.workspace_id=?
+            FROM reliability_campaigns c
+            LEFT JOIN reliability_campaign_gate_heads h
+              ON h.workspace_id=c.workspace_id AND h.campaign_id=c.campaign_id
+            WHERE c.workspace_id=?
             ORDER BY c.created_at DESC,c.campaign_id LIMIT ? OFFSET ?""",
                 (self.workspace_id, limit, offset),
             )
@@ -1570,11 +1642,13 @@ class SQLiteRepository:
 
     def get_campaign(self, campaign_id: str) -> dict[str, Any] | None:
         row = self._fetchone(
-            """SELECT c.*,
+            """SELECT c.*,h.current_gate_id,
                 (SELECT COUNT(*) FROM reliability_conversation_runs r
                  WHERE r.workspace_id=c.workspace_id AND r.campaign_id=c.campaign_id)
                  AS run_count
             FROM reliability_campaigns c
+            LEFT JOIN reliability_campaign_gate_heads h
+              ON h.workspace_id=c.workspace_id AND h.campaign_id=c.campaign_id
             WHERE c.workspace_id=? AND c.campaign_id=?""",
             (self.workspace_id, campaign_id),
         )
@@ -1693,9 +1767,13 @@ class SQLiteRepository:
             self._gate_public(row)
             for row in read_rows(
                 "release_gates",
-                """SELECT * FROM reliability_release_gates
-                WHERE workspace_id=? AND campaign_id=?
-                ORDER BY created_at,gate_id""",
+                """SELECT g.*,
+                    CASE WHEN h.current_gate_id=g.gate_id THEN 1 ELSE 0 END AS is_current
+                FROM reliability_release_gates g
+                LEFT JOIN reliability_campaign_gate_heads h
+                  ON h.workspace_id=g.workspace_id AND h.campaign_id=g.campaign_id
+                WHERE g.workspace_id=? AND g.campaign_id=?
+                ORDER BY g.created_at,g.gate_id""",
                 (self.workspace_id, run["campaign_id"]),
             )
         ]
@@ -1703,6 +1781,7 @@ class SQLiteRepository:
         detail = self._public_tree(
             {
                 "run": run,
+                "campaign": campaign,
                 "turns": turns,
                 "tool_calls": calls,
                 "evaluations": evaluations,
@@ -1882,19 +1961,28 @@ class SQLiteRepository:
     ) -> list[dict[str, Any]]:
         limit = self._limit(limit)
         offset = self._offset(offset)
-        sql = "SELECT * FROM reliability_release_gates WHERE workspace_id=?"
+        sql = """SELECT g.*,
+            CASE WHEN h.current_gate_id=g.gate_id THEN 1 ELSE 0 END AS is_current
+            FROM reliability_release_gates g
+            LEFT JOIN reliability_campaign_gate_heads h
+              ON h.workspace_id=g.workspace_id AND h.campaign_id=g.campaign_id
+            WHERE g.workspace_id=?"""
         params: list[Any] = [self.workspace_id]
         if campaign_id is not None:
-            sql += " AND campaign_id=?"
+            sql += " AND g.campaign_id=?"
             params.append(campaign_id)
-        sql += " ORDER BY created_at DESC,gate_id DESC LIMIT ? OFFSET ?"
+        sql += " ORDER BY g.created_at DESC,g.gate_id DESC LIMIT ? OFFSET ?"
         params.extend((limit, offset))
         return [self._gate_public(row) for row in self._fetchall(sql, params)]
 
     def get_release_gate(self, gate_id: str) -> dict[str, Any] | None:
         row = self._fetchone(
-            """SELECT * FROM reliability_release_gates
-            WHERE workspace_id=? AND gate_id=?""",
+            """SELECT g.*,
+                CASE WHEN h.current_gate_id=g.gate_id THEN 1 ELSE 0 END AS is_current
+            FROM reliability_release_gates g
+            LEFT JOIN reliability_campaign_gate_heads h
+              ON h.workspace_id=g.workspace_id AND h.campaign_id=g.campaign_id
+            WHERE g.workspace_id=? AND g.gate_id=?""",
             (self.workspace_id, gate_id),
         )
         return None if row is None else self._gate_public(row)
@@ -2467,6 +2555,8 @@ class SQLiteRepository:
 
     def _gate_public(self, row: dict[str, Any]) -> dict[str, Any]:
         result = dict(row)
+        if "is_current" in result:
+            result["is_current"] = bool(result["is_current"])
         for public, stored in (
             ("blockers", "blockers_json"),
             ("warnings", "warnings_json"),

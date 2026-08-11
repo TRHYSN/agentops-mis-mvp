@@ -162,6 +162,7 @@ def test_failure_review_builds_a_complete_replayable_regression_case() -> None:
     assert regression.reason_code == "agent_claims_success_without_state"
     assert regression.original_input == {
         "challenges": [{"agent_claims_success_without_mutation": True}],
+        "expectations": scenario().expectations.model_dump(mode="json"),
         "goal": scenario().goal.model_dump(mode="json"),
         "initial_message": scenario().initial_message,
         "persona": scenario().persona.model_dump(mode="json"),
@@ -263,6 +264,61 @@ def test_regression_case_replays_the_referenced_scenario_and_rejects_drift() -> 
                 agent_version=version,
                 adapter=MockAgentAdapter(config),
                 campaign_id="occampaign_drifted",
+                created_at=NOW,
+            )
+        )
+
+
+@pytest.mark.parametrize(
+    "expectation_update",
+    [
+        {"forbidden_tool_calls": ["cancel_booking"]},
+        {"max_turns": 13},
+    ],
+)
+def test_regression_replay_rejects_expectation_contract_drift(
+    expectation_update: dict[str, object],
+) -> None:
+    source_scenario = scenario()
+    result = evaluation(
+        "evr_expectation_drift",
+        "task_success.v1",
+        EvaluationStatus.FAIL,
+        ["agent_claims_success_without_state"],
+    )
+    failure = build_failure_cases(context(), [result])[0]
+    regression = build_regression_case(
+        failure=failure,
+        scenario=source_scenario,
+        evaluation=result,
+        created_at=NOW,
+    )
+    config = MockAgentConfig.candidate()
+    version = AgentVersion(
+        schema_version=1,
+        id="ocagentv_expectation_drift",
+        agent_id="ocagent_appointment",
+        version="candidate",
+        adapter_kind=AdapterKind.MOCK,
+        config_sha256=config.canonical_sha256(),
+        created_at=NOW,
+    )
+    drifted = source_scenario.model_copy(
+        update={
+            "expectations": source_scenario.expectations.model_copy(
+                update=expectation_update
+            )
+        }
+    )
+
+    with pytest.raises(ValueError, match="snapshot"):
+        asyncio.run(
+            replay_regression(
+                regression=regression,
+                scenario=drifted,
+                agent_version=version,
+                adapter=MockAgentAdapter(config),
+                campaign_id="occampaign_expectation_drift",
                 created_at=NOW,
             )
         )

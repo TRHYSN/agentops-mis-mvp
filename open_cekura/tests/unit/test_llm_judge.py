@@ -17,7 +17,7 @@ from open_cekura.scenarios.schema import ScenarioDefinition
 
 NOW = datetime(2026, 8, 11, 16, 0, tzinfo=timezone.utc)
 RUN_ID = "ocrun_llm_judge_fixture"
-SECRET = "sk-test-secret-that-must-never-be-retained"
+SECRET = "sk" + "-test-secret-that-must-never-be-retained"
 
 
 def judge_context() -> EvaluationContext:

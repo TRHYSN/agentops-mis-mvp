@@ -13,7 +13,12 @@ Starting commit: `99ce51d693f1d646ea84acc2f7f376bde1a95a9a`
 
 ## Product definition
 
-OpenCekura is an open-source vertical product within AgentOps MIS. Its formal module name is **Reliability Lab**.
+OpenCekura is intended to become an open-source vertical product within
+AgentOps MIS. Its formal module name is **Reliability Lab**. The current
+repository is still governed by the proprietary local MVP license in `LICENSE`
+and `pyproject.toml`; selecting and applying an open-source license is an Owner
+decision and remains a release/distribution gate. Until then, the code must not
+be described as open-source licensed or redistributed as such.
 
 It provides reliability testing, deterministic simulation, evaluation, regression management, release gating, and inspectable evidence for AI agents. Version 0 supports chat agents, tool-using agents, HTTP agents, and a deterministic mock agent. Live voice, WebRTC, SIP, LiveKit, Pipecat, Vapi, and Retell are explicitly deferred to v0.2.
 

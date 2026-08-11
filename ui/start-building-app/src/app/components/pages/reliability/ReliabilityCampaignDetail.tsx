@@ -5,6 +5,7 @@ import {
   loadReliabilityCampaign,
   loadReliabilityCampaignGates,
   loadReliabilityCampaignRuns,
+  selectReliabilityCurrentGate,
 } from "../../../data/reliabilityApi";
 import {
   ReliabilityEmptyState,
@@ -41,7 +42,7 @@ export function ReliabilityCampaignDetail() {
   const campaign = data?.campaign;
   const runs = data?.runs ?? [];
   const gates = data?.gates ?? [];
-  const latestGate = gates[0];
+  const currentGate = selectReliabilityCurrentGate(campaign, gates);
   const passed = runs.filter((run) => run.status === "pass").length;
   const failed = runs.filter((run) => run.status === "fail").length;
   const errors = runs.filter((run) => run.status === "error").length;
@@ -64,7 +65,7 @@ export function ReliabilityCampaignDetail() {
             <ReliabilityMetric label="Runs" value={runs.length} />
             <ReliabilityMetric label="Passed" value={passed} status={failed + errors === 0 && runs.length > 0 ? "pass" : undefined} />
             <ReliabilityMetric label="Failed" value={failed} status={failed > 0 ? "fail" : "pass"} />
-            <ReliabilityMetric label="Release gate" value={latestGate ? <ReliabilityStatus status={latestGate.decision} /> : "Pending"} />
+            <ReliabilityMetric label="Release gate" value={currentGate ? <ReliabilityStatus status={currentGate.decision} /> : "Unavailable"} />
           </section>
 
           <section className="grid grid-cols-1 gap-3 xl:grid-cols-[1fr_1.4fr]">
@@ -80,22 +81,22 @@ export function ReliabilityCampaignDetail() {
             </ReliabilityPanel>
 
             <ReliabilityPanel title="Release decision" description="Blockers and warnings come directly from the deterministic gate record.">
-              {!latestGate ? (
-                <ReliabilityEmptyState title="No release gate recorded" detail="Complete gate evaluation for this campaign to create a decision." />
+              {!currentGate ? (
+                <ReliabilityEmptyState title="Current release gate unavailable" detail="This campaign does not identify a current gate in the returned release-gate evidence." />
               ) : (
                 <div className="space-y-3">
                   <div className="flex flex-wrap items-center justify-between gap-2">
                     <div className="flex items-center gap-2">
-                      {latestGate.decision === "pass" ? <CheckCircle2 size={16} style={{ color: "var(--mis-success)" }} /> : <ShieldAlert size={16} style={{ color: "#F87171" }} />}
-                      <ReliabilityStatus status={latestGate.decision} />
+                      {currentGate.decision === "pass" ? <CheckCircle2 size={16} style={{ color: "var(--mis-success)" }} /> : <ShieldAlert size={16} style={{ color: "#F87171" }} />}
+                      <ReliabilityStatus status={currentGate.decision} />
                     </div>
-                    <ReliabilityId>{latestGate.policy_version}</ReliabilityId>
+                    <ReliabilityId>{currentGate.policy_version}</ReliabilityId>
                   </div>
-                  {latestGate.blockers.length > 0 ? (
+                  {currentGate.blockers.length > 0 ? (
                     <div>
                       <div className="mb-1.5 text-[10px] font-semibold uppercase tracking-wide" style={{ color: "#F87171" }}>Blockers</div>
                       <ul className="space-y-1.5">
-                        {latestGate.blockers.map((fact, index) => (
+                        {currentGate.blockers.map((fact, index) => (
                           <li key={`${fact.rule_id}-${index}`} className="rounded px-3 py-2 text-[11px] leading-relaxed" style={{ background: "rgba(248,113,113,0.06)", border: "1px solid rgba(248,113,113,0.16)", color: "var(--mis-dim)" }}>
                             <span className="font-medium" style={{ color: "var(--mis-text)" }}>{fact.message}</span>
                             {fact.scenario_id ? <div className="mt-1"><ReliabilityId>{fact.scenario_id}</ReliabilityId></div> : null}
@@ -104,15 +105,15 @@ export function ReliabilityCampaignDetail() {
                       </ul>
                     </div>
                   ) : null}
-                  {latestGate.warnings.length > 0 ? (
+                  {currentGate.warnings.length > 0 ? (
                     <div>
                       <div className="mb-1.5 text-[10px] font-semibold uppercase tracking-wide" style={{ color: "#FBBF24" }}>Warnings</div>
                       <ul className="space-y-1.5">
-                        {latestGate.warnings.map((fact, index) => <li key={`${fact.rule_id}-${index}`} className="rounded px-3 py-2 text-[11px]" style={{ background: "rgba(251,191,36,0.06)", color: "var(--mis-dim)" }}>{fact.message}</li>)}
+                        {currentGate.warnings.map((fact, index) => <li key={`${fact.rule_id}-${index}`} className="rounded px-3 py-2 text-[11px]" style={{ background: "rgba(251,191,36,0.06)", color: "var(--mis-dim)" }}>{fact.message}</li>)}
                       </ul>
                     </div>
                   ) : null}
-                  {latestGate.blockers.length === 0 && latestGate.warnings.length === 0 ? <p className="text-xs" style={{ color: "var(--mis-success)" }}>All configured release checks passed.</p> : null}
+                  {currentGate.blockers.length === 0 && currentGate.warnings.length === 0 ? <p className="text-xs" style={{ color: "var(--mis-success)" }}>All configured release checks passed.</p> : null}
                 </div>
               )}
             </ReliabilityPanel>

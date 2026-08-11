@@ -26,14 +26,18 @@ AgentOps MIS may be described as:
   evidence all pass.
 - OpenCekura Reliability Lab as a local, deterministic, configured simulation,
   evaluation, regression, release-gate, and evidence workflow for supported
-  mock and HTTP agent adapters.
+  Mock campaigns. Its lower-level HTTP adapter may be described as implemented
+  and tested, but not as exposed by the v0 campaign CLI/evidence workflow.
 
 ## OpenCekura / Reliability Lab Boundary
 
-OpenCekura is an AgentOps MIS vertical product. It may be described as
-open-source agent reliability testing under checked-in scenarios, deterministic
-evaluators, and explicit policies. Its Evidence Bundles prove what those local
-fixtures observed; they do not prove production reliability.
+OpenCekura is an AgentOps MIS vertical product with an open-source product
+intent. It may be described as local agent reliability testing under checked-in
+scenarios, deterministic evaluators, and explicit policies. Its Evidence
+Bundles prove what those local fixtures observed; they do not prove production
+reliability. The current repository license is proprietary, so the present
+code must not be called open-source licensed or redistributed unless the Owner
+first selects and applies an open-source license.
 
 OpenCekura must not be described as:
 

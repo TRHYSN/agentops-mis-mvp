@@ -190,6 +190,20 @@ def test_full_campaign_verification_accepts_bundle_and_rejects_tamper(
     assert "campaign_hash_mismatch" in _issue_codes(report)
 
 
+def test_run_verification_rejects_manifest_agent_config_digest_drift(
+    tmp_path: Path,
+) -> None:
+    bundle, manifest, root, written = _write_bundle(tmp_path, include_campaign=False)
+    payload = json.loads(written.manifest_path.read_bytes())
+    payload["agent_config_sha256"] = "0" * 64
+    written.manifest_path.write_bytes(manifest.canonical_json_bytes(payload))
+
+    report = bundle.verify_run_bundles(root, "occampaign_candidate")
+
+    assert report.ok is False
+    assert "manifest_agent_config_digest_mismatch" in _issue_codes(report)
+
+
 def test_full_campaign_verification_fails_closed_when_campaign_becomes_unreadable(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -551,7 +565,8 @@ def test_verification_rejects_manifest_artifact_path_traversal(tmp_path: Path) -
     ("manifest_bytes", "expected_code"),
     [
         (b"{not-json", "malformed_manifest"),
-        (b'{"schema_version":2}', "unsupported_manifest_schema"),
+        (b'{"schema_version":1}', "unsupported_manifest_schema"),
+        (b'{"schema_version":999}', "unsupported_manifest_schema"),
     ],
 )
 def test_verification_rejects_malformed_or_unsupported_manifest(
@@ -578,6 +593,25 @@ def test_verification_reports_non_finite_manifest_json_instead_of_raising(
 
     assert report.ok is False
     assert "malformed_manifest" in _issue_codes(report)
+
+
+def test_pre_release_v1_manifest_is_rejected_before_digest_reconstruction(
+    tmp_path: Path,
+) -> None:
+    bundle, manifest, root, written = _write_bundle(tmp_path)
+    old_payload = written.manifest.model_dump(mode="json")
+    old_payload["schema_version"] = 1
+    old_payload["agent_config_sha256"] = manifest.sha256_bytes(
+        (written.path / "agent_version.json").read_bytes()
+    )
+    written.manifest_path.write_bytes(manifest.canonical_json_bytes(old_payload))
+
+    report = bundle.verify_campaign(root, "occampaign_candidate")
+
+    codes = _issue_codes(report)
+    assert report.ok is False
+    assert "unsupported_manifest_schema" in codes
+    assert "manifest_agent_config_digest_mismatch" not in codes
 
 
 def test_verification_rejects_rehashed_evaluator_version_mismatch(

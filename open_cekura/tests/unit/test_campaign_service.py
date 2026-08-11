@@ -8,6 +8,22 @@ import pytest
 from open_cekura.campaigns import service
 
 
+def test_artifact_root_normalization_does_not_resolve_link_identity(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+
+    def fail_if_resolved(self: Path, *args: object, **kwargs: object) -> Path:
+        raise AssertionError(f"artifact root was resolved: {self}")
+
+    monkeypatch.setattr(Path, "resolve", fail_if_resolved)
+
+    assert service.resolve_artifact_root("linked-artifacts") == (
+        tmp_path / "linked-artifacts"
+    )
+
+
 def test_record_artifact_rejects_idempotent_core_hash_mismatch(tmp_path: Path) -> None:
     connection = sqlite3.connect(":memory:")
     connection.row_factory = sqlite3.Row

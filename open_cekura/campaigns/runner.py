@@ -8,7 +8,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable
 
-from open_cekura.domain.enums import AdapterKind, CampaignStatus, Verbosity
+from open_cekura.domain.enums import (
+    AdapterKind,
+    CampaignStatus,
+    EvaluationStatus,
+    RunFinalState,
+    Verbosity,
+)
 from open_cekura.domain.ids import stable_id
 from open_cekura.domain.models import (
     AgentUnderTest,
@@ -97,6 +103,10 @@ class CampaignExecution:
                 record.simulation.run.id: record.scenario.id for record in self.records
             },
             scenario_ids=[record.scenario.id for record in self.records],
+            scenario_sha256_by_id={
+                record.scenario.id: record.scenario.source_sha256
+                for record in self.records
+            },
             evaluator_versions=sorted(
                 {
                     result.evaluator_id
@@ -199,6 +209,16 @@ async def execute_mock_campaign(
         )
         context = context_from_simulation(simulation, evaluated_at=simulation.finished_at)
         evaluations = tuple(evaluate_deterministic(context))
+        evaluated_status = _evaluated_run_status(
+            simulation.run.status,
+            evaluations,
+            adapter_error=simulation.adapter_error,
+        )
+        simulation = simulation.model_copy(
+            update={
+                "run": simulation.run.model_copy(update={"status": evaluated_status})
+            }
+        )
         failures = tuple(build_failure_cases(context, evaluations))
         evaluations_by_id = {evaluation.id: evaluation for evaluation in evaluations}
         regressions = tuple(
@@ -246,6 +266,31 @@ async def execute_mock_campaign(
         records=tuple(records),
         metrics=aggregate_campaign_metrics(groups, run_facts),
     )
+
+
+def _evaluated_run_status(
+    _observed_status: RunFinalState,
+    evaluations: tuple[EvaluationResult, ...],
+    *,
+    adapter_error: str | None,
+) -> RunFinalState:
+    # A deterministic mock tool timeout is an observed scenario outcome, not an
+    # adapter lifecycle/contract failure.  The timeout evaluator remains the
+    # authority for whether that outcome is expected.  All other adapter errors
+    # fail closed before evaluator pass/fail aggregation.
+    fatal_adapter_error = adapter_error is not None and not adapter_error.startswith(
+        "tool_timeout:"
+    )
+    if fatal_adapter_error or not evaluations:
+        return RunFinalState.ERROR
+    if any(
+        result.status in {EvaluationStatus.ERROR, EvaluationStatus.SKIPPED}
+        for result in evaluations
+    ):
+        return RunFinalState.ERROR
+    if any(result.status is EvaluationStatus.FAIL for result in evaluations):
+        return RunFinalState.FAIL
+    return RunFinalState.PASS
 
 
 def _load_sources(

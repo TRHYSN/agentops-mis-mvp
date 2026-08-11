@@ -6,7 +6,7 @@ import json
 import threading
 import time
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from importlib import import_module
 from pathlib import Path
@@ -184,6 +184,10 @@ def test_candidate_run_is_typed_ordered_and_deterministic() -> None:
     assert first.final_state == scenario.expectations.final_state
     assert first.scenario == scenario
     assert first.agent_version.config_sha256 == config.canonical_sha256()
+    assert first.duration_ms == sum(call.duration_ms for call in first.tool_calls)
+    assert first.finished_at - first.started_at == timedelta(
+        milliseconds=first.duration_ms
+    )
     assert any(
         "[interruption]" in turn.content
         for turn in first.turns
@@ -195,6 +199,57 @@ def test_candidate_run_is_typed_ordered_and_deterministic() -> None:
         if turn.role is TurnRole.USER
     )
     assert first.canonical_json_bytes() == second.canonical_json_bytes()
+
+
+def test_after_turn_challenges_wait_for_the_earliest_legal_user_boundary() -> None:
+    _, mock, _, _ = simulation_modules()
+    scenario = make_scenario(
+        challenges=[
+            {"interrupt_after_turn": 3},
+            {"change_constraint_after_turn": 4},
+        ]
+    )
+
+    result = run_mock(scenario, mock.MockAgentConfig.candidate())
+    user_turns = [turn for turn in result.turns if turn.role is TurnRole.USER]
+    interruption = next(
+        turn for turn in user_turns if "[interruption]" in turn.content
+    )
+    constraint_change = next(
+        turn for turn in user_turns if "[constraint-change]" in turn.content
+    )
+
+    assert "[continuation]" in user_turns[1].content
+    assert interruption.turn_index == 4
+    assert constraint_change.turn_index == 6
+    assert interruption.turn_index >= 3
+    assert constraint_change.turn_index >= 4
+    assert result.run.status is RunFinalState.PASS
+
+
+def test_equal_after_turn_thresholds_keep_scenario_order() -> None:
+    _, mock, _, _ = simulation_modules()
+    scenario = make_scenario(
+        challenges=[
+            {"change_constraint_after_turn": 3},
+            {"interrupt_after_turn": 3},
+        ]
+    )
+
+    result = run_mock(scenario, mock.MockAgentConfig.candidate())
+    challenge_turns = [
+        turn
+        for turn in result.turns
+        if turn.role is TurnRole.USER
+        and (
+            "[constraint-change]" in turn.content
+            or "[interruption]" in turn.content
+        )
+    ]
+
+    assert [turn.turn_index for turn in challenge_turns] == [4, 6]
+    assert "[constraint-change]" in challenge_turns[0].content
+    assert "[interruption]" in challenge_turns[1].content
 
 
 def test_candidate_final_state_matches_all_public_appointment_fixtures() -> None:
@@ -399,7 +454,8 @@ def test_mock_adapter_has_no_network_dependency(monkeypatch: pytest.MonkeyPatch)
 @contextmanager
 def local_agent_endpoint(
     *,
-    malformed_send: bool = False,
+    malformed_operation: str | None = None,
+    operation_delay_seconds: float = 0.0,
     send_delay_seconds: float = 0.0,
 ) -> Iterator[tuple[str, list[tuple[str, dict[str, Any]]]]]:
     requests: list[tuple[str, dict[str, Any]]] = []
@@ -423,15 +479,24 @@ def local_agent_endpoint(
             except (BrokenPipeError, ConnectionResetError):
                 pass
 
+        def _delay(self) -> None:
+            if operation_delay_seconds:
+                time.sleep(operation_delay_seconds)
+
         def do_POST(self) -> None:
             payload = self._read_payload()
             requests.append((self.path, payload))
             if self.path == "/start":
-                self._reply({"schema_version": 1, "accepted": True})
+                self._delay()
+                if malformed_operation == "start":
+                    self._reply({"schema_version": 1, "accepted": "yes"})
+                else:
+                    self._reply({"schema_version": 1, "accepted": True})
             elif self.path == "/send":
+                self._delay()
                 if send_delay_seconds:
                     time.sleep(send_delay_seconds)
-                if malformed_send:
+                if malformed_operation == "send":
                     self._reply(
                         {
                             "schema_version": 1,
@@ -461,32 +526,40 @@ def local_agent_endpoint(
                         }
                     )
             elif self.path == "/close":
-                self._reply({"schema_version": 1, "accepted": True})
+                self._delay()
+                if malformed_operation == "close":
+                    self._reply({"schema_version": 1, "accepted": "yes"})
+                else:
+                    self._reply({"schema_version": 1, "accepted": True})
             else:
                 self.send_error(404)
 
         def do_GET(self) -> None:
             requests.append((self.path, {}))
             if self.path == "/tool-calls":
-                self._reply(
-                    {
-                        "schema_version": 1,
-                        "tool_calls": [
-                            {
-                                "schema_version": 1,
-                                "name": "update_booking",
-                                "arguments": {
-                                    "booking_id": "booking-001",
-                                    "slot": REQUESTED_SLOT,
-                                },
-                                "result": {"booking_updated": True},
-                                "error": None,
-                                "is_mutation": True,
-                                "duration_ms": 8,
-                            }
-                        ],
-                    }
-                )
+                self._delay()
+                if malformed_operation == "tool-calls":
+                    self._reply({"schema_version": 1, "tool_calls": "invalid"})
+                else:
+                    self._reply(
+                        {
+                            "schema_version": 1,
+                            "tool_calls": [
+                                {
+                                    "schema_version": 1,
+                                    "name": "update_booking",
+                                    "arguments": {
+                                        "booking_id": "booking-001",
+                                        "slot": REQUESTED_SLOT,
+                                    },
+                                    "result": {"booking_updated": True},
+                                    "error": None,
+                                    "is_mutation": True,
+                                    "duration_ms": 8,
+                                }
+                            ],
+                        }
+                    )
             else:
                 self.send_error(404)
 
@@ -551,7 +624,7 @@ def test_http_adapter_surfaces_response_contract_errors() -> None:
     config = mock.MockAgentConfig.candidate()
     version = make_version(config, adapter_kind=AdapterKind.HTTP)
 
-    with local_agent_endpoint(malformed_send=True) as (base_url, _):
+    with local_agent_endpoint(malformed_operation="send") as (base_url, _):
         instance = http.HTTPAgentAdapter(base_url, timeout_seconds=0.5)
 
         async def exercise() -> None:
@@ -563,6 +636,65 @@ def test_http_adapter_surfaces_response_contract_errors() -> None:
 
         with pytest.raises(adapter.AdapterContractError, match="send response"):
             asyncio.run(exercise())
+
+
+@pytest.mark.parametrize(
+    ("operation", "stage"),
+    [
+        ("start", "start"),
+        ("send", "send"),
+        ("tool-calls", "observe_tool_calls"),
+        ("close", "close"),
+    ],
+)
+def test_run_scenario_persists_http_contract_errors(
+    operation: str,
+    stage: str,
+) -> None:
+    _, mock, http, runner = simulation_modules()
+    scenario = make_scenario()
+    config = mock.MockAgentConfig.candidate()
+    version = make_version(config, adapter_kind=AdapterKind.HTTP)
+
+    with local_agent_endpoint(malformed_operation=operation) as (base_url, _):
+        result = asyncio.run(
+            runner.run_scenario(
+                scenario=scenario,
+                agent_version=version,
+                adapter=http.HTTPAgentAdapter(base_url, timeout_seconds=0.5),
+                campaign_id="occampaign_http_contract_error",
+                created_at=CREATED_AT,
+            )
+        )
+
+    assert result.run.status is RunFinalState.ERROR
+    assert result.adapter_error is not None
+    assert result.adapter_error.startswith(f"adapter_contract:{stage}:")
+
+
+def test_http_run_timing_includes_full_adapter_lifecycle_wall_latency() -> None:
+    _, mock, http, runner = simulation_modules()
+    scenario = make_scenario()
+    config = mock.MockAgentConfig.candidate()
+    version = make_version(config, adapter_kind=AdapterKind.HTTP)
+
+    with local_agent_endpoint(operation_delay_seconds=0.03) as (base_url, _):
+        result = asyncio.run(
+            runner.run_scenario(
+                scenario=scenario,
+                agent_version=version,
+                adapter=http.HTTPAgentAdapter(base_url, timeout_seconds=0.5),
+                campaign_id="occampaign_http_wall_latency",
+                created_at=CREATED_AT,
+            )
+        )
+
+    measured_delta_ms = int(
+        (result.finished_at - result.started_at).total_seconds() * 1000
+    )
+    assert result.run.status is RunFinalState.PASS
+    assert result.duration_ms >= 100
+    assert measured_delta_ms == result.duration_ms
 
 
 def test_http_adapter_surfaces_explicit_timeout() -> None:

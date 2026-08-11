@@ -249,6 +249,7 @@ class EvidenceEnvironment(StrictContract):
 
 
 class EvidenceManifest(DomainObject):
+    schema_version: Literal[2]
     campaign_id: StableIdentifier
     run_id: StableIdentifier
     mis_artifact_id: StableIdentifier | None
@@ -276,10 +277,6 @@ class EvidenceManifest(DomainObject):
             raise ValueError("created_at must not precede finished_at")
         if self.artifacts.get("scenario.yaml") != self.scenario_sha256:
             raise ValueError("scenario_sha256 must match artifacts['scenario.yaml']")
-        if self.artifacts.get("agent_version.json") != self.agent_config_sha256:
-            raise ValueError(
-                "agent_config_sha256 must match artifacts['agent_version.json']"
-            )
         return self
 
 

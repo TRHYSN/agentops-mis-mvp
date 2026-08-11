@@ -206,6 +206,11 @@ merge authority.
 
 ## Known limitations
 
+- The product direction is open-source, but this repository currently carries
+  a proprietary local MVP license. Choosing and applying an open-source license
+  is an explicit Owner decision; this PR does not silently relicense the wider
+  repository and must not be advertised as open-source licensed before that
+  decision.
 - The public campaign CLI supports the deterministic Mock adapter in v0. The
   HTTP adapter is implemented and tested but is not yet exposed by campaign
   CLI selection.

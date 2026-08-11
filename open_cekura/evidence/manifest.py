@@ -7,7 +7,8 @@ import json
 import os
 import re
 import stat
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path, PureWindowsPath
 from typing import Literal, Mapping, Sequence
 
@@ -33,7 +34,10 @@ from open_cekura.evaluation.aggregation import (
     RunMetricFacts,
     aggregate_campaign_metrics,
 )
-from open_cekura.release_gate.policy import CampaignGateInput, evaluate_release_gate
+from open_cekura.release_gate.policy import (
+    CampaignGateInput,
+    evaluate_release_gate_for_policy,
+)
 from open_cekura.scenarios.schema import ScenarioDefinition
 
 
@@ -49,14 +53,20 @@ RUN_ARTIFACT_FILENAMES = (
 RUN_FILENAMES = frozenset((*RUN_ARTIFACT_FILENAMES, MANIFEST_FILENAME))
 CAMPAIGN_ARTIFACT_FILENAMES = (
     "baseline_candidate_diff.json",
+    "gate_history.json",
     "release_gate.json",
     "regression_cases.json",
 )
 CAMPAIGN_SUMMARY_FILENAME = "campaign_summary.json"
+GATE_SNAPSHOTS_DIRNAME = "gates"
+GATE_SNAPSHOT_FILENAMES = frozenset(
+    ("baseline_candidate_diff.json", "release_gate.json")
+)
 CAMPAIGN_FILENAMES = frozenset(
     (CAMPAIGN_SUMMARY_FILENAME, *CAMPAIGN_ARTIFACT_FILENAMES)
 )
-SUPPORTED_MANIFEST_SCHEMA_VERSION = 1
+SUPPORTED_MANIFEST_SCHEMA_VERSION = 2
+SUPPORTED_CAMPAIGN_SCHEMA_VERSION = 2
 
 # Offline verification is intentionally bounded before allocation/parsing.  These
 # limits cover the public v0 evidence contract while preventing a local artifact
@@ -67,8 +77,12 @@ MAX_RUN_ENTRIES = 32
 MAX_MANIFEST_BYTES = 1 * 1024 * 1024
 MAX_RUN_ARTIFACT_BYTES = 16 * 1024 * 1024
 MAX_CAMPAIGN_ARTIFACT_BYTES = 16 * 1024 * 1024
+MAX_GATE_HISTORY_ENTRIES = 256
 MAX_JSON_NESTING = 128
 MAX_COMPARISON_DEPTH = 8
+MAX_VERIFICATION_CAMPAIGNS = 64
+MAX_VERIFICATION_GATE_SNAPSHOTS = 1_024
+MAX_VERIFICATION_WORK_UNITS = 8_192
 
 _SAFE_COMPONENT = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$")
 _WINDOWS_RESERVED_NAMES = frozenset(
@@ -168,6 +182,10 @@ class _EvidenceLimitExceeded(EvidenceError):
     """A local artifact exceeds a documented verifier resource bound."""
 
 
+class _VerificationBudgetExceeded(EvidenceError):
+    """The shared recursive verification work budget is exhausted."""
+
+
 @dataclass(frozen=True, slots=True)
 class VerificationIssue:
     code: str
@@ -201,16 +219,87 @@ class VerifiedCampaignArtifact:
 
 
 @dataclass(frozen=True, slots=True)
+class VerifiedGateSnapshot:
+    """Immutable gate and comparison bytes covered by the history index."""
+
+    gate_id: str
+    release_gate: bytes
+    baseline_candidate_diff: bytes
+
+
+@dataclass(frozen=True, slots=True)
 class VerificationReport:
     root: Path
     campaign_id: str
     runs: tuple[RunVerification, ...]
     issues: tuple[VerificationIssue, ...]
     campaign_artifacts: tuple[VerifiedCampaignArtifact, ...] = ()
+    gate_snapshots: tuple[VerifiedGateSnapshot, ...] = ()
 
     @property
     def ok(self) -> bool:
         return not any(issue.severity == "error" for issue in self.issues)
+
+
+@dataclass(slots=True)
+class VerificationContext:
+    """One bounded memoization scope for a top-level campaign verification."""
+
+    root: Path
+    strict: bool
+    max_campaigns: int = field(
+        default_factory=lambda: MAX_VERIFICATION_CAMPAIGNS
+    )
+    max_gate_snapshots: int = field(
+        default_factory=lambda: MAX_VERIFICATION_GATE_SNAPSHOTS
+    )
+    max_work_units: int = field(
+        default_factory=lambda: MAX_VERIFICATION_WORK_UNITS
+    )
+    campaign_reports: dict[
+        tuple[str, frozenset[str]], VerificationReport
+    ] = field(default_factory=dict)
+    campaigns: int = 0
+    gate_snapshots: int = 0
+    work_units: int = 0
+    exhausted_limit: str | None = None
+
+    def begin_campaign(self) -> None:
+        self._consume(campaigns=1, work_units=1)
+
+    def consume_gate_snapshot(self) -> None:
+        self._consume(gate_snapshots=1, work_units=1)
+
+    def consume_work(self, units: int = 1) -> None:
+        if type(units) is not int or units < 1:
+            raise ValueError("verification work units must be a positive integer")
+        self._consume(work_units=units)
+
+    def _consume(
+        self,
+        *,
+        campaigns: int = 0,
+        gate_snapshots: int = 0,
+        work_units: int = 0,
+    ) -> None:
+        if self.exhausted_limit is not None:
+            raise _VerificationBudgetExceeded(self.exhausted_limit)
+        proposed = (
+            ("campaign", self.campaigns + campaigns, self.max_campaigns),
+            (
+                "gate snapshot",
+                self.gate_snapshots + gate_snapshots,
+                self.max_gate_snapshots,
+            ),
+            ("work unit", self.work_units + work_units, self.max_work_units),
+        )
+        for label, value, limit in proposed:
+            if value > limit:
+                self.exhausted_limit = label
+                raise _VerificationBudgetExceeded(label)
+        self.campaigns += campaigns
+        self.gate_snapshots += gate_snapshots
+        self.work_units += work_units
 
 
 def verified_campaign_json(
@@ -595,6 +684,7 @@ def verify_run_bundles(
     campaign_id: str,
     *,
     strict: bool = False,
+    _verification_context: VerificationContext | None = None,
 ) -> VerificationReport:
     """Verify only run bundles, before campaign gate evidence is available."""
 
@@ -690,6 +780,27 @@ def verify_run_bundles(
                 )
             )
             continue
+        if entry.name == GATE_SNAPSHOTS_DIRNAME:
+            if not entry.is_dir():
+                campaign_issues.append(
+                    _issue(
+                        "gate_history_not_directory",
+                        "error",
+                        GATE_SNAPSHOTS_DIRNAME,
+                        "gate snapshot path must be a real directory",
+                    )
+                )
+            continue
+        if entry.name.casefold() == GATE_SNAPSHOTS_DIRNAME.casefold():
+            campaign_issues.append(
+                _issue(
+                    "reserved_contract_file",
+                    "error",
+                    relative,
+                    "case-conflicting gate snapshot directory is not allowed",
+                )
+            )
+            continue
         if entry.is_dir():
             try:
                 child_names = {
@@ -781,13 +892,24 @@ def verify_run_bundles(
             )
         )
 
-    runs = tuple(
-        _verify_run(campaign_id, run_path, strict=strict)
-        for run_path in sorted(
-            run_paths,
-            key=lambda path: (path.name.casefold(), path.name),
-        )
-    )
+    verified_runs: list[RunVerification] = []
+    for run_path in sorted(
+        run_paths,
+        key=lambda path: (path.name.casefold(), path.name),
+    ):
+        if _verification_context is not None:
+            try:
+                _verification_context.consume_work()
+            except _VerificationBudgetExceeded:
+                campaign_issues.append(
+                    _verification_budget_issue(
+                        campaign_id,
+                        _verification_context,
+                    )
+                )
+                break
+        verified_runs.append(_verify_run(campaign_id, run_path, strict=strict))
+    runs = tuple(verified_runs)
     all_issues = [*campaign_issues]
     for run in runs:
         all_issues.extend(run.issues)
@@ -805,12 +927,13 @@ def verify_campaign(
     *,
     strict: bool = False,
     _campaign_stack: frozenset[str] | None = None,
+    _verification_context: VerificationContext | None = None,
 ) -> VerificationReport:
-    """Verify run bundles and the four hash-linked campaign evidence files."""
+    """Verify a campaign with one bounded context shared by all baselines."""
 
+    validate_path_component(campaign_id, label="campaign_id")
     campaign_stack = _campaign_stack or frozenset()
     if campaign_id in campaign_stack:
-        validate_path_component(campaign_id, label="campaign_id")
         return VerificationReport(
             root=absolute_safe_root(root),
             campaign_id=campaign_id,
@@ -824,8 +947,77 @@ def verify_campaign(
                 ),
             ),
         )
-    current_stack = campaign_stack | {campaign_id}
-    run_report = verify_run_bundles(root, campaign_id, strict=strict)
+    root_path = absolute_safe_root(root)
+    top_level = _verification_context is None
+    context = _verification_context or VerificationContext(
+        root=root_path,
+        strict=strict,
+    )
+    if context.root != root_path or context.strict is not strict:
+        raise EvidenceInputError(
+            "recursive verification context root and strict mode must remain fixed"
+        )
+    # A report is only reusable beneath the same verified ancestry.  Reusing a
+    # shallow report beneath a deeper branch could otherwise hide the cached
+    # subtree from the comparison-depth check; reusing it beneath one of its
+    # descendants could likewise hide a cycle.  The global context budgets
+    # still bound the extra work for wide DAGs.
+    cache_key = (campaign_id, campaign_stack)
+    cached = context.campaign_reports.get(cache_key)
+    if cached is not None:
+        return cached
+    try:
+        context.begin_campaign()
+        report = _verify_campaign_uncached(
+            root_path,
+            campaign_id,
+            strict=strict,
+            campaign_stack=campaign_stack | {campaign_id},
+            verification_context=context,
+        )
+    except _VerificationBudgetExceeded:
+        report = VerificationReport(
+            root=root_path,
+            campaign_id=campaign_id,
+            runs=(),
+            issues=(_verification_budget_issue(campaign_id, context),),
+        )
+    if top_level and context.exhausted_limit is not None and not any(
+        issue.code == "verification_budget_exceeded" for issue in report.issues
+    ):
+        report = VerificationReport(
+            root=report.root,
+            campaign_id=report.campaign_id,
+            runs=report.runs,
+            issues=(
+                *report.issues,
+                _verification_budget_issue(campaign_id, context),
+            ),
+            campaign_artifacts=report.campaign_artifacts,
+            gate_snapshots=report.gate_snapshots,
+        )
+    context.campaign_reports[cache_key] = report
+    return report
+
+
+def _verify_campaign_uncached(
+    root: Path,
+    campaign_id: str,
+    *,
+    strict: bool,
+    campaign_stack: frozenset[str],
+    verification_context: VerificationContext,
+) -> VerificationReport:
+    """Verify one unique campaign inside a shared recursive context."""
+
+    run_report = verify_run_bundles(
+        root,
+        campaign_id,
+        strict=strict,
+        _verification_context=verification_context,
+    )
+    if verification_context.exhausted_limit is not None:
+        return run_report
     campaign_path = run_report.root / campaign_id
     if (
         not campaign_path.exists()
@@ -942,15 +1134,25 @@ def verify_campaign(
         artifact_bytes,
         issues,
     )
+    gate_snapshots = _verify_gate_history(
+        campaign_path,
+        campaign_id,
+        payloads.get("gate_history.json"),
+        artifact_bytes,
+        issues,
+        verification_context=verification_context,
+    )
     _verify_campaign_summary_facts(
         campaign_id,
         payloads.get(CAMPAIGN_SUMMARY_FILENAME),
         payloads,
         run_report.runs,
         issues,
+        gate_snapshots=gate_snapshots,
         campaign_root=run_report.root,
         strict=strict,
-        campaign_stack=current_stack,
+        campaign_stack=campaign_stack,
+        verification_context=verification_context,
     )
     return VerificationReport(
         root=run_report.root,
@@ -965,6 +1167,7 @@ def verify_campaign(
             )
             for name, content in sorted(artifact_bytes.items())
         ),
+        gate_snapshots=gate_snapshots,
     )
 
 
@@ -1037,6 +1240,7 @@ def _verify_campaign_payload_shapes(
 ) -> None:
     expected_shapes = {
         "baseline_candidate_diff.json": dict,
+        "gate_history.json": dict,
         "release_gate.json": dict,
         "regression_cases.json": list,
     }
@@ -1066,6 +1270,318 @@ def _verify_campaign_payload_shapes(
             )
 
 
+def _verify_gate_history(
+    campaign_path: Path,
+    campaign_id: str,
+    payload: object | None,
+    campaign_artifacts: Mapping[str, bytes],
+    issues: list[VerificationIssue],
+    *,
+    verification_context: VerificationContext,
+) -> tuple[VerifiedGateSnapshot, ...]:
+    required = {"schema_version", "campaign_id", "current_gate_id", "entries"}
+    if (
+        not isinstance(payload, dict)
+        or set(payload) != required
+        or payload.get("schema_version") != 1
+        or payload.get("campaign_id") != campaign_id
+        or not isinstance(payload.get("current_gate_id"), str)
+        or not isinstance(payload.get("entries"), dict)
+    ):
+        issues.append(
+            _issue(
+                "invalid_gate_history",
+                "error",
+                "gate_history.json",
+                "gate history index does not satisfy its strict contract",
+            )
+        )
+        return ()
+    entries = payload["entries"]
+    current_gate_id = payload["current_gate_id"]
+    if (
+        not entries
+        or len(entries) > MAX_GATE_HISTORY_ENTRIES
+        or current_gate_id not in entries
+    ):
+        issues.append(
+            _issue(
+                "invalid_gate_history",
+                "error",
+                "gate_history.json",
+                "gate history index is empty, oversized, or lacks its current gate",
+            )
+        )
+        return ()
+    for gate_id in entries:
+        try:
+            validate_path_component(gate_id, label="gate_id")
+        except EvidencePathError:
+            issues.append(
+                _issue(
+                    "invalid_gate_history_path",
+                    "error",
+                    "gate_history.json",
+                    "gate history contains an unsafe gate identifier",
+                )
+            )
+            return ()
+    if len({gate_id.casefold() for gate_id in entries}) != len(entries):
+        issues.append(
+            _issue(
+                "reserved_contract_file",
+                "error",
+                "gate_history.json",
+                "gate history contains case-conflicting gate identifiers",
+            )
+        )
+        return ()
+
+    gates_path = campaign_path / GATE_SNAPSHOTS_DIRNAME
+    if (
+        not gates_path.exists()
+        or is_symlink_or_reparse(gates_path)
+        or not gates_path.is_dir()
+    ):
+        issues.append(
+            _issue(
+                "gate_history_missing",
+                "error",
+                GATE_SNAPSHOTS_DIRNAME,
+                "gate snapshot directory is missing or unsafe",
+            )
+        )
+        return ()
+    try:
+        disk_entries = sorted(
+            _bounded_directory_entries(gates_path, MAX_GATE_HISTORY_ENTRIES + 1),
+            key=lambda entry: (entry.name.casefold(), entry.name),
+        )
+    except (_EvidenceLimitExceeded, OSError):
+        issues.append(
+            _issue(
+                "gate_history_unreadable",
+                "error",
+                GATE_SNAPSHOTS_DIRNAME,
+                "gate snapshot directory cannot be safely enumerated",
+            )
+        )
+        return ()
+    if (
+        len(disk_entries) != len(entries)
+        or {entry.name for entry in disk_entries} != set(entries)
+    ):
+        issues.append(
+            _issue(
+                "gate_history_set_mismatch",
+                "error",
+                GATE_SNAPSHOTS_DIRNAME,
+                "gate history index and immutable snapshot set differ",
+            )
+        )
+
+    verified: list[VerifiedGateSnapshot] = []
+    for gate_id, index_entry in sorted(entries.items()):
+        try:
+            verification_context.consume_gate_snapshot()
+        except _VerificationBudgetExceeded:
+            issues.append(_verification_budget_issue(campaign_id, verification_context))
+            break
+        if (
+            not isinstance(index_entry, dict)
+            or set(index_entry)
+            != {
+                "release_gate_sha256",
+                "baseline_candidate_diff_sha256",
+            }
+            or not all(
+                isinstance(value, str) and re.fullmatch(r"[0-9a-f]{64}", value)
+                for value in index_entry.values()
+            )
+        ):
+            issues.append(
+                _issue(
+                    "invalid_gate_history",
+                    "error",
+                    "gate_history.json",
+                    "gate history entry has invalid hash metadata",
+                )
+            )
+            continue
+        gate_path = gates_path / gate_id
+        if (
+            not gate_path.exists()
+            or is_symlink_or_reparse(gate_path)
+            or not gate_path.is_dir()
+        ):
+            issues.append(
+                _issue(
+                    "gate_snapshot_missing",
+                    "error",
+                    f"gates/{gate_id}",
+                    "gate snapshot directory is missing or unsafe",
+                )
+            )
+            continue
+        try:
+            snapshot_entries = {
+                entry.name: entry
+                for entry in _bounded_directory_entries(
+                    gate_path, len(GATE_SNAPSHOT_FILENAMES) + 1
+                )
+            }
+        except (_EvidenceLimitExceeded, OSError):
+            issues.append(
+                _issue(
+                    "gate_snapshot_unreadable",
+                    "error",
+                    f"gates/{gate_id}",
+                    "gate snapshot cannot be safely enumerated",
+                )
+            )
+            continue
+        if set(snapshot_entries) != set(GATE_SNAPSHOT_FILENAMES):
+            issues.append(
+                _issue(
+                    "gate_snapshot_set_mismatch",
+                    "error",
+                    f"gates/{gate_id}",
+                    "gate snapshot file set is incomplete or contains extras",
+                )
+            )
+            continue
+        contents: dict[str, bytes] = {}
+        snapshot_valid = True
+        for filename in sorted(GATE_SNAPSHOT_FILENAMES):
+            path = snapshot_entries[filename]
+            if is_symlink_or_reparse(path) or not path.is_file():
+                issues.append(
+                    _issue(
+                        "symlink_not_allowed",
+                        "error",
+                        f"gates/{gate_id}/{filename}",
+                        "gate snapshot file must be a regular file",
+                    )
+                )
+                snapshot_valid = False
+                continue
+            try:
+                content = _read_bounded(path, MAX_CAMPAIGN_ARTIFACT_BYTES)
+            except (_EvidenceLimitExceeded, OSError):
+                issues.append(
+                    _issue(
+                        "gate_snapshot_unreadable",
+                        "error",
+                        f"gates/{gate_id}/{filename}",
+                        "gate snapshot file cannot be safely read",
+                    )
+                )
+                snapshot_valid = False
+                continue
+            expected_hash = index_entry[
+                "release_gate_sha256"
+                if filename == "release_gate.json"
+                else "baseline_candidate_diff_sha256"
+            ]
+            if sha256_bytes(content) != expected_hash:
+                issues.append(
+                    _issue(
+                        "gate_snapshot_hash_mismatch",
+                        "error",
+                        f"gates/{gate_id}/{filename}",
+                        "gate snapshot hash does not match the history index",
+                        expected_sha256=expected_hash,
+                        actual_sha256=sha256_bytes(content),
+                    )
+                )
+                snapshot_valid = False
+                continue
+            if _campaign_json_payload(
+                f"gates/{gate_id}/{filename}", content, issues
+            ) is None:
+                snapshot_valid = False
+                continue
+            contents[filename] = content
+        if not snapshot_valid or set(contents) != set(GATE_SNAPSHOT_FILENAMES):
+            continue
+        try:
+            gate_payload = json.loads(contents["release_gate.json"].decode("utf-8"))
+            diff_payload = json.loads(
+                contents["baseline_candidate_diff.json"].decode("utf-8")
+            )
+        except (UnicodeError, json.JSONDecodeError, ValueError, RecursionError):
+            continue
+        if isinstance(gate_payload, dict) and "id" in gate_payload:
+            try:
+                gate = ReleaseGateDecision.model_validate_json(
+                    contents["release_gate.json"]
+                )
+            except ValidationError:
+                issues.append(
+                    _issue(
+                        "invalid_gate_snapshot",
+                        "error",
+                        f"gates/{gate_id}/release_gate.json",
+                        "governed gate snapshot violates its domain contract",
+                    )
+                )
+                continue
+            baseline_id = gate.baseline_campaign_id
+            expected_gate_id = stable_id(
+                "ocgate",
+                campaign_id,
+                baseline_id if baseline_id is not None else "standalone",
+                gate.policy_version,
+            )
+            diff_baseline = (
+                diff_payload.get("baseline_campaign_id")
+                if isinstance(diff_payload, dict)
+                else None
+            )
+            if (
+                gate.id != gate_id
+                or gate.id != expected_gate_id
+                or gate.campaign_id != campaign_id
+                or diff_baseline != baseline_id
+            ):
+                issues.append(
+                    _issue(
+                        "gate_snapshot_mapping_mismatch",
+                        "error",
+                        f"gates/{gate_id}",
+                        "gate snapshot IDs do not match their immutable location",
+                    )
+                )
+                continue
+        verified.append(
+            VerifiedGateSnapshot(
+                gate_id=gate_id,
+                release_gate=contents["release_gate.json"],
+                baseline_candidate_diff=contents["baseline_candidate_diff.json"],
+            )
+        )
+
+    current = next(
+        (snapshot for snapshot in verified if snapshot.gate_id == current_gate_id),
+        None,
+    )
+    if (
+        current is None
+        or campaign_artifacts.get("release_gate.json") != current.release_gate
+        or campaign_artifacts.get("baseline_candidate_diff.json")
+        != current.baseline_candidate_diff
+    ):
+        issues.append(
+            _issue(
+                "gate_history_current_mismatch",
+                "error",
+                "gate_history.json",
+                "current gate aliases do not match the indexed immutable snapshot",
+            )
+        )
+    return tuple(verified)
+
+
 def _verify_campaign_summary(
     campaign_id: str,
     payload: object | None,
@@ -1078,7 +1594,7 @@ def _verify_campaign_summary(
     if (
         not isinstance(payload, dict)
         or set(payload) != required_fields
-        or payload.get("schema_version") != 1
+        or payload.get("schema_version") != SUPPORTED_CAMPAIGN_SCHEMA_VERSION
         or not isinstance(payload.get("summary"), dict)
         or not isinstance(payload.get("artifacts"), dict)
     ):
@@ -1165,9 +1681,11 @@ def _verify_campaign_summary_facts(
     runs: Sequence[RunVerification],
     issues: list[VerificationIssue],
     *,
+    gate_snapshots: tuple[VerifiedGateSnapshot, ...],
     campaign_root: Path,
     strict: bool,
     campaign_stack: frozenset[str],
+    verification_context: VerificationContext,
 ) -> None:
     """Cross-check governed summary facts against independently hashed run evidence."""
 
@@ -1293,7 +1811,7 @@ def _verify_campaign_summary_facts(
             for result in evaluations
         )
         mapping_matches = mapping_matches and manifest.mis_artifact_id == stable_id(
-            "artoc", expected_mis_run_id, "evidence-manifest.v1"
+            "artoc", expected_mis_run_id, "evidence-manifest.v2"
         )
         if manifest.mis_plan_evidence_manifest_id is not None:
             mapping_matches = (
@@ -1407,7 +1925,7 @@ def _verify_campaign_summary_facts(
         "apoc",
         campaign_id,
         baseline_campaign_id if isinstance(baseline_campaign_id, str) else "standalone",
-        "release_gate.v1",
+        release_gate.policy_version,
     )
     try:
         baseline_gate_input = _baseline_gate_input(
@@ -1417,14 +1935,29 @@ def _verify_campaign_summary_facts(
             campaign_root=campaign_root,
             strict=strict,
             campaign_stack=campaign_stack,
+            verification_context=verification_context,
         )
-        expected_release_gate = evaluate_release_gate(
+        expected_release_gate = evaluate_release_gate_for_policy(
+            release_gate.policy_version,
             gate_input,
             baseline=baseline_gate_input,
             created_at=campaign.created_at,
             mis_approval_id=expected_approval_id,
         )
         expected_diff = _expected_comparison_payload(gate_input, baseline_gate_input)
+        gate_history_matches = _governed_gate_history_matches(
+            gate_snapshots,
+            candidate=gate_input,
+            created_at=campaign.created_at,
+            current_gate=expected_release_gate,
+            current_diff=expected_diff,
+            scenario_ids=expected_scenario_ids,
+            evaluator_versions=expected_evaluator_versions,
+            campaign_root=campaign_root,
+            strict=strict,
+            campaign_stack=campaign_stack,
+            verification_context=verification_context,
+        )
     except _CampaignBaselineError:
         issues.append(
             _issue(
@@ -1456,7 +1989,7 @@ def _verify_campaign_summary_facts(
     )
     facts_match = all(
         (
-            summary.get("schema_version") == 1,
+            summary.get("schema_version") == SUPPORTED_CAMPAIGN_SCHEMA_VERSION,
             campaign.id == campaign_id,
             campaign.status.value == "completed",
             campaign.created_at == agent_version.created_at,
@@ -1495,6 +2028,7 @@ def _verify_campaign_summary_facts(
             gate_input.metrics == metrics,
             gate_input.scenario_by_run == scenario_by_run,
             set(gate_input.scenario_ids) == expected_scenario_ids,
+            gate_input.scenario_sha256_by_id == scenario_digest_by_id,
             gate_input.evaluator_versions == expected_evaluator_versions,
             gate_input.evidence_verified is True,
             summary.get("failure_count") == failure_count,
@@ -1502,6 +2036,7 @@ def _verify_campaign_summary_facts(
             len(regressions) == failure_count,
             expected_plan_evidence == actual_plan_rows,
             comparison_matches,
+            gate_history_matches,
             regression_mappings_match,
             release_gate == expected_release_gate,
             release_gate.campaign_id == campaign_id,
@@ -1511,7 +2046,6 @@ def _verify_campaign_summary_facts(
                 if isinstance(baseline_campaign_id, str)
                 else None
             ),
-            release_gate.policy_version == "release_gate.v1",
             release_gate.mis_approval_id == expected_approval_id,
             release_gate.evidence_refs == gate_input.evidence_refs,
             release_gate.created_at == campaign.created_at,
@@ -1673,6 +2207,7 @@ def _regression_matches_verified_facts(
                 "persona": scenario_json["persona"],
                 "goal": scenario_json["goal"],
                 "challenges": scenario_json["challenges"],
+                "expectations": scenario_json["expectations"],
             },
             expected={
                 "evaluation_status": "pass",
@@ -1696,6 +2231,72 @@ def _regression_matches_verified_facts(
     return regression == expected_regression
 
 
+def _governed_gate_history_matches(
+    snapshots: tuple[VerifiedGateSnapshot, ...],
+    *,
+    candidate: CampaignGateInput,
+    created_at: datetime,
+    current_gate: ReleaseGateDecision,
+    current_diff: Mapping[str, object],
+    scenario_ids: set[str],
+    evaluator_versions: list[str],
+    campaign_root: Path,
+    strict: bool,
+    campaign_stack: frozenset[str],
+    verification_context: VerificationContext,
+) -> bool:
+    if not snapshots:
+        return False
+    for snapshot in snapshots:
+        try:
+            gate = ReleaseGateDecision.model_validate_json(snapshot.release_gate)
+            diff = json.loads(
+                snapshot.baseline_candidate_diff.decode("utf-8"),
+                parse_constant=_reject_json_constant,
+            )
+            if gate == current_gate and diff == current_diff:
+                continue
+            baseline = _baseline_gate_input(
+                diff,
+                scenario_ids=scenario_ids,
+                evaluator_versions=evaluator_versions,
+                campaign_root=campaign_root,
+                strict=strict,
+                campaign_stack=campaign_stack,
+                verification_context=verification_context,
+            )
+            approval_id = stable_id(
+                "apoc",
+                candidate.campaign_id,
+                baseline.campaign_id if baseline is not None else "standalone",
+                gate.policy_version,
+            )
+            expected_gate = evaluate_release_gate_for_policy(
+                gate.policy_version,
+                candidate,
+                baseline=baseline,
+                created_at=created_at,
+                mis_approval_id=approval_id,
+            )
+            expected_diff = _expected_comparison_payload(candidate, baseline)
+        except (
+            UnicodeError,
+            json.JSONDecodeError,
+            ValidationError,
+            TypeError,
+            ValueError,
+            RecursionError,
+        ):
+            return False
+        if (
+            gate.id != snapshot.gate_id
+            or gate != expected_gate
+            or diff != expected_diff
+        ):
+            return False
+    return True
+
+
 def _baseline_gate_input(
     diff_payload: object,
     *,
@@ -1704,6 +2305,7 @@ def _baseline_gate_input(
     campaign_root: Path,
     strict: bool,
     campaign_stack: frozenset[str],
+    verification_context: VerificationContext,
 ) -> CampaignGateInput | None:
     if not isinstance(diff_payload, dict):
         raise ValueError("comparison evidence must be an object")
@@ -1724,6 +2326,7 @@ def _baseline_gate_input(
             baseline_campaign_id,
             strict=strict,
             _campaign_stack=campaign_stack,
+            _verification_context=verification_context,
         )
     except EvidenceError:
         raise _CampaignBaselineError from None
@@ -2174,6 +2777,7 @@ def _verify_run(campaign_id: str, run_path: Path, *, strict: bool) -> RunVerific
     scenario = _verify_scenario(run_id, verified_bytes.get("scenario.yaml"), issues)
     _verify_agent_envelope(
         run_id,
+        manifest,
         verified_bytes.get("agent_version.json"),
         issues,
     )
@@ -2261,6 +2865,7 @@ def _verify_scenario(
 
 def _verify_agent_envelope(
     run_id: str,
+    manifest: EvidenceManifest,
     artifact_bytes: bytes | None,
     issues: list[VerificationIssue],
 ) -> None:
@@ -2322,6 +2927,18 @@ def _verify_agent_envelope(
                 "agent_version.json",
                 "effective agent config does not match its version digest",
                 expected_sha256=agent_version.config_sha256,
+                actual_sha256=config_digest,
+            )
+        )
+    if config_digest != manifest.agent_config_sha256:
+        issues.append(
+            _run_issue(
+                run_id,
+                "manifest_agent_config_digest_mismatch",
+                "error",
+                MANIFEST_FILENAME,
+                "manifest agent config SHA-256 does not match effective config",
+                expected_sha256=manifest.agent_config_sha256,
                 actual_sha256=config_digest,
             )
         )
@@ -2659,6 +3276,19 @@ def _run_issue(
     )
 
 
+def _verification_budget_issue(
+    campaign_id: str,
+    context: VerificationContext,
+) -> VerificationIssue:
+    limit = context.exhausted_limit or "verification"
+    return _issue(
+        "verification_budget_exceeded",
+        "error",
+        campaign_id,
+        f"recursive campaign verification exceeded its global {limit} limit",
+    )
+
+
 def _issue(
     code: str,
     severity: Literal["error", "warning"],
@@ -2686,17 +3316,22 @@ __all__ = [
     "EvidenceInputError",
     "EvidencePathError",
     "EvidenceWriteError",
+    "GATE_SNAPSHOT_FILENAMES",
+    "GATE_SNAPSHOTS_DIRNAME",
     "MANIFEST_FILENAME",
     "RUN_ARTIFACT_FILENAMES",
     "RUN_FILENAMES",
     "RunVerification",
     "VerificationIssue",
+    "VerificationContext",
     "VerificationReport",
+    "VerifiedGateSnapshot",
     "VerifiedCampaignArtifact",
     "canonical_json_bytes",
     "contains_sensitive_fields",
     "deterministic_final_state",
     "sha256_bytes",
+    "is_symlink_or_reparse",
     "validate_path_component",
     "verify_campaign",
     "verified_campaign_json",
