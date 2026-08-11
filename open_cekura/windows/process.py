@@ -191,10 +191,17 @@ def run_bounded(
     else:
         popen_options["start_new_session"] = True
 
+    child_environment = os.environ.copy()
+    # The wrapper's output contract is UTF-8.  Windows Python otherwise uses
+    # the runner's legacy console code page even though stdout/stderr are pipes,
+    # which can make a valid Unicode argument fail while the child prints it.
+    child_environment["PYTHONIOENCODING"] = "utf-8"
+
     started = time.monotonic()
     process = subprocess.Popen(
         list(normalized),
         cwd=None if cwd is None else Path(cwd),
+        env=child_environment,
         stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
