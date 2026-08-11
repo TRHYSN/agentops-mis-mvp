@@ -1186,8 +1186,8 @@ class SQLiteRepository:
             raise AuthorityMappingError(
                 "MIS regression memory is not linked to the source run"
             )
-        if memory and memory.get("review_status") != "approved":
-            raise AuthorityMappingError("MIS regression memory must be approved")
+        if memory and memory.get("review_status") != "candidate":
+            raise AuthorityMappingError("MIS regression memory must remain a candidate")
         data = regression.model_dump(mode="json")
         return self._upsert(
             "reliability_regressions",
@@ -1352,10 +1352,6 @@ class SQLiteRepository:
             raise AuthorityMappingError(
                 "MIS plan evidence mapping requires governed campaign authority"
             )
-        if campaign_has_authority and manifest.mis_plan_evidence_manifest_id is None:
-            raise AuthorityMappingError(
-                "MIS plan evidence mapping is required for governed evidence"
-            )
         artifact = self._authority("artifact", manifest.mis_artifact_id)
         if artifact:
             if artifact.get("artifact_type") not in {
@@ -1456,8 +1452,9 @@ class SQLiteRepository:
             },
         )
 
-    def list_agents(self, *, limit: int = 50) -> list[dict[str, Any]]:
+    def list_agents(self, *, limit: int = 50, offset: int = 0) -> list[dict[str, Any]]:
         limit = self._limit(limit)
+        offset = self._offset(offset)
         return self._public_tree(
             self._fetchall(
                 """SELECT a.*,
@@ -1465,8 +1462,8 @@ class SQLiteRepository:
                  WHERE v.workspace_id=a.workspace_id AND v.agent_id=a.agent_id)
                  AS version_count
             FROM reliability_agents a WHERE a.workspace_id=?
-            ORDER BY a.created_at,a.agent_id LIMIT ?""",
-                (self.workspace_id, limit),
+            ORDER BY a.created_at,a.agent_id LIMIT ? OFFSET ?""",
+                (self.workspace_id, limit, offset),
             )
         )
 
@@ -1497,8 +1494,11 @@ class SQLiteRepository:
         agent["versions_truncated"] = versions_truncated
         return self._public_tree(agent)
 
-    def list_scenario_suites(self, *, limit: int = 50) -> list[dict[str, Any]]:
+    def list_scenario_suites(
+        self, *, limit: int = 50, offset: int = 0
+    ) -> list[dict[str, Any]]:
         limit = self._limit(limit)
+        offset = self._offset(offset)
         return self._public_tree(
             self._fetchall(
                 """SELECT s.*,
@@ -1506,8 +1506,8 @@ class SQLiteRepository:
                  WHERE c.workspace_id=s.workspace_id AND c.suite_id=s.suite_id)
                  AS scenario_count
             FROM reliability_scenario_suites s WHERE s.workspace_id=?
-            ORDER BY s.created_at,s.suite_id LIMIT ?""",
-                (self.workspace_id, limit),
+            ORDER BY s.created_at,s.suite_id LIMIT ? OFFSET ?""",
+                (self.workspace_id, limit, offset),
             )
         )
 
@@ -1531,15 +1531,17 @@ class SQLiteRepository:
         *,
         suite_id: str | None = None,
         limit: int = 50,
+        offset: int = 0,
     ) -> list[dict[str, Any]]:
         limit = self._limit(limit)
+        offset = self._offset(offset)
         sql = "SELECT * FROM reliability_scenarios WHERE workspace_id=?"
         params: list[Any] = [self.workspace_id]
         if suite_id is not None:
             sql += " AND suite_id=?"
             params.append(suite_id)
-        sql += " ORDER BY created_at,scenario_id LIMIT ?"
-        params.append(limit)
+        sql += " ORDER BY created_at,scenario_id LIMIT ? OFFSET ?"
+        params.extend((limit, offset))
         return [self._scenario_public(row) for row in self._fetchall(sql, params)]
 
     def get_scenario(self, scenario_id: str) -> dict[str, Any] | None:
@@ -1549,8 +1551,11 @@ class SQLiteRepository:
         )
         return None if row is None else self._scenario_public(row)
 
-    def list_campaigns(self, *, limit: int = 50) -> list[dict[str, Any]]:
+    def list_campaigns(
+        self, *, limit: int = 50, offset: int = 0
+    ) -> list[dict[str, Any]]:
         limit = self._limit(limit)
+        offset = self._offset(offset)
         return self._public_tree(
             self._fetchall(
                 """SELECT c.*,
@@ -1558,8 +1563,8 @@ class SQLiteRepository:
                  WHERE r.workspace_id=c.workspace_id AND r.campaign_id=c.campaign_id)
                  AS run_count
             FROM reliability_campaigns c WHERE c.workspace_id=?
-            ORDER BY c.created_at DESC,c.campaign_id LIMIT ?""",
-                (self.workspace_id, limit),
+            ORDER BY c.created_at DESC,c.campaign_id LIMIT ? OFFSET ?""",
+                (self.workspace_id, limit, offset),
             )
         )
 
@@ -1580,8 +1585,10 @@ class SQLiteRepository:
         *,
         campaign_id: str | None = None,
         limit: int = 50,
+        offset: int = 0,
     ) -> list[dict[str, Any]]:
         limit = self._limit(limit)
+        offset = self._offset(offset)
         sql = """SELECT r.*,
             (SELECT COUNT(*) FROM reliability_conversation_turns t
              WHERE t.workspace_id=r.workspace_id AND t.run_id=r.run_id) AS turn_count,
@@ -1594,8 +1601,8 @@ class SQLiteRepository:
         if campaign_id is not None:
             sql += " AND r.campaign_id=?"
             params.append(campaign_id)
-        sql += " ORDER BY r.created_at,r.run_id LIMIT ?"
-        params.append(limit)
+        sql += " ORDER BY r.created_at,r.run_id LIMIT ? OFFSET ?"
+        params.extend((limit, offset))
         return self._public_tree(self._fetchall(sql, params))
 
     def get_run(self, run_id: str) -> dict[str, Any] | None:
@@ -1757,15 +1764,17 @@ class SQLiteRepository:
         *,
         run_id: str | None = None,
         limit: int = 50,
+        offset: int = 0,
     ) -> list[dict[str, Any]]:
         limit = self._limit(limit)
+        offset = self._offset(offset)
         sql = "SELECT * FROM reliability_failures WHERE workspace_id=?"
         params: list[Any] = [self.workspace_id]
         if run_id is not None:
             sql += " AND run_id=?"
             params.append(run_id)
-        sql += " ORDER BY created_at,failure_id LIMIT ?"
-        params.append(limit)
+        sql += " ORDER BY created_at,failure_id LIMIT ? OFFSET ?"
+        params.extend((limit, offset))
         return [self._failure_public(row) for row in self._fetchall(sql, params)]
 
     def get_failure(self, failure_id: str) -> dict[str, Any] | None:
@@ -1780,8 +1789,10 @@ class SQLiteRepository:
         *,
         campaign_id: str | None = None,
         limit: int = 50,
+        offset: int = 0,
     ) -> list[dict[str, Any]]:
         limit = self._limit(limit)
+        offset = self._offset(offset)
         sql = """SELECT c.*,COUNT(m.failure_id) AS member_count
             FROM reliability_failure_clusters c
             LEFT JOIN reliability_failure_cluster_members m
@@ -1793,8 +1804,8 @@ class SQLiteRepository:
             params.append(campaign_id)
         sql += """ GROUP BY c.workspace_id,c.cluster_id,c.schema_version,
             c.campaign_id,c.signature,c.created_at
-            ORDER BY c.created_at,c.cluster_id LIMIT ?"""
-        params.append(limit)
+            ORDER BY c.created_at,c.cluster_id LIMIT ? OFFSET ?"""
+        params.extend((limit, offset))
         return self._public_tree(self._fetchall(sql, params))
 
     def get_failure_cluster(self, cluster_id: str) -> dict[str, Any] | None:
@@ -1832,16 +1843,27 @@ class SQLiteRepository:
         result["members_truncated"] = members_truncated
         return self._public_tree(result)
 
-    def list_regressions(self, *, limit: int = 50) -> list[dict[str, Any]]:
+    def list_regressions(
+        self,
+        *,
+        scenario_id: str | None = None,
+        source_run_id: str | None = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> list[dict[str, Any]]:
         limit = self._limit(limit)
-        return [
-            self._regression_public(row)
-            for row in self._fetchall(
-                """SELECT * FROM reliability_regressions WHERE workspace_id=?
-                ORDER BY created_at,regression_id LIMIT ?""",
-                (self.workspace_id, limit),
-            )
-        ]
+        offset = self._offset(offset)
+        sql = "SELECT * FROM reliability_regressions WHERE workspace_id=?"
+        params: list[Any] = [self.workspace_id]
+        if scenario_id is not None:
+            sql += " AND scenario_id=?"
+            params.append(scenario_id)
+        if source_run_id is not None:
+            sql += " AND source_run_id=?"
+            params.append(source_run_id)
+        sql += " ORDER BY created_at,regression_id LIMIT ? OFFSET ?"
+        params.extend((limit, offset))
+        return [self._regression_public(row) for row in self._fetchall(sql, params)]
 
     def get_regression(self, regression_id: str) -> dict[str, Any] | None:
         row = self._fetchone(
@@ -1851,16 +1873,23 @@ class SQLiteRepository:
         )
         return None if row is None else self._regression_public(row)
 
-    def list_release_gates(self, *, limit: int = 50) -> list[dict[str, Any]]:
+    def list_release_gates(
+        self,
+        *,
+        campaign_id: str | None = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> list[dict[str, Any]]:
         limit = self._limit(limit)
-        return [
-            self._gate_public(row)
-            for row in self._fetchall(
-                """SELECT * FROM reliability_release_gates WHERE workspace_id=?
-                ORDER BY created_at,gate_id LIMIT ?""",
-                (self.workspace_id, limit),
-            )
-        ]
+        offset = self._offset(offset)
+        sql = "SELECT * FROM reliability_release_gates WHERE workspace_id=?"
+        params: list[Any] = [self.workspace_id]
+        if campaign_id is not None:
+            sql += " AND campaign_id=?"
+            params.append(campaign_id)
+        sql += " ORDER BY created_at,gate_id LIMIT ? OFFSET ?"
+        params.extend((limit, offset))
+        return [self._gate_public(row) for row in self._fetchall(sql, params)]
 
     def get_release_gate(self, gate_id: str) -> dict[str, Any] | None:
         row = self._fetchone(
@@ -1870,14 +1899,17 @@ class SQLiteRepository:
         )
         return None if row is None else self._gate_public(row)
 
-    def list_evidence_manifests(self, *, limit: int = 50) -> list[dict[str, Any]]:
+    def list_evidence_manifests(
+        self, *, limit: int = 50, offset: int = 0
+    ) -> list[dict[str, Any]]:
         limit = self._limit(limit)
+        offset = self._offset(offset)
         return [
             self._manifest_public(row)
             for row in self._fetchall(
                 """SELECT * FROM reliability_evidence_manifests WHERE workspace_id=?
-                ORDER BY created_at,manifest_id LIMIT ?""",
-                (self.workspace_id, limit),
+                ORDER BY created_at,manifest_id LIMIT ? OFFSET ?""",
+                (self.workspace_id, limit, offset),
             )
         ]
 
@@ -2364,6 +2396,14 @@ class SQLiteRepository:
         if isinstance(value, bool) or not isinstance(value, int):
             raise ValueError("limit must be an integer")
         return max(1, min(value, 200))
+
+    @staticmethod
+    def _offset(value: int) -> int:
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise ValueError("offset must be an integer")
+        if not 0 <= value <= 1_000_000:
+            raise ValueError("offset must be between 0 and 1000000")
+        return value
 
     def _scenario_public(self, row: dict[str, Any]) -> dict[str, Any]:
         result = dict(row)

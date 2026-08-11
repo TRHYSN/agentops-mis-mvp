@@ -211,8 +211,8 @@ def open_database(path: Path) -> sqlite3.Connection:
             memory_id,workspace_id,memory_type,task_id,source_ref,review_status
         ) VALUES(?,?,?,?,?,?)""",
         [
-            ("mem_a", "ws-a", "failure_case", "tsk_a", "run_a", "approved"),
-            ("mem_b", "ws-b", "failure_case", "tsk_b", "run_b", "approved"),
+            ("mem_a", "ws-a", "failure_case", "tsk_a", "run_a", "candidate"),
+            ("mem_b", "ws-b", "failure_case", "tsk_b", "run_b", "candidate"),
         ],
     )
     conn.executemany(
@@ -408,7 +408,7 @@ def open_actual_mis_database(path: Path) -> sqlite3.Connection:
             "run_a",
             "tsk_a",
             "agt_a",
-            "approved",
+            "candidate",
             "[]",
             timestamp,
             timestamp,
@@ -885,6 +885,35 @@ def test_full_graph_round_trips_as_workspace_bounded_api_read_models(
         assert other_workspace.list_agents() == []
         assert other_workspace.get_campaign(graph["campaign"].id) is None
         assert other_workspace.get_run(graph["run"].id) is None
+    finally:
+        conn.close()
+
+
+def test_list_read_models_support_stable_offset_and_vertical_filters(
+    tmp_path: Path,
+) -> None:
+    _, sqlite_repository = storage_modules()
+    conn = open_database(tmp_path / "pagination.db")
+    try:
+        repo = sqlite_repository.SQLiteRepository(conn, workspace_id="ws-a")
+        repo.initialize_schema()
+        graph = domain_graph()
+        persist_graph(repo, graph)
+
+        assert repo.list_agents(limit=10, offset=1) == []
+        assert repo.list_scenario_suites(limit=10, offset=1) == []
+        assert repo.list_scenarios(limit=10, offset=1) == []
+        assert repo.list_campaigns(limit=10, offset=1) == []
+        assert repo.list_runs(limit=10, offset=1) == []
+        assert repo.list_failures(limit=10, offset=1) == []
+        assert repo.list_failure_clusters(limit=10, offset=1) == []
+        assert repo.list_regressions(limit=10, offset=1) == []
+        assert repo.list_release_gates(limit=10, offset=1) == []
+        assert repo.list_evidence_manifests(limit=10, offset=1) == []
+
+        assert repo.list_regressions(scenario_id="unknown") == []
+        assert repo.list_regressions(source_run_id="unknown") == []
+        assert repo.list_release_gates(campaign_id="unknown") == []
     finally:
         conn.close()
 
@@ -1574,12 +1603,12 @@ def test_governed_gate_regression_and_evidence_require_semantic_authority(
         with pytest.raises(repository.AuthorityMappingError, match="source run"):
             repo.upsert_regression(graph["regression"])
         conn.execute(
-            "UPDATE memories SET source_ref='run_a',review_status='candidate' WHERE memory_id='mem_a'"
+            "UPDATE memories SET source_ref='run_a',review_status='approved' WHERE memory_id='mem_a'"
         )
-        with pytest.raises(repository.AuthorityMappingError, match="approved"):
+        with pytest.raises(repository.AuthorityMappingError, match="candidate"):
             repo.upsert_regression(graph["regression"])
         conn.execute(
-            "UPDATE memories SET review_status='approved' WHERE memory_id='mem_a'"
+            "UPDATE memories SET review_status='candidate' WHERE memory_id='mem_a'"
         )
 
         conn.execute(
@@ -1600,16 +1629,26 @@ def test_governed_gate_regression_and_evidence_require_semantic_authority(
             "UPDATE approvals SET decision='approved' WHERE approval_id='ap_a'"
         )
 
+        conn.execute(
+            """INSERT INTO artifacts(
+                artifact_id,task_id,run_id,artifact_type,content_hash
+            ) VALUES(?,?,?,?,?)""",
+            ("art_without_plan_evidence", "tsk_a", "run_a", "evidence", "a" * 64),
+        )
         missing_plan_evidence = graph["manifest"].model_copy(
             update={
                 "id": "ocmanifest_missing_plan_evidence",
+                "mis_artifact_id": "art_without_plan_evidence",
                 "mis_plan_evidence_manifest_id": None,
             }
         )
-        with pytest.raises(
-            repository.AuthorityMappingError, match="plan evidence mapping"
-        ):
-            repo.upsert_evidence_manifest(missing_plan_evidence)
+        assert repo.upsert_evidence_manifest(missing_plan_evidence) == "created"
+        assert (
+            repo.get_evidence_manifest(missing_plan_evidence.id)[
+                "mis_plan_evidence_manifest_id"
+            ]
+            is None
+        )
 
         conn.execute(
             """INSERT INTO artifacts(
