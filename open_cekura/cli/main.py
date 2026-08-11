@@ -14,12 +14,23 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="open-cekura", description="OpenCekura Reliability Lab CLI")
     commands = parser.add_subparsers(dest="command", required=True)
 
+    doctor = commands.add_parser("doctor", help="Check Windows development prerequisites.")
+    doctor.set_defaults(handler=doctor_command)
+
     scenario = commands.add_parser("scenario", help="Validate versioned Scenario contracts.")
     scenario_commands = scenario.add_subparsers(dest="scenario_command", required=True)
     validate = scenario_commands.add_parser("validate", help="Validate one Scenario YAML file.")
     validate.add_argument("path", type=Path)
     validate.set_defaults(handler=scenario_validate)
     return parser
+
+
+def doctor_command(_args: argparse.Namespace) -> int:
+    from open_cekura.windows import doctor
+
+    report = doctor.run_doctor(repo_root=doctor.find_repo_root(Path.cwd()))
+    print(doctor.render_report(report))
+    return 0 if report.ok else 1
 
 
 def scenario_validate(args: argparse.Namespace) -> int:

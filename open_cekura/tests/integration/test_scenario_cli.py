@@ -4,6 +4,7 @@ import json
 import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -59,3 +60,20 @@ def test_scenario_validate_command_fails_nonzero_on_incompatible_version(tmp_pat
     assert payload["error"] == "scenario_contract_error"
     assert "schema_version" in payload["message"]
     assert payload["token_omitted"] is True
+
+
+def test_doctor_command_reuses_the_windows_doctor(
+    monkeypatch,
+    capsys,
+) -> None:
+    from open_cekura.cli import main as cli_main
+    from open_cekura.windows import doctor
+
+    report = SimpleNamespace(ok=True)
+    monkeypatch.setattr(doctor, "run_doctor", lambda **kwargs: report)
+    monkeypatch.setattr(doctor, "render_report", lambda value: "doctor-safe-report")
+
+    result = cli_main.main(["doctor"])
+
+    assert result == 0
+    assert capsys.readouterr().out.strip() == "doctor-safe-report"
