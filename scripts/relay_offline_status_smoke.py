@@ -426,7 +426,12 @@ def build_formal_bundle(destination: Path) -> tuple[Path, str, bytes, str]:
     backend = load_backend()
     wheel_dir = destination / "wheel-build"
     wheel_dir.mkdir()
-    wheel_name = backend.build_wheel(str(wheel_dir))
+    wheel_name = backend.build_wheel(
+        str(wheel_dir),
+        config_settings={
+            backend.DISTRIBUTION_CONFIG_KEY: backend.RELAY_DISTRIBUTION,
+        },
+    )
     wheel_data = (wheel_dir / wheel_name).read_bytes()
     version = str(backend.VERSION)
     commit = git_output("rev-parse", "HEAD")

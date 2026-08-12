@@ -160,8 +160,17 @@ def main() -> int:
             second = output / "second"
             first.mkdir()
             second.mkdir()
-            wheel_name = backend.build_wheel(str(first))
-            second_wheel_name = backend.build_wheel(str(second))
+            relay_config = {
+                backend.DISTRIBUTION_CONFIG_KEY: backend.RELAY_DISTRIBUTION,
+            }
+            wheel_name = backend.build_wheel(
+                str(first),
+                config_settings=relay_config,
+            )
+            second_wheel_name = backend.build_wheel(
+                str(second),
+                config_settings=relay_config,
+            )
             wheel_reproducible = (
                 wheel_name == second_wheel_name
                 and (first / wheel_name).read_bytes()
@@ -195,13 +204,17 @@ def main() -> int:
             prepared_root = output / "prepared"
             prepared_wheel_output = output / "prepared-wheel"
             prepared_wheel_output.mkdir()
-            prepared_name = backend.prepare_metadata_for_build_wheel(str(prepared_root))
+            prepared_name = backend.prepare_metadata_for_build_wheel(
+                str(prepared_root),
+                config_settings=relay_config,
+            )
             prepared_dist_info = prepared_root / prepared_name
             custom_metadata = prepared_dist_info / "licenses" / "agentops-build-contract.json"
             custom_metadata.parent.mkdir()
             custom_metadata.write_text('{"schema_version":1}\n', encoding="utf-8")
             prepared_wheel_name = backend.build_wheel(
                 str(prepared_wheel_output),
+                config_settings=relay_config,
                 metadata_directory=str(prepared_root),
             )
             with zipfile.ZipFile(prepared_wheel_output / prepared_wheel_name) as wheel:

@@ -121,7 +121,12 @@ def config_payload(
 
 def build_installed_tree(root: Path, wheel_directory: Path) -> str:
     root.chmod(0o755)
-    wheel_name = backend.build_wheel(str(wheel_directory))
+    wheel_name = backend.build_wheel(
+        str(wheel_directory),
+        config_settings={
+            backend.DISTRIBUTION_CONFIG_KEY: backend.RELAY_DISTRIBUTION,
+        },
+    )
     wheel_path = wheel_directory / wheel_name
     version = backend.VERSION
     commit = "1" * 40
