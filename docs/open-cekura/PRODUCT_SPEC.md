@@ -8,7 +8,7 @@ Source issue: `geogejoy107-jpg/agentops-mis-mvp#123`
 
 Canonical product context: Notion page `3b96adfd-d920-81cf-9f99-d2990deea005`
 
-Execution branch: `feat/open-cekura-windows-v0`
+Execution branch: `codex/open-cekura-windows-v0`
 Starting commit: `99ce51d693f1d646ea84acc2f7f376bde1a95a9a`
 
 ## Product definition
@@ -57,6 +57,7 @@ OpenCekura may own vertical business tables, but it must not create a second Tas
 | EvidenceManifest | Artifact and Evidence | `mis_artifact_id`, optional plan-evidence manifest ID |
 | ReleaseGateDecision | Quality Gate / Approval | `mis_approval_id` or equivalent authoritative gate reference |
 | RegressionCase | Memory and future Plan input | `mis_memory_id` |
+| RegressionReplayMapping | Source Memory/Evaluation/Run to replay Run | typed immutable mapping row; source `mis_memory_id` |
 
 MIS IDs are mappings, not values inferred from string shape. The existing Human Auth, owner, session, RBAC, workspace visibility, Audit chain, and Agent Gateway remain authoritative.
 
@@ -77,6 +78,7 @@ The following are explicit versioned models, not unstructured catch-all JSON blo
 - `FailureCase`
 - `FailureCluster`
 - `RegressionCase`
+- `RegressionReplayMapping`
 - `ReleaseGateDecision`
 - `EvidenceManifest`
 
@@ -144,11 +146,42 @@ python -m open_cekura.cli.main doctor
 python -m open_cekura.cli.main scenario validate examples/open-cekura/scenarios/basic.yaml
 python -m open_cekura.cli.main campaign run --suite examples/open-cekura/scenarios --agent mock
 python -m open_cekura.cli.main campaign compare --baseline <id> --candidate <id>
+python -m open_cekura.cli.main regression replay --campaign <source-id> --version candidate
 python -m open_cekura.cli.main gate evaluate --campaign <id>
-python -m open_cekura.cli.main evidence verify --campaign <id>
+python -m open_cekura.cli.main evidence verify --campaign <id> --workspace local-demo --db agentops_mis.db
 ```
 
-The existing MIS API hosts `/mis-api/reliability/*`. The existing Vite application hosts a `Reliability Lab` workspace feature with Overview, Agents, Scenario Suites, Campaigns, Run Detail, Failures, Regression Suite, and Release Gates. v0 prioritizes complete read-only evidence inspection over a visual scenario editor.
+Regression replay is a governed next Campaign, not a direct adapter-only
+simulation. Before it creates the target, the service verifies the source
+Evidence tree, reconciles it with MIS Task/Plan/Run/Evaluation/Artifact/Memory/
+Approval/Audit authority, validates every persisted `RegressionCase`, and
+reconstructs each referenced Scenario from typed SQLite columns. Replay-local
+Scenario IDs are deterministically derived after this validation because the
+source IDs remain immutably bound to their original suite.
+
+Each source RegressionCase produces one typed mapping from source Campaign, Run,
+Evaluation, evaluator, Scenario, canonical input snapshot, and candidate MIS
+Memory to its replay Run and replay-local Scenario. The target graph, immutable
+mapping rows, MIS mappings, and publication outbox commit in the same SQLite
+transaction. Repeating the same source/workspace/version/contracts request is
+idempotent; source authority drift, a conflicting stable mapping, an empty
+regression set, or a changed snapshot fails closed without a partial target.
+
+Campaign Evidence envelope v3 always includes canonical
+`regression_replay.json`: `null` for an ordinary Campaign and a strict envelope
+containing an ordered mapping array for a replay target. `campaign_summary.json`
+stores only the mapping IDs plus the SHA-256 of that array's canonical JSON
+bytes, not a second copy of the mappings. Offline verification recursively
+verifies source Evidence with bounded cycle/depth/work limits. Subsequent
+`campaign compare` and `gate evaluate` operations must preserve the replay
+artifact and pointer rather than silently replacing them with `null`.
+
+The existing backend registers `/api/reliability/*`; the Vite browser client uses
+`/mis-api/reliability/*`, which the existing proxy rewrites to that backend
+namespace. The existing Vite application hosts a `Reliability Lab` workspace
+feature with Overview, Agents, Scenario Suites, Campaigns, Run Detail, Failures,
+Regression Suite, and Release Gates. v0 prioritizes complete read-only evidence
+inspection over a visual scenario editor.
 
 ## Completion criteria
 

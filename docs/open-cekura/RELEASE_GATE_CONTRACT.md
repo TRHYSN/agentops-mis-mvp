@@ -27,7 +27,16 @@ A `ReleaseGateDecision` is a versioned, explanatory domain object:
 
 ## Inputs
 
-The policy consumes persisted campaign summaries and deterministic EvaluationResults. A comparison gate additionally consumes the baseline summary. Inputs identify exact scenario SHA-256 mappings, agent versions, evaluator versions, and evidence manifests. Matching scenario IDs with changed contract bytes are incompatible. Missing, incompatible, or evaluator-error inputs cannot be treated as a passing comparison; both candidate and baseline deterministic error rates must be available and zero.
+The policy consumes persisted campaign summaries and deterministic EvaluationResults. A comparison gate additionally consumes the baseline summary. Inputs identify exact scenario semantic SHA-256 mappings, agent versions, evaluator versions, and evidence manifests. Before comparison, both campaigns must have identical:
+
+- `scenario_suite_sha256` and scenario ID-to-run-count multiset;
+- `scenario_schema_version`;
+- `evaluator_policy_sha256` and evaluator version set;
+- `mock_backend_version`;
+- `tool_contract_version`;
+- `deterministic_mode=true` and `random_seed`.
+
+Matching IDs with different semantic contracts, duplicate-run dilution, missing inputs, and invalid derived hashes are incompatible. The operation returns `comparison_status: INCOMPARABLE`, exits non-zero, and writes no Approval or passing gate. Both candidate and baseline deterministic error rates must be available and zero.
 
 Campaign IDs are locators only. Policy logic must never branch on a name, ID, fixture path, or the words “baseline” and “candidate.”
 
@@ -112,7 +121,7 @@ bound to the latest chained head-transition Audit, so coordinated rollback to
 an older otherwise-valid Gate and Audit fails closed. Filesystem evidence cannot
 promote itself to MIS authority merely by being internally rehashed.
 
-Campaign evidence schema v2 stores each decision and its exact comparison diff
+Campaign evidence schema v3 stores each decision and its exact comparison diff
 once under `gates/<gate_id>/`. `gate_history.json` hashes the full snapshot set
 and explicitly names the current gate; the root gate and diff are current
 aliases. Replaying the same candidate/baseline/policy preserves all snapshot and
