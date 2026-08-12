@@ -93,7 +93,7 @@ def publication_slot(
     # The final evidence path is ``artifact_root / campaign_id``.  The lock and
     # recovery slot must use that exact namespace too; including workspace here
     # would permit two writers to target one final directory concurrently.
-    slot_id = stable_id("ocpubslot", os.path.normcase(campaign_id))
+    slot_id = stable_id("ocpubslot", campaign_id.casefold())
     return artifact_root / PUBLICATION_ROOT_NAME / slot_id
 
 

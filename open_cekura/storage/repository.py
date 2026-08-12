@@ -17,6 +17,7 @@ from open_cekura.domain.models import (
     ObservedToolCall,
     Persona,
     RegressionCase,
+    RegressionReplayMapping,
     ReleaseGateDecision,
     Scenario,
     ScenarioSuite,
@@ -113,6 +114,7 @@ class Repository(Protocol):
     def get_failure(self, failure_id: str) -> dict[str, Any] | None: ...
 
     def upsert_regression(self, regression: RegressionCase) -> str: ...
+    def upsert_regression_replay(self, mapping: RegressionReplayMapping) -> str: ...
     def list_regressions(
         self,
         *,
@@ -120,6 +122,9 @@ class Repository(Protocol):
         source_run_id: str | None = None,
         limit: int = 50,
         offset: int = 0,
+    ) -> list[dict[str, Any]]: ...
+    def list_regression_replays(
+        self, target_campaign_id: str
     ) -> list[dict[str, Any]]: ...
     def get_regression(self, regression_id: str) -> dict[str, Any] | None: ...
 

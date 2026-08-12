@@ -394,7 +394,7 @@ def test_schema_initialization_and_empty_overview_use_the_real_mis_schema(
             query={},
             workspace_id="workspace-a",
         )
-        assert table_count == 19
+        assert table_count == 20
         assert status == 200
         assert payload["overview"]["counts"] == {
             "agents": 0,

@@ -4,6 +4,8 @@ import asyncio
 from datetime import datetime, timezone
 from pathlib import Path
 
+import yaml
+
 from open_cekura.campaigns.runner import execute_mock_campaign
 from open_cekura.domain.enums import (
     CampaignStatus,
@@ -128,3 +130,47 @@ def test_campaign_ids_scope_run_identity_without_changing_semantic_outcome() -> 
     assert {record.simulation.run.id for record in first.records}.isdisjoint(
         {record.simulation.run.id for record in replay.records}
     )
+
+
+def test_suite_identity_and_scenario_digests_ignore_yaml_formatting(
+    tmp_path: Path,
+) -> None:
+    reformatted_suite = tmp_path / "scenarios"
+    reformatted_suite.mkdir()
+    for source in SCENARIO_SUITE.glob("*.yaml"):
+        payload = yaml.safe_load(source.read_text(encoding="utf-8"))
+        (reformatted_suite / source.name).write_bytes(
+            yaml.safe_dump(payload, sort_keys=True)
+            .replace("\n", "\r\n")
+            .encode("utf-8")
+        )
+
+    original = asyncio.run(
+        execute_mock_campaign(
+            suite_path=SCENARIO_SUITE,
+            config=MockAgentConfig.candidate(),
+            version="candidate",
+            campaign_id="occampaign_original_format",
+            workspace_id="local-demo",
+            created_at=NOW,
+        )
+    )
+    reformatted = asyncio.run(
+        execute_mock_campaign(
+            suite_path=reformatted_suite,
+            config=MockAgentConfig.candidate(),
+            version="candidate",
+            campaign_id="occampaign_reformatted",
+            workspace_id="local-demo",
+            created_at=NOW,
+        )
+    )
+
+    assert original.scenario_suite.id == reformatted.scenario_suite.id
+    assert {
+        record.scenario.id: record.scenario.source_sha256
+        for record in original.records
+    } == {
+        record.scenario.id: record.scenario.source_sha256
+        for record in reformatted.records
+    }

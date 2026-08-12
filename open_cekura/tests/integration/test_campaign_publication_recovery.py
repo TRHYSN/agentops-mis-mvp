@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import os
 import shutil
 import sqlite3
 import subprocess
@@ -106,6 +105,17 @@ def test_publication_rejects_reparse_private_root_before_staging(
     ).exists()
 
 
+def test_publication_slot_identity_is_platform_independent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(publication.os.path, "normcase", lambda value: value)
+
+    with pytest.raises(evidence_manifest.EvidencePathError):
+        publication.publication_slot(
+            tmp_path, workspace_id="workspace-a", campaign_id="Campaign-A"
+        )
+
+
 def test_publication_lock_covers_final_campaign_namespace(tmp_path: Path) -> None:
     artifacts = tmp_path / "artifacts"
     writer_a = publication.begin_publication(
@@ -136,30 +146,16 @@ def test_publication_lock_covers_final_campaign_namespace(tmp_path: Path) -> Non
     assert (writer_a.final_campaign / "marker.bin").read_bytes() == b"committed-a"
 
 
-@pytest.mark.skipif(
-    os.path.normcase("Campaign-A") != os.path.normcase("campaign-a"),
-    reason="filesystem case aliases are a Windows lock-domain contract",
-)
-def test_publication_lock_normalizes_windows_case_aliases(tmp_path: Path) -> None:
+def test_publication_rejects_cross_platform_case_aliases(tmp_path: Path) -> None:
     artifacts = tmp_path / "artifacts"
-    publication.begin_publication(
-        artifacts,
-        authority_id="authority-a",
-        workspace_id="workspace-a",
-        campaign_id="Shared-Campaign",
-        gate_id="gate-a",
-        publication_id="publication-a",
-        expected_previous_tree_sha256=None,
-    )
-
-    with pytest.raises(publication.PublicationError, match="pending"):
+    with pytest.raises(evidence_manifest.EvidencePathError):
         publication.begin_publication(
             artifacts,
-            authority_id="authority-b",
-            workspace_id="workspace-b",
-            campaign_id="shared-campaign",
-            gate_id="gate-b",
-            publication_id="publication-b",
+            authority_id="authority-a",
+            workspace_id="workspace-a",
+            campaign_id="Shared-Campaign",
+            gate_id="gate-a",
+            publication_id="publication-a",
             expected_previous_tree_sha256=None,
         )
 

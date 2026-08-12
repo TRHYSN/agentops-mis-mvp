@@ -15,6 +15,7 @@ from open_cekura.campaigns.service import (
     EXIT_EVIDENCE_INVALID,
     compare_campaigns,
     evaluate_campaign_gate,
+    replay_campaign_regressions,
     run_campaign,
     verify_campaign_evidence,
 )
@@ -85,12 +86,32 @@ def build_parser() -> argparse.ArgumentParser:
     evidence = commands.add_parser("evidence", help="Verify evidence bundles.")
     evidence_commands = evidence.add_subparsers(dest="evidence_command", required=True)
     verify = evidence_commands.add_parser(
-        "verify", help="Verify hashes and contracts without rewriting evidence."
+        "verify", help="Verify evidence and reconcile its authoritative MIS ledger."
     )
     verify.add_argument("--campaign", required=True)
-    verify.add_argument("--artifacts", type=Path)
     verify.add_argument("--strict", action="store_true")
+    _add_state_arguments(verify)
     verify.set_defaults(handler=evidence_verify)
+
+    regression = commands.add_parser(
+        "regression", help="Replay persisted RegressionCases."
+    )
+    regression_commands = regression.add_subparsers(
+        dest="regression_command", required=True
+    )
+    replay = regression_commands.add_parser(
+        "replay", help="Run persisted regressions as a governed Campaign."
+    )
+    replay.add_argument("--campaign", required=True, help="Source campaign ID.")
+    replay.add_argument(
+        "--version",
+        choices=("baseline", "candidate"),
+        default="candidate",
+        help="Mock profile for the replay Campaign (default: candidate).",
+    )
+    replay.add_argument("--campaign-id", help="Optional replay campaign ID.")
+    _add_state_arguments(replay)
+    replay.set_defaults(handler=regression_replay)
     return parser
 
 
@@ -173,11 +194,26 @@ def gate_evaluate(args: argparse.Namespace) -> int:
 def evidence_verify(args: argparse.Namespace) -> int:
     payload = verify_campaign_evidence(
         campaign_id=args.campaign,
+        workspace_id=args.workspace,
+        db_path=args.db,
         artifact_root=args.artifacts,
         strict=args.strict,
     )
     _print_json(payload)
     return 0 if payload["verified"] else EXIT_EVIDENCE_INVALID
+
+
+def regression_replay(args: argparse.Namespace) -> int:
+    payload = replay_campaign_regressions(
+        source_campaign_id=args.campaign,
+        version=args.version,
+        replay_campaign_id=args.campaign_id,
+        workspace_id=args.workspace,
+        db_path=args.db,
+        artifact_root=args.artifacts,
+    )
+    _print_json(payload)
+    return 0
 
 
 def _print_json(payload: object, *, file=None) -> None:
@@ -224,11 +260,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         ValueError,
     ) as exc:
         code = (
-            exc.code
-            if isinstance(exc, CampaignServiceError)
-            else "database_unavailable"
+            "database_unavailable"
             if isinstance(exc, sqlite3.Error)
-            else "operation_failed"
+            else str(getattr(exc, "code", "operation_failed"))
         )
         message = (
             "The MIS database operation failed."
@@ -243,16 +277,17 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
             if value
         )
-        _print_json(
-            {
-                "ok": False,
-                "operation": operation or "open_cekura",
-                "error": code,
-                "message": message,
-                "token_omitted": True,
-            },
-            file=sys.stderr,
-        )
+        payload = {
+            "ok": False,
+            "operation": operation or "open_cekura",
+            "error": code,
+            "message": message,
+            "token_omitted": True,
+        }
+        comparison_status = getattr(exc, "comparison_status", None)
+        if comparison_status is not None:
+            payload["comparison_status"] = str(comparison_status)
+        _print_json(payload, file=sys.stderr)
         return 2
 
 

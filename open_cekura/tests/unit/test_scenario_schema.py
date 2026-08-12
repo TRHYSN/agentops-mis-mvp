@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import hashlib
 from pathlib import Path
 
 import pytest
+import yaml
 from pydantic import ValidationError
 
 from open_cekura.scenarios.loader import (
@@ -125,6 +127,28 @@ def test_malformed_yaml_is_a_visible_contract_error(tmp_path: Path) -> None:
         load_scenario(path)
 
     assert str(path) in str(exc_info.value)
+
+
+def test_scenario_digest_is_canonical_across_yaml_order_and_line_endings(
+    tmp_path: Path,
+) -> None:
+    source = VALID_SCENARIO
+    reordered = yaml.safe_dump(yaml.safe_load(source), sort_keys=True).replace(
+        "\n", "\r\n"
+    )
+    first_path = tmp_path / "first.yaml"
+    second_path = tmp_path / "second.yaml"
+    first_path.write_bytes(source.encode("utf-8"))
+    second_path.write_bytes(reordered.encode("utf-8"))
+
+    first = load_scenario(first_path)
+    second = load_scenario(second_path)
+
+    assert hashlib.sha256(first_path.read_bytes()).hexdigest() != hashlib.sha256(
+        second_path.read_bytes()
+    ).hexdigest()
+    assert first == second
+    assert first.canonical_sha256() == second.canonical_sha256()
 
 
 def test_suite_rejects_duplicate_stable_ids(tmp_path: Path) -> None:

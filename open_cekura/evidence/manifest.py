@@ -26,6 +26,7 @@ from open_cekura.domain.models import (
     EvidenceManifest,
     ObservedToolCall,
     RegressionCase,
+    RegressionReplayMapping,
     ReleaseGateDecision,
     ScenarioSuite,
 )
@@ -36,9 +37,16 @@ from open_cekura.evaluation.aggregation import (
 )
 from open_cekura.release_gate.policy import (
     CampaignGateInput,
+    evaluator_policy_sha256,
     evaluate_release_gate_for_policy,
+    scenario_suite_sha256,
 )
 from open_cekura.scenarios.schema import ScenarioDefinition
+from open_cekura.simulation.mock_agent import (
+    DETERMINISTIC_RANDOM_SEED,
+    MOCK_BACKEND_VERSION,
+    TOOL_CONTRACT_VERSION,
+)
 
 
 MANIFEST_FILENAME = "evidence_manifest.json"
@@ -54,6 +62,7 @@ RUN_FILENAMES = frozenset((*RUN_ARTIFACT_FILENAMES, MANIFEST_FILENAME))
 CAMPAIGN_ARTIFACT_FILENAMES = (
     "baseline_candidate_diff.json",
     "gate_history.json",
+    "regression_replay.json",
     "release_gate.json",
     "regression_cases.json",
 )
@@ -65,8 +74,8 @@ GATE_SNAPSHOT_FILENAMES = frozenset(
 CAMPAIGN_FILENAMES = frozenset(
     (CAMPAIGN_SUMMARY_FILENAME, *CAMPAIGN_ARTIFACT_FILENAMES)
 )
-SUPPORTED_MANIFEST_SCHEMA_VERSION = 2
-SUPPORTED_CAMPAIGN_SCHEMA_VERSION = 2
+SUPPORTED_MANIFEST_SCHEMA_VERSION = 3
+SUPPORTED_CAMPAIGN_SCHEMA_VERSION = 3
 
 # Offline verification is intentionally bounded before allocation/parsing.  These
 # limits cover the public v0 evidence contract while preventing a local artifact
@@ -583,6 +592,7 @@ def validate_path_component(value: str, *, label: str) -> str:
     reserved_base = value.rstrip(" .").split(".", 1)[0].upper()
     if (
         value in {".", ".."}
+        or value != value.casefold()
         or not _SAFE_COMPONENT.fullmatch(value)
         or windows_path.drive
         or windows_path.root
@@ -1238,11 +1248,12 @@ def _verify_campaign_payload_shapes(
     payloads: Mapping[str, object | None],
     issues: list[VerificationIssue],
 ) -> None:
-    expected_shapes = {
+    expected_shapes: dict[str, type | tuple[type, ...]] = {
         "baseline_candidate_diff.json": dict,
         "gate_history.json": dict,
         "release_gate.json": dict,
         "regression_cases.json": list,
+        "regression_replay.json": (dict, type(None)),
     }
     for artifact_name, expected_type in expected_shapes.items():
         payload = payloads.get(artifact_name)
@@ -1670,6 +1681,7 @@ _STRUCTURED_SUMMARY_FIELDS = frozenset(
         "git_commit_sha",
         "failure_count",
         "regression_count",
+        "regression_replay",
     }
 )
 
@@ -1987,6 +1999,18 @@ def _verify_campaign_summary_facts(
         )
         for regression in regressions
     )
+    replay_provenance_matches = _regression_replay_provenance_matches(
+        campaign_id=campaign_id,
+        workspace_id=str(summary.get("workspace_id") or ""),
+        summary_pointer=summary.get("regression_replay"),
+        artifact=campaign_payloads.get("regression_replay.json"),
+        target_scenarios_by_id=scenarios_by_id,
+        target_scenario_by_run=scenario_by_run,
+        campaign_root=campaign_root,
+        strict=strict,
+        campaign_stack=campaign_stack,
+        verification_context=verification_context,
+    )
     facts_match = all(
         (
             summary.get("schema_version") == SUPPORTED_CAMPAIGN_SCHEMA_VERSION,
@@ -2030,6 +2054,15 @@ def _verify_campaign_summary_facts(
             set(gate_input.scenario_ids) == expected_scenario_ids,
             gate_input.scenario_sha256_by_id == scenario_digest_by_id,
             gate_input.evaluator_versions == expected_evaluator_versions,
+            gate_input.scenario_schema_version == 1,
+            gate_input.scenario_suite_sha256
+            == scenario_suite_sha256(1, scenario_digest_by_id),
+            gate_input.evaluator_policy_sha256
+            == evaluator_policy_sha256(expected_evaluator_versions),
+            gate_input.mock_backend_version == MOCK_BACKEND_VERSION,
+            gate_input.tool_contract_version == TOOL_CONTRACT_VERSION,
+            gate_input.deterministic_mode is True,
+            gate_input.random_seed == DETERMINISTIC_RANDOM_SEED,
             gate_input.evidence_verified is True,
             summary.get("failure_count") == failure_count,
             summary.get("regression_count") == len(regressions),
@@ -2038,6 +2071,7 @@ def _verify_campaign_summary_facts(
             comparison_matches,
             gate_history_matches,
             regression_mappings_match,
+            replay_provenance_matches,
             release_gate == expected_release_gate,
             release_gate.campaign_id == campaign_id,
             release_gate.baseline_campaign_id
@@ -2068,6 +2102,155 @@ def _verify_campaign_summary_facts(
             issues,
             "campaign summary facts do not match verified run evidence",
         )
+
+
+def _regression_replay_provenance_matches(
+    *,
+    campaign_id: str,
+    workspace_id: str,
+    summary_pointer: object,
+    artifact: object,
+    target_scenarios_by_id: Mapping[str, ScenarioDefinition],
+    target_scenario_by_run: Mapping[str, str],
+    campaign_root: Path,
+    strict: bool,
+    campaign_stack: frozenset[str],
+    verification_context: VerificationContext,
+) -> bool:
+    """Verify a replay edge using only immutable campaign Evidence."""
+
+    if artifact is None:
+        return summary_pointer is None
+    if (
+        not isinstance(artifact, dict)
+        or set(artifact)
+        != {"schema_version", "source_campaign_id", "target_campaign_id", "mappings"}
+        or artifact.get("schema_version") != 1
+        or artifact.get("target_campaign_id") != campaign_id
+        or not isinstance(artifact.get("source_campaign_id"), str)
+        or not isinstance(artifact.get("mappings"), list)
+        or not artifact["mappings"]
+    ):
+        return False
+    source_campaign_id = artifact["source_campaign_id"]
+    if (
+        source_campaign_id == campaign_id
+        or source_campaign_id in campaign_stack
+        or len(campaign_stack) >= MAX_COMPARISON_DEPTH
+    ):
+        return False
+    try:
+        mappings = TypeAdapter(list[RegressionReplayMapping]).validate_json(
+            canonical_json_bytes(artifact["mappings"])
+        )
+    except (ValidationError, TypeError, ValueError, RecursionError):
+        return False
+    mapping_ids = [mapping.id for mapping in mappings]
+    mapping_digest = sha256_bytes(
+        canonical_json_bytes([mapping.model_dump(mode="json") for mapping in mappings])
+    )
+    expected_pointer = {
+        "schema_version": 1,
+        "source_campaign_id": source_campaign_id,
+        "target_campaign_id": campaign_id,
+        "mapping_ids": mapping_ids,
+        "mapping_sha256": mapping_digest,
+    }
+    if (
+        summary_pointer != expected_pointer
+        or mapping_ids != sorted(mapping_ids)
+        or len(mapping_ids) != len(set(mapping_ids))
+    ):
+        return False
+    try:
+        source_report = verify_campaign(
+            campaign_root,
+            source_campaign_id,
+            strict=strict,
+            _campaign_stack=campaign_stack,
+            _verification_context=verification_context,
+        )
+    except EvidenceError:
+        return False
+    if not source_report.ok:
+        return False
+    try:
+        source_regressions_payload = verified_campaign_json(
+            source_report, "regression_cases.json"
+        )
+        source_regressions = TypeAdapter(list[RegressionCase]).validate_json(
+            canonical_json_bytes(source_regressions_payload)
+        )
+    except (EvidenceError, ValidationError, TypeError, ValueError, RecursionError):
+        return False
+    source_regression_by_id = {item.id: item for item in source_regressions}
+    source_scenario_by_run: dict[str, str] = {}
+    source_scenarios_by_id: dict[str, ScenarioDefinition] = {}
+    source_evaluations_by_id: dict[str, EvaluationResult] = {}
+    for run in source_report.runs:
+        loaded = _load_campaign_run_facts(run, [])
+        if loaded is None:
+            return False
+        scenario, _agent_version, _turns, _calls, _timing, evaluations = loaded
+        source_scenario_by_run[run.run_id] = scenario.id
+        source_scenarios_by_id[scenario.id] = scenario
+        source_evaluations_by_id.update({item.id: item for item in evaluations})
+    if {mapping.regression_case_id for mapping in mappings} != set(
+        source_regression_by_id
+    ):
+        return False
+    if {mapping.replay_run_id for mapping in mappings} != set(
+        target_scenario_by_run
+    ):
+        return False
+    if {mapping.replay_scenario_id for mapping in mappings} != set(
+        target_scenarios_by_id
+    ):
+        return False
+    for mapping in mappings:
+        regression = source_regression_by_id.get(mapping.regression_case_id)
+        source_scenario = source_scenarios_by_id.get(mapping.source_scenario_id)
+        replay_scenario = target_scenarios_by_id.get(mapping.replay_scenario_id)
+        evaluation = source_evaluations_by_id.get(
+            mapping.source_evaluation_result_id
+        )
+        if (
+            regression is None
+            or source_scenario is None
+            or replay_scenario is None
+            or evaluation is None
+            or mapping.source_campaign_id != source_campaign_id
+            or mapping.target_campaign_id != campaign_id
+            or mapping.source_run_id != regression.source_run_id
+            or mapping.source_scenario_id != regression.scenario_id
+            or source_scenario_by_run.get(mapping.source_run_id)
+            != mapping.source_scenario_id
+            or target_scenario_by_run.get(mapping.replay_run_id)
+            != mapping.replay_scenario_id
+            or evaluation.run_id != mapping.source_run_id
+            or evaluation.evaluator_id != mapping.evaluator_id
+            or f"evaluation:{evaluation.id}" not in regression.evidence_refs
+            or regression.evaluator_id != mapping.evaluator_id
+            or regression.mis_memory_id != mapping.mis_memory_id
+            or mapping.source_snapshot_sha256
+            != sha256_bytes(canonical_json_bytes(regression.original_input))
+            or mapping.source_scenario_sha256
+            != source_scenario.canonical_sha256()
+            or mapping.replay_scenario_sha256
+            != replay_scenario.canonical_sha256()
+            or replay_scenario.model_copy(update={"id": source_scenario.id})
+            != source_scenario
+            or mapping.id
+            != stable_id(
+                "ocreplaymap",
+                workspace_id,
+                campaign_id,
+                regression.id,
+                mapping.replay_run_id,
+            )
+        ):
+            return False
+    return True
 
 
 def _load_campaign_run_facts(
@@ -2775,6 +2958,21 @@ def _verify_run(campaign_id: str, run_path: Path, *, strict: bool) -> RunVerific
         verified_bytes[artifact_name] = artifact_bytes
 
     scenario = _verify_scenario(run_id, verified_bytes.get("scenario.yaml"), issues)
+    if (
+        scenario is not None
+        and scenario.canonical_sha256() != manifest.scenario_sha256
+    ):
+        issues.append(
+            _run_issue(
+                run_id,
+                "scenario_hash_mismatch",
+                "error",
+                "scenario.yaml",
+                "canonical Scenario contract SHA-256 does not match the manifest",
+                expected_sha256=manifest.scenario_sha256,
+                actual_sha256=scenario.canonical_sha256(),
+            )
+        )
     _verify_agent_envelope(
         run_id,
         manifest,

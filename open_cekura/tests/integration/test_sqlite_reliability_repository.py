@@ -623,7 +623,7 @@ def domain_graph(workspace_id: str = "ws-a") -> dict[str, Any]:
         mis_approval_id="ap_a" if workspace_id == "ws-a" else "ap_b",
     )
     manifest = EvidenceManifest(
-        **{**shared, "schema_version": 2},
+        **{**shared, "schema_version": 3},
         id="ocmanifest_basic",
         campaign_id=campaign.id,
         run_id=run.id,
@@ -880,7 +880,7 @@ def test_full_governed_graph_uses_the_real_mis_schema_without_fk_drift(
                 WHERE type='table' AND name LIKE 'reliability_%'"""
             )
         }
-        assert len(reliability_tables) == 19
+        assert len(reliability_tables) == 20
         assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
     finally:
         conn.close()

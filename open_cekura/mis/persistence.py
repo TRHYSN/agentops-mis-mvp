@@ -13,9 +13,10 @@ import re
 import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Any
 
-from open_cekura.campaigns.runner import CampaignExecution
+from open_cekura.campaigns.runner import CampaignExecution, MockCampaignPreparation
 from open_cekura.domain.enums import CampaignStatus, EvaluationStatus, RunFinalState
 from open_cekura.domain.ids import stable_id
 
@@ -44,6 +45,15 @@ class PersistedCampaignMappings:
     mis_tool_call_ids: dict[str, str]
     mis_evaluation_ids: dict[str, str]
     mis_memory_ids: dict[str, str]
+
+
+@dataclass(frozen=True, slots=True)
+class PreparedCampaignAuthority:
+    """Durable authority header state observed before campaign simulation."""
+
+    mappings: PersistedCampaignMappings
+    status: CampaignStatus
+    should_execute: bool
 
 
 _SAVEPOINTS = itertools.count()
@@ -116,29 +126,210 @@ def persist_campaign_execution(
     return result
 
 
-def _persist(
+def persist_campaign_preparation(
     conn: sqlite3.Connection,
-    execution: CampaignExecution,
+    preparation: MockCampaignPreparation,
     *,
     workspace_id: str,
-    mis: Any,
-    repository_type: type,
-) -> PersistedCampaignMappings:
-    repo = repository_type(conn, workspace_id=workspace_id)
+) -> PreparedCampaignAuthority:
+    """Commit-ready PENDING/RUNNING authority before adapter execution."""
 
-    created_at = execution.campaign.created_at.isoformat()
+    _validate_lifecycle_call(
+        conn,
+        preparation=preparation,
+        workspace_id=workspace_id,
+    )
+    import server as mis
+    from open_cekura.storage.repository import (
+        AuthorityMappingError,
+        RepositoryConflictError,
+        RepositoryError,
+    )
+    from open_cekura.storage.sqlite_repository import SQLiteRepository
+
+    savepoint = f"open_cekura_campaign_prepare_{next(_SAVEPOINTS)}"
+    conn.execute(f"SAVEPOINT {savepoint}")
+    try:
+        repo = SQLiteRepository(conn, workspace_id=workspace_id)
+        repo.initialize_schema()
+        existing = conn.execute(
+            """SELECT status FROM reliability_campaigns
+            WHERE workspace_id=? AND campaign_id=?""",
+            (workspace_id, preparation.campaign.id),
+        ).fetchone()
+        try:
+            existing_status = CampaignStatus(existing["status"]) if existing else None
+        except ValueError:
+            raise MISBridgeConflictError(
+                "invalid reliability campaign lifecycle state"
+            ) from None
+        if existing_status in {
+            CampaignStatus.RUNNING,
+            CampaignStatus.ERROR,
+            CampaignStatus.COMPLETED,
+        }:
+            mappings = _persist_campaign_header(
+                conn,
+                preparation=preparation,
+                workspace_id=workspace_id,
+                status=existing_status,
+                mis=mis,
+                repo=repo,
+                audit_lifecycle=False,
+            )
+            result = PreparedCampaignAuthority(
+                mappings=mappings,
+                status=existing_status,
+                should_execute=False,
+            )
+        else:
+            if existing_status is None:
+                _persist_campaign_header(
+                    conn,
+                    preparation=preparation,
+                    workspace_id=workspace_id,
+                    status=CampaignStatus.PENDING,
+                    mis=mis,
+                    repo=repo,
+                    audit_lifecycle=True,
+                )
+            mappings = _persist_campaign_header(
+                conn,
+                preparation=preparation,
+                workspace_id=workspace_id,
+                status=CampaignStatus.RUNNING,
+                mis=mis,
+                repo=repo,
+                audit_lifecycle=True,
+            )
+            result = PreparedCampaignAuthority(
+                mappings=mappings,
+                status=CampaignStatus.RUNNING,
+                should_execute=True,
+            )
+    except (AuthorityMappingError, RepositoryConflictError, RepositoryError) as exc:
+        conn.execute(f"ROLLBACK TO {savepoint}")
+        conn.execute(f"RELEASE {savepoint}")
+        raise MISBridgeConflictError(str(exc)) from exc
+    except Exception:
+        conn.execute(f"ROLLBACK TO {savepoint}")
+        conn.execute(f"RELEASE {savepoint}")
+        raise
+    conn.execute(f"RELEASE {savepoint}")
+    return result
+
+
+def persist_campaign_failure(
+    conn: sqlite3.Connection,
+    preparation: MockCampaignPreparation,
+    *,
+    workspace_id: str,
+    failure_category: str,
+) -> PersistedCampaignMappings:
+    """Close a started campaign with a bounded classification and no raw error."""
+
+    _validate_lifecycle_call(
+        conn,
+        preparation=preparation,
+        workspace_id=workspace_id,
+    )
+    if failure_category not in {
+        "simulation_error",
+        "simulation_runtime_error",
+        "simulation_service_error",
+        "post_simulation_error",
+    }:
+        raise ValueError("failure_category is not a supported safe classification")
+    import server as mis
+    from open_cekura.storage.repository import (
+        AuthorityMappingError,
+        RepositoryConflictError,
+        RepositoryError,
+    )
+    from open_cekura.storage.sqlite_repository import SQLiteRepository
+
+    savepoint = f"open_cekura_campaign_failure_{next(_SAVEPOINTS)}"
+    conn.execute(f"SAVEPOINT {savepoint}")
+    try:
+        repo = SQLiteRepository(conn, workspace_id=workspace_id)
+        repo.initialize_schema()
+        mappings = _persist_campaign_header(
+            conn,
+            preparation=preparation,
+            workspace_id=workspace_id,
+            status=CampaignStatus.ERROR,
+            mis=mis,
+            repo=repo,
+            audit_lifecycle=True,
+            failure_category=failure_category,
+        )
+    except (AuthorityMappingError, RepositoryConflictError, RepositoryError) as exc:
+        conn.execute(f"ROLLBACK TO {savepoint}")
+        conn.execute(f"RELEASE {savepoint}")
+        raise MISBridgeConflictError(str(exc)) from exc
+    except Exception:
+        conn.execute(f"ROLLBACK TO {savepoint}")
+        conn.execute(f"RELEASE {savepoint}")
+        raise
+    conn.execute(f"RELEASE {savepoint}")
+    return mappings
+
+
+def _validate_lifecycle_call(
+    conn: sqlite3.Connection,
+    *,
+    preparation: MockCampaignPreparation,
+    workspace_id: str,
+) -> None:
+    if not isinstance(conn, sqlite3.Connection):
+        raise TypeError("conn must be sqlite3.Connection")
+    if not isinstance(preparation, MockCampaignPreparation):
+        raise TypeError("preparation must be MockCampaignPreparation")
+    if not isinstance(workspace_id, str) or not workspace_id:
+        raise ValueError("workspace_id must be a non-empty string")
+    if preparation.workspace_id != workspace_id:
+        raise MISBridgeConflictError("campaign preparation belongs to another workspace")
+    if not conn.in_transaction:
+        raise CallerTransactionRequiredError(
+            "campaign lifecycle persistence requires an active caller transaction"
+        )
+    if conn.row_factory is not sqlite3.Row:
+        raise TypeError("conn.row_factory must be sqlite3.Row")
+
+
+def _persist_campaign_header(
+    conn: sqlite3.Connection,
+    *,
+    preparation: MockCampaignPreparation,
+    workspace_id: str,
+    status: CampaignStatus,
+    mis: Any,
+    repo: Any,
+    audit_lifecycle: bool,
+    failure_category: str | None = None,
+) -> PersistedCampaignMappings:
+    repo.initialize_schema()
+    _validate_existing_campaign_authority_state(
+        conn,
+        workspace_id=workspace_id,
+        campaign_id=preparation.campaign.id,
+    )
+    created_at = preparation.campaign.created_at.isoformat()
     mis_agent_id = stable_id(
         "agtoc", workspace_id, "open-cekura-reliability-harness"
     )
-    mis_task_id = stable_id("tskoc", workspace_id, execution.campaign.id)
-    mis_plan_id = stable_id("planoc", mis_task_id, execution.campaign.id)
-    _validate_preexisting_mappings(
-        execution,
-        mis_task_id=mis_task_id,
-        mis_plan_id=mis_plan_id,
+    mis_task_id = stable_id("tskoc", workspace_id, preparation.campaign.id)
+    mis_plan_id = stable_id("planoc", mis_task_id, preparation.campaign.id)
+    _require_compatible_mapping(
+        preparation.campaign.mis_task_id,
+        mis_task_id,
+        label=f"campaign {preparation.campaign.id} mis_task_id",
     )
-    repo.initialize_schema()
-
+    _require_compatible_mapping(
+        preparation.campaign.mis_plan_id,
+        mis_plan_id,
+        label=f"campaign {preparation.campaign.id} mis_plan_id",
+    )
     agent_row = {
         "agent_id": mis_agent_id,
         "name": _HARNESS_NAME,
@@ -172,7 +363,7 @@ def _persist(
     task_row = {
         "task_id": mis_task_id,
         "workspace_id": workspace_id,
-        "title": f"Reliability campaign: {execution.campaign.id}",
+        "title": f"Reliability campaign: {preparation.campaign.id}",
         "description": (
             "OpenCekura Reliability Lab deterministic campaign projection; "
             "raw transcript and model payloads are omitted from the MIS task ledger."
@@ -180,7 +371,7 @@ def _persist(
         "requester_id": None,
         "owner_agent_id": mis_agent_id,
         "collaborator_agent_ids": "[]",
-        "status": _task_status(execution.campaign.status),
+        "status": _task_status(status),
         "priority": "high",
         "due_date": None,
         "acceptance_criteria": (
@@ -192,14 +383,10 @@ def _persist(
         "created_at": created_at,
         "updated_at": created_at,
     }
-    _upsert_exact(
+    _upsert_task_lifecycle(
         conn,
-        table="tasks",
-        key="task_id",
+        mis=mis,
         expected=task_row,
-        label="stable MIS task",
-        helper=mis.upsert_task,
-        actor_id="open-cekura-bridge",
     )
 
     _ensure_verified_plan(
@@ -215,7 +402,7 @@ def _persist(
     repo.upsert_agent(
         _preserve_vertical_created_at(
             conn,
-            execution.agent,
+            preparation.agent,
             table="reliability_agents",
             id_column="agent_id",
             workspace_id=workspace_id,
@@ -224,7 +411,7 @@ def _persist(
     repo.upsert_agent_version(
         _preserve_vertical_created_at(
             conn,
-            execution.agent_version,
+            preparation.agent_version,
             table="reliability_agent_versions",
             id_column="agent_version_id",
             workspace_id=workspace_id,
@@ -233,11 +420,230 @@ def _persist(
     repo.upsert_scenario_suite(
         _preserve_vertical_created_at(
             conn,
-            execution.scenario_suite,
+            preparation.scenario_suite,
             table="reliability_scenario_suites",
             id_column="suite_id",
             workspace_id=workspace_id,
         )
+    )
+    mapped_campaign = preparation.campaign.model_copy(
+        update={
+            "status": status,
+            "mis_task_id": mis_task_id,
+            "mis_plan_id": mis_plan_id,
+        }
+    )
+    mapped_campaign = _preserve_vertical_created_at(
+        conn,
+        mapped_campaign,
+        table="reliability_campaigns",
+        id_column="campaign_id",
+        workspace_id=workspace_id,
+    )
+    _upsert_campaign_lifecycle(conn, repo=repo, campaign=mapped_campaign)
+
+    if audit_lifecycle:
+        metadata = (
+            {
+                "campaign_id": preparation.campaign.id,
+                "failure_category": failure_category,
+                "raw_exception_omitted": True,
+                "raw_payload_omitted": True,
+                "workspace_id": workspace_id,
+            }
+            if status is CampaignStatus.ERROR
+            else {
+                "campaign_id": preparation.campaign.id,
+                "raw_payload_omitted": True,
+                "status": status.value,
+                "workspace_id": workspace_id,
+            }
+        )
+        _audit_exact(
+            conn,
+            mis=mis,
+            actor_type="system",
+            actor_id="open-cekura-bridge",
+            action=f"open_cekura.campaign.lifecycle.{status.value}",
+            entity_type="reliability_campaigns",
+            entity_id=preparation.campaign.id,
+            before=None,
+            after={
+                "mis_plan_id": mis_plan_id,
+                "mis_task_id": mis_task_id,
+                "status": status.value,
+            },
+            metadata=metadata,
+            audit_id=stable_id(
+                "audoclife", workspace_id, preparation.campaign.id, status.value
+            ),
+        )
+
+    return PersistedCampaignMappings(
+        campaign_id=preparation.campaign.id,
+        mis_agent_id=mis_agent_id,
+        mis_task_id=mis_task_id,
+        mis_plan_id=mis_plan_id,
+        mis_run_ids={},
+        mis_tool_call_ids={},
+        mis_evaluation_ids={},
+        mis_memory_ids={},
+    )
+
+
+def _validate_existing_campaign_authority_state(
+    conn: sqlite3.Connection,
+    *,
+    workspace_id: str,
+    campaign_id: str,
+) -> None:
+    row = conn.execute(
+        """SELECT c.status AS campaign_status,c.mis_task_id,c.mis_plan_id,
+            t.status AS task_status,t.workspace_id AS task_workspace_id,
+            p.task_id AS plan_task_id,p.workspace_id AS plan_workspace_id
+        FROM reliability_campaigns c
+        LEFT JOIN tasks t ON t.task_id=c.mis_task_id
+        LEFT JOIN agent_plans p ON p.plan_id=c.mis_plan_id
+        WHERE c.workspace_id=? AND c.campaign_id=?""",
+        (workspace_id, campaign_id),
+    ).fetchone()
+    if row is None:
+        return
+    expected_task_status = {
+        CampaignStatus.PENDING.value: "planned",
+        CampaignStatus.RUNNING.value: "running",
+        CampaignStatus.COMPLETED.value: "completed",
+        CampaignStatus.ERROR.value: "failed",
+    }.get(str(row["campaign_status"]))
+    if (
+        expected_task_status is None
+        or row["task_status"] != expected_task_status
+        or row["task_workspace_id"] != workspace_id
+        or row["plan_workspace_id"] != workspace_id
+        or row["plan_task_id"] != row["mis_task_id"]
+    ):
+        raise MISBridgeConflictError(
+            "campaign and MIS task/plan lifecycle authority are inconsistent"
+        )
+
+
+_CAMPAIGN_TRANSITIONS = {
+    "pending": {"pending", "running", "error"},
+    "running": {"running", "completed", "error"},
+    "completed": {"completed"},
+    "error": {"error"},
+}
+_TASK_TRANSITIONS = {
+    "planned": {"planned", "running", "failed"},
+    "running": {"running", "completed", "failed"},
+    "completed": {"completed"},
+    "failed": {"failed"},
+}
+
+
+def _upsert_task_lifecycle(
+    conn: sqlite3.Connection,
+    *,
+    mis: Any,
+    expected: dict[str, Any],
+) -> None:
+    existing = conn.execute(
+        "SELECT * FROM tasks WHERE task_id=?", (expected["task_id"],)
+    ).fetchone()
+    if existing is None:
+        outcome = mis.upsert_task(conn, expected, actor_id="open-cekura-bridge")
+        if outcome != "created":
+            raise MISBridgeConflictError("stable MIS task was not created")
+        return
+    mismatches = [
+        field
+        for field, value in expected.items()
+        if field not in {"status", "created_at", "updated_at"}
+        and existing[field] != value
+    ]
+    if mismatches:
+        raise MISBridgeConflictError(
+            "stable MIS task is already bound to different facts: "
+            + ",".join(mismatches)
+        )
+    current_status = str(existing["status"])
+    desired_status = str(expected["status"])
+    if desired_status not in _TASK_TRANSITIONS.get(current_status, set()):
+        raise MISBridgeConflictError(
+            f"illegal MIS task lifecycle transition: {current_status}->{desired_status}"
+        )
+    expected["created_at"] = existing["created_at"]
+    expected["updated_at"] = existing["updated_at"]
+    outcome = mis.upsert_task(conn, expected, actor_id="open-cekura-bridge")
+    wanted = "unchanged" if current_status == desired_status else "updated"
+    if outcome != wanted:
+        raise MISBridgeConflictError("stable MIS task lifecycle update was inconsistent")
+
+
+def _upsert_campaign_lifecycle(conn: sqlite3.Connection, *, repo: Any, campaign: Any) -> None:
+    existing = conn.execute(
+        """SELECT status FROM reliability_campaigns
+        WHERE workspace_id=? AND campaign_id=?""",
+        (repo.workspace_id, campaign.id),
+    ).fetchone()
+    if existing is not None:
+        current_status = str(existing["status"])
+        desired_status = campaign.status.value
+        if desired_status not in _CAMPAIGN_TRANSITIONS.get(current_status, set()):
+            raise MISBridgeConflictError(
+                "illegal reliability campaign lifecycle transition: "
+                f"{current_status}->{desired_status}"
+            )
+    repo.upsert_campaign(campaign)
+
+
+def _persist(
+    conn: sqlite3.Connection,
+    execution: CampaignExecution,
+    *,
+    workspace_id: str,
+    mis: Any,
+    repository_type: type,
+) -> PersistedCampaignMappings:
+    repo = repository_type(conn, workspace_id=workspace_id)
+    preparation = MockCampaignPreparation(
+        suite_path=(
+            execution.records[0].source_path.parent
+            if execution.records
+            else Path(".").resolve()
+        ),
+        version=execution.agent_version.version,
+        workspace_id=workspace_id,
+        agent=execution.agent,
+        agent_version=execution.agent_version,
+        agent_config=execution.agent_config,
+        scenario_suite=execution.scenario_suite,
+        campaign=execution.campaign,
+        sources=tuple(
+            (
+                record.source_path,
+                record.source_bytes,
+                record.scenario_contract,
+            )
+            for record in execution.records
+        ),
+    )
+    header = _persist_campaign_header(
+        conn,
+        preparation=preparation,
+        workspace_id=workspace_id,
+        status=execution.campaign.status,
+        mis=mis,
+        repo=repo,
+        audit_lifecycle=True,
+    )
+    mis_agent_id = header.mis_agent_id
+    mis_task_id = header.mis_task_id
+    mis_plan_id = header.mis_plan_id
+    _validate_preexisting_mappings(
+        execution,
+        mis_task_id=mis_task_id,
+        mis_plan_id=mis_plan_id,
     )
     for record in execution.records:
         repo.upsert_persona(
@@ -259,11 +665,6 @@ def _persist(
             ),
             contract=record.scenario_contract,
         )
-
-    mapped_campaign = execution.campaign.model_copy(
-        update={"mis_task_id": mis_task_id, "mis_plan_id": mis_plan_id}
-    )
-    repo.upsert_campaign(mapped_campaign)
 
     mis_run_ids: dict[str, str] = {}
     mis_tool_call_ids: dict[str, str] = {}
@@ -580,7 +981,9 @@ def _ensure_verified_plan(
             "Persist an OpenCekura campaign into the existing AgentOps MIS "
             "authority ledgers and reliability projection."
         ),
-        "referenced_specs_json": _json(["docs/open-cekura/ARCHITECTURE.md"]),
+        "referenced_specs_json": _json(
+            ["open_cekura/contracts/RELIABILITY_CAMPAIGN_EXECUTION.md"]
+        ),
         "referenced_memories_json": _json(
             ["OpenCekura Reliability Lab campaign execution contract"]
         ),
@@ -724,6 +1127,38 @@ def _validate_plan_run_start_authority(
     if mis.validate_agent_plan_approval_binding(conn, plan, approval) is not None:
         raise MISBridgeConflictError(
             "approved MIS plan approval authority conflicts with its immutable binding"
+        )
+
+
+def validate_plan_authority(
+    conn: sqlite3.Connection,
+    *,
+    mis: Any,
+    plan: sqlite3.Row,
+) -> None:
+    """Require an executable, currently verified immutable MIS Plan."""
+
+    _validate_plan_run_start_authority(conn, mis=mis, plan=plan)
+    if plan["plan_hash"] != mis.compute_agent_plan_hash(plan):
+        raise MISBridgeConflictError(
+            "stable MIS plan hash conflicts with its current facts"
+        )
+    verification = mis.verify_agent_plan_row(plan, conn)
+    if not verification.get("pass"):
+        failed = ",".join(
+            str(item.get("id"))
+            for item in verification.get("failed_checks") or []
+        )
+        raise MISBridgeConflictError(f"MIS plan verification failed: {failed}")
+    expected_verification_hash = mis.agent_plan_verification_hash(
+        plan["plan_id"], verification
+    )
+    if (
+        plan["verified_at"] is None
+        or plan["verification_result_hash"] != expected_verification_hash
+    ):
+        raise MISBridgeConflictError(
+            "stable MIS plan verification result conflicts with current authority"
         )
 
 
@@ -1011,7 +1446,11 @@ __all__ = [
     "CallerTransactionRequiredError",
     "MISBridgeConflictError",
     "MISBridgeError",
+    "PreparedCampaignAuthority",
     "PersistedCampaignMappings",
     "persist_campaign_execution",
+    "persist_campaign_failure",
+    "persist_campaign_preparation",
     "safe_mis_metadata",
+    "validate_plan_authority",
 ]

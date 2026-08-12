@@ -219,6 +219,22 @@ class RegressionCase(DomainObject):
     mis_memory_id: StableIdentifier | None
 
 
+class RegressionReplayMapping(DomainObject):
+    source_campaign_id: StableIdentifier
+    target_campaign_id: StableIdentifier
+    regression_case_id: StableIdentifier
+    source_run_id: StableIdentifier
+    source_evaluation_result_id: StableIdentifier
+    evaluator_id: StableIdentifier
+    source_scenario_id: StableIdentifier
+    replay_scenario_id: StableIdentifier
+    replay_run_id: StableIdentifier
+    source_snapshot_sha256: Sha256Digest
+    source_scenario_sha256: Sha256Digest
+    replay_scenario_sha256: Sha256Digest
+    mis_memory_id: StableIdentifier
+
+
 class GateFact(StrictContract):
     rule_id: StableIdentifier
     message: NonEmptyText
@@ -249,7 +265,7 @@ class EvidenceEnvironment(StrictContract):
 
 
 class EvidenceManifest(DomainObject):
-    schema_version: Literal[2]
+    schema_version: Literal[3]
     campaign_id: StableIdentifier
     run_id: StableIdentifier
     mis_artifact_id: StableIdentifier | None
@@ -275,8 +291,8 @@ class EvidenceManifest(DomainObject):
             raise ValueError("finished_at must not precede started_at")
         if self.created_at < self.finished_at:
             raise ValueError("created_at must not precede finished_at")
-        if self.artifacts.get("scenario.yaml") != self.scenario_sha256:
-            raise ValueError("scenario_sha256 must match artifacts['scenario.yaml']")
+        if "scenario.yaml" not in self.artifacts:
+            raise ValueError("artifacts must include scenario.yaml")
         return self
 
 
@@ -296,6 +312,7 @@ __all__ = [
     "ObservedToolCall",
     "Persona",
     "RegressionCase",
+    "RegressionReplayMapping",
     "ReleaseGateDecision",
     "Scenario",
     "ScenarioSuite",

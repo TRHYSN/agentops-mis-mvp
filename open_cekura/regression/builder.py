@@ -26,6 +26,19 @@ def _unique(values: Iterable[str]) -> list[str]:
     return list(dict.fromkeys(values))
 
 
+def regression_input_snapshot(scenario: ScenarioDefinition) -> dict[str, object]:
+    """Return the complete Scenario v1 input contract captured by regressions."""
+
+    scenario_json = scenario.model_dump(mode="json")
+    return {
+        "initial_message": scenario.initial_message,
+        "persona": scenario_json["persona"],
+        "goal": scenario_json["goal"],
+        "challenges": scenario_json["challenges"],
+        "expectations": scenario_json["expectations"],
+    }
+
+
 def build_failure_cases(
     context: EvaluationContext,
     evaluations: Iterable[EvaluationResult],
@@ -90,7 +103,6 @@ def build_regression_case(
     if evaluation.status not in _FAILURE_STATUSES:
         raise ValueError("only failed or errored evaluations can become regressions")
 
-    scenario_json = scenario.model_dump(mode="json")
     return RegressionCase(
         schema_version=1,
         id=stable_id("ocregression", failure.id, evaluation.evaluator_id),
@@ -98,20 +110,12 @@ def build_regression_case(
         scenario_id=scenario.id,
         source_run_id=failure.run_id,
         name=f"Regression: {scenario.name} [{failure.reason_code}]",
-        original_input={
-            "initial_message": scenario.initial_message,
-            "persona": scenario_json["persona"],
-            "goal": scenario_json["goal"],
-            "challenges": scenario_json["challenges"],
-            "expectations": scenario_json["expectations"],
-        },
+        original_input=regression_input_snapshot(scenario),
         expected=failure.expected,
         observed=failure.observed,
         reason_code=failure.reason_code,
         evaluator_id=evaluation.evaluator_id,
-        evidence_refs=_unique(
-            [*failure.evidence_refs, f"evaluation:{evaluation.id}"]
-        ),
+        evidence_refs=_unique([*failure.evidence_refs, f"evaluation:{evaluation.id}"]),
         mis_memory_id=mis_memory_id,
         created_at=created_at,
     )
@@ -130,15 +134,7 @@ async def replay_regression(
 
     if regression.scenario_id != scenario.id:
         raise ValueError("regression and scenario IDs do not match")
-    scenario_json = scenario.model_dump(mode="json")
-    snapshot = {
-        "initial_message": scenario.initial_message,
-        "persona": scenario_json["persona"],
-        "goal": scenario_json["goal"],
-        "challenges": scenario_json["challenges"],
-        "expectations": scenario_json["expectations"],
-    }
-    if regression.original_input != snapshot:
+    if regression.original_input != regression_input_snapshot(scenario):
         raise ValueError("scenario no longer matches the regression input snapshot")
     return await run_scenario(
         scenario=scenario,
@@ -149,4 +145,9 @@ async def replay_regression(
     )
 
 
-__all__ = ["build_failure_cases", "build_regression_case", "replay_regression"]
+__all__ = [
+    "build_failure_cases",
+    "build_regression_case",
+    "regression_input_snapshot",
+    "replay_regression",
+]

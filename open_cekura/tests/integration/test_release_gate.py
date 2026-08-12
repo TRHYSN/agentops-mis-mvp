@@ -14,7 +14,9 @@ from open_cekura.release_gate.gate import render_gate_decision
 from open_cekura.release_gate.policy import (
     CampaignGateInput,
     ReleaseGateError,
+    evaluator_policy_sha256,
     evaluate_release_gate,
+    scenario_suite_sha256,
 )
 from open_cekura.release_gate import policy as release_gate_policy
 from open_cekura.tests.integration.test_simulation_evaluation import evaluate_profile
@@ -48,13 +50,22 @@ def gate_input(config: MockAgentConfig, profile: str) -> CampaignGateInput:
         )
         scenario_by_run[run_id] = scenario_id
         evaluator_versions.update(result.evaluator_id for result in results)
+    scenario_digests = {scenario_id: "a" * 64 for scenario_id in rows}
+    versions = sorted(evaluator_versions)
     return CampaignGateInput(
         campaign_id=f"occampaign_{profile}",
         metrics=aggregate_campaign_metrics(groups, facts),
         scenario_by_run=scenario_by_run,
         scenario_ids=sorted(rows),
-        scenario_sha256_by_id={scenario_id: "a" * 64 for scenario_id in rows},
-        evaluator_versions=sorted(evaluator_versions),
+        scenario_sha256_by_id=scenario_digests,
+        evaluator_versions=versions,
+        scenario_suite_sha256=scenario_suite_sha256(1, scenario_digests),
+        scenario_schema_version=1,
+        evaluator_policy_sha256=evaluator_policy_sha256(versions),
+        mock_backend_version="appointment_mock_backend.v1",
+        tool_contract_version="appointment_tool_contract.v1",
+        deterministic_mode=True,
+        random_seed=0,
         evidence_verified=True,
         evidence_refs=[f"artifact:{profile}/campaign_summary.json"],
     )
@@ -267,6 +278,78 @@ def test_incompatible_comparison_contracts_fail_closed() -> None:
         evaluate_release_gate(incompatible, baseline=baseline, created_at=NOW)
 
 
+def test_comparison_rejects_duplicate_scenario_run_dilution() -> None:
+    baseline = gate_input(MockAgentConfig.candidate(), "dilution_base")
+    candidate = gate_input(MockAgentConfig.candidate(), "dilution_candidate")
+    first_group = candidate.metrics.result_groups[0]
+    failed_results = [
+        result.model_copy(
+            update={
+                "status": EvaluationStatus.FAIL,
+                "score": 0.0,
+                "reason_codes": ["task_unsuccessful"],
+            }
+        )
+        if result.evaluator_id == "task_success.v1"
+        else result
+        for result in first_group.deterministic_results
+    ]
+    groups = [
+        first_group.model_copy(update={"deterministic_results": failed_results}),
+        *candidate.metrics.result_groups[1:],
+    ]
+    scenario_by_run = dict(candidate.scenario_by_run)
+    source_group = candidate.metrics.result_groups[1]
+    source_scenario_id = candidate.scenario_by_run[source_group.run_id]
+    for index in range(11):
+        run_id = f"ocrun_repeat_{index:02d}"
+        repeated_results = [
+            result.model_copy(
+                update={
+                    "id": f"{result.id}.repeat{index:02d}",
+                    "run_id": run_id,
+                }
+            )
+            for result in source_group.deterministic_results
+        ]
+        groups.append(
+            source_group.model_copy(
+                update={
+                    "run_id": run_id,
+                    "deterministic_results": repeated_results,
+                }
+            )
+        )
+        scenario_by_run[run_id] = source_scenario_id
+    metrics = aggregate_campaign_metrics(
+        groups,
+        [
+            RunMetricFacts(run_id=group.run_id, turn_count=4, latency_ms=100)
+            for group in groups
+        ],
+    )
+    diluted = CampaignGateInput(
+        campaign_id=candidate.campaign_id,
+        metrics=metrics,
+        scenario_by_run=scenario_by_run,
+        scenario_ids=candidate.scenario_ids,
+        scenario_sha256_by_id=candidate.scenario_sha256_by_id,
+        evaluator_versions=candidate.evaluator_versions,
+        scenario_suite_sha256=candidate.scenario_suite_sha256,
+        scenario_schema_version=candidate.scenario_schema_version,
+        evaluator_policy_sha256=candidate.evaluator_policy_sha256,
+        mock_backend_version=candidate.mock_backend_version,
+        tool_contract_version=candidate.tool_contract_version,
+        deterministic_mode=candidate.deterministic_mode,
+        random_seed=candidate.random_seed,
+        evidence_verified=True,
+        evidence_refs=candidate.evidence_refs,
+    )
+
+    with pytest.raises(ReleaseGateError, match="scenario run counts"):
+        evaluate_release_gate(diluted, baseline=baseline, created_at=NOW)
+
+
 def test_same_scenario_ids_with_changed_contract_digests_fail_closed() -> None:
     baseline = gate_input(MockAgentConfig.candidate(), "baseline_clean")
     candidate = gate_input(MockAgentConfig.candidate(), "candidate_clean")
@@ -279,6 +362,30 @@ def test_same_scenario_ids_with_changed_contract_digests_fail_closed() -> None:
     )
 
     with pytest.raises(ReleaseGateError, match="scenario contract digests"):
+        evaluate_release_gate(incompatible, baseline=baseline, created_at=NOW)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("mock_backend_version", "appointment_mock_backend.v2"),
+        ("tool_contract_version", "appointment_tool_contract.v2"),
+        ("random_seed", 7),
+        ("deterministic_mode", False),
+        ("evaluator_policy_sha256", "b" * 64),
+        ("scenario_suite_sha256", "c" * 64),
+        ("scenario_schema_version", 2),
+    ],
+)
+def test_comparison_rejects_any_changed_execution_contract(
+    field: str,
+    value: object,
+) -> None:
+    baseline = gate_input(MockAgentConfig.candidate(), "contract_base")
+    candidate = gate_input(MockAgentConfig.candidate(), "contract_candidate")
+    incompatible = candidate.model_copy(update={field: value})
+
+    with pytest.raises(ReleaseGateError, match="execution contracts"):
         evaluate_release_gate(incompatible, baseline=baseline, created_at=NOW)
 
 

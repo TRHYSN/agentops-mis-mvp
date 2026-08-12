@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -36,14 +35,24 @@ from open_cekura.evaluation.aggregation import (
 from open_cekura.evaluation.base import EvaluationContext, context_from_simulation
 from open_cekura.evaluation.rules import evaluate_deterministic
 from open_cekura.regression.builder import build_failure_cases, build_regression_case
-from open_cekura.release_gate.policy import CampaignGateInput
+from open_cekura.release_gate.policy import (
+    CampaignGateInput,
+    evaluator_policy_sha256,
+    scenario_suite_sha256,
+)
 from open_cekura.scenarios.loader import (
     DuplicateScenarioIdError,
     ScenarioContractError,
     load_scenario,
 )
 from open_cekura.scenarios.schema import ScenarioDefinition
-from open_cekura.simulation.mock_agent import MockAgentAdapter, MockAgentConfig
+from open_cekura.simulation.mock_agent import (
+    DETERMINISTIC_RANDOM_SEED,
+    MOCK_BACKEND_VERSION,
+    TOOL_CONTRACT_VERSION,
+    MockAgentAdapter,
+    MockAgentConfig,
+)
 from open_cekura.simulation.runner import SimulationResult, run_scenario
 
 
@@ -96,6 +105,17 @@ class CampaignExecution:
             if evidence_refs is not None
             else [f"artifact:{self.campaign.id}/campaign_summary.json"]
         )
+        scenario_digests = {
+            record.scenario.id: record.scenario.source_sha256
+            for record in self.records
+        }
+        evaluator_versions = sorted(
+            {
+                result.evaluator_id
+                for record in self.records
+                for result in record.evaluations
+            }
+        )
         return CampaignGateInput(
             campaign_id=self.campaign.id,
             metrics=self.metrics,
@@ -103,23 +123,56 @@ class CampaignExecution:
                 record.simulation.run.id: record.scenario.id for record in self.records
             },
             scenario_ids=[record.scenario.id for record in self.records],
-            scenario_sha256_by_id={
-                record.scenario.id: record.scenario.source_sha256
-                for record in self.records
-            },
-            evaluator_versions=sorted(
-                {
-                    result.evaluator_id
-                    for record in self.records
-                    for result in record.evaluations
-                }
-            ),
+            scenario_sha256_by_id=scenario_digests,
+            evaluator_versions=evaluator_versions,
+            scenario_suite_sha256=scenario_suite_sha256(1, scenario_digests),
+            scenario_schema_version=1,
+            evaluator_policy_sha256=evaluator_policy_sha256(evaluator_versions),
+            mock_backend_version=MOCK_BACKEND_VERSION,
+            tool_contract_version=TOOL_CONTRACT_VERSION,
+            deterministic_mode=True,
+            random_seed=DETERMINISTIC_RANDOM_SEED,
             evidence_verified=evidence_verified,
             evidence_refs=references,
         )
 
 
-async def execute_mock_campaign(
+@dataclass(frozen=True, slots=True)
+class MockCampaignPreparation:
+    """Validated stable campaign header created before adapter execution."""
+
+    suite_path: Path
+    version: str
+    workspace_id: str
+    agent: AgentUnderTest
+    agent_version: AgentVersion
+    agent_config: MockAgentConfig
+    scenario_suite: ScenarioSuite
+    campaign: Campaign
+    sources: tuple[tuple[Path, bytes, ScenarioDefinition], ...]
+
+    def with_created_at(self, created_at: datetime) -> "MockCampaignPreparation":
+        """Rebind timestamps to an existing idempotent campaign attempt."""
+
+        timestamp = _utc_timestamp(created_at)
+        return MockCampaignPreparation(
+            suite_path=self.suite_path,
+            version=self.version,
+            workspace_id=self.workspace_id,
+            agent=self.agent.model_copy(update={"created_at": timestamp}),
+            agent_version=self.agent_version.model_copy(
+                update={"created_at": timestamp}
+            ),
+            agent_config=self.agent_config,
+            scenario_suite=self.scenario_suite.model_copy(
+                update={"created_at": timestamp}
+            ),
+            campaign=self.campaign.model_copy(update={"created_at": timestamp}),
+            sources=self.sources,
+        )
+
+
+def prepare_mock_campaign(
     *,
     suite_path: str | Path,
     config: MockAgentConfig,
@@ -127,27 +180,21 @@ async def execute_mock_campaign(
     campaign_id: str,
     workspace_id: str,
     created_at: datetime | None = None,
-) -> CampaignExecution:
-    """Run the deterministic v0 loop without performing persistence side effects."""
+) -> MockCampaignPreparation:
+    """Validate inputs and construct stable authority headers without simulation."""
 
-    if not isinstance(config, MockAgentConfig):
-        raise TypeError("config must be MockAgentConfig")
-    if not isinstance(version, str) or not version.strip():
-        raise ValueError("version must be a non-empty string")
-    if not isinstance(campaign_id, str) or not campaign_id:
-        raise ValueError("campaign_id must be a non-empty string")
-    if not isinstance(workspace_id, str) or not workspace_id:
-        raise ValueError("workspace_id must be a non-empty string")
-
-    timestamp = created_at or datetime.now(timezone.utc)
-    if timestamp.tzinfo is None or timestamp.utcoffset() is None:
-        raise ValueError("created_at must be timezone-aware")
-    timestamp = timestamp.astimezone(timezone.utc)
-    sources = _load_sources(Path(suite_path))
-
+    _validate_mock_campaign_inputs(
+        config=config,
+        version=version,
+        campaign_id=campaign_id,
+        workspace_id=workspace_id,
+    )
+    timestamp = _utc_timestamp(created_at or datetime.now(timezone.utc))
+    resolved_suite = Path(suite_path).resolve()
+    sources = tuple(_load_sources(resolved_suite))
     suite_fingerprint = "|".join(
-        f"{contract.id}:{_sha256(source_bytes)}"
-        for _, source_bytes, contract in sources
+        f"{contract.id}:{contract.canonical_sha256()}"
+        for _, _, contract in sources
     )
     suite = ScenarioSuite(
         schema_version=1,
@@ -164,11 +211,14 @@ async def execute_mock_campaign(
         workspace_id=workspace_id,
         created_at=timestamp,
     )
+    normalized_version = version.strip()
     agent_version = AgentVersion(
         schema_version=1,
-        id=stable_id("ocagentv", agent.id, version.strip(), config.canonical_sha256()),
+        id=stable_id(
+            "ocagentv", agent.id, normalized_version, config.canonical_sha256()
+        ),
         agent_id=agent.id,
-        version=version.strip(),
+        version=normalized_version,
         adapter_kind=AdapterKind.MOCK,
         config_sha256=config.canonical_sha256(),
         created_at=timestamp,
@@ -178,11 +228,65 @@ async def execute_mock_campaign(
         id=campaign_id,
         agent_version_id=agent_version.id,
         scenario_suite_id=suite.id,
-        status=CampaignStatus.COMPLETED,
+        status=CampaignStatus.PENDING,
         mis_task_id=None,
         mis_plan_id=None,
         created_at=timestamp,
     )
+    return MockCampaignPreparation(
+        suite_path=resolved_suite,
+        version=normalized_version,
+        workspace_id=workspace_id,
+        agent=agent,
+        agent_version=agent_version,
+        agent_config=config,
+        scenario_suite=suite,
+        campaign=campaign,
+        sources=sources,
+    )
+
+
+async def execute_mock_campaign(
+    *,
+    suite_path: str | Path,
+    config: MockAgentConfig,
+    version: str,
+    campaign_id: str,
+    workspace_id: str,
+    created_at: datetime | None = None,
+    preparation: MockCampaignPreparation | None = None,
+) -> CampaignExecution:
+    """Run the deterministic v0 loop without performing persistence side effects."""
+
+    _validate_mock_campaign_inputs(
+        config=config,
+        version=version,
+        campaign_id=campaign_id,
+        workspace_id=workspace_id,
+    )
+    prepared = preparation or prepare_mock_campaign(
+        suite_path=suite_path,
+        config=config,
+        version=version,
+        campaign_id=campaign_id,
+        workspace_id=workspace_id,
+        created_at=created_at,
+    )
+    _validate_preparation(
+        prepared,
+        suite_path=suite_path,
+        config=config,
+        version=version,
+        campaign_id=campaign_id,
+        workspace_id=workspace_id,
+        created_at=created_at,
+    )
+    timestamp = prepared.campaign.created_at
+    sources = prepared.sources
+    suite = prepared.scenario_suite
+    agent = prepared.agent
+    agent_version = prepared.agent_version
+    campaign = prepared.campaign.model_copy(update={"status": CampaignStatus.COMPLETED})
 
     records: list[CampaignRunRecord] = []
     groups: list[EvaluationResultGroup] = []
@@ -197,7 +301,7 @@ async def execute_mock_campaign(
             name=contract.name,
             initial_message=contract.initial_message,
             goal_type=contract.goal.type.value,
-            source_sha256=_sha256(source_bytes),
+            source_sha256=contract.canonical_sha256(),
             created_at=timestamp,
         )
         simulation = await run_scenario(
@@ -266,6 +370,58 @@ async def execute_mock_campaign(
         records=tuple(records),
         metrics=aggregate_campaign_metrics(groups, run_facts),
     )
+
+
+def _validate_mock_campaign_inputs(
+    *,
+    config: MockAgentConfig,
+    version: str,
+    campaign_id: str,
+    workspace_id: str,
+) -> None:
+    if not isinstance(config, MockAgentConfig):
+        raise TypeError("config must be MockAgentConfig")
+    if not isinstance(version, str) or not version.strip():
+        raise ValueError("version must be a non-empty string")
+    if not isinstance(campaign_id, str) or not campaign_id:
+        raise ValueError("campaign_id must be a non-empty string")
+    if not isinstance(workspace_id, str) or not workspace_id:
+        raise ValueError("workspace_id must be a non-empty string")
+
+
+def _utc_timestamp(value: datetime) -> datetime:
+    if value.tzinfo is None or value.utcoffset() is None:
+        raise ValueError("created_at must be timezone-aware")
+    return value.astimezone(timezone.utc)
+
+
+def _validate_preparation(
+    preparation: MockCampaignPreparation,
+    *,
+    suite_path: str | Path,
+    config: MockAgentConfig,
+    version: str,
+    campaign_id: str,
+    workspace_id: str,
+    created_at: datetime | None,
+) -> None:
+    if not isinstance(preparation, MockCampaignPreparation):
+        raise TypeError("preparation must be MockCampaignPreparation")
+    expected_created_at = (
+        _utc_timestamp(created_at) if created_at is not None else None
+    )
+    if any(
+        (
+            preparation.suite_path != Path(suite_path).resolve(),
+            preparation.agent_config != config,
+            preparation.version != version.strip(),
+            preparation.campaign.id != campaign_id,
+            preparation.workspace_id != workspace_id,
+            expected_created_at is not None
+            and preparation.campaign.created_at != expected_created_at,
+        )
+    ):
+        raise ValueError("preparation does not match campaign execution inputs")
 
 
 def _evaluated_run_status(
@@ -348,8 +504,10 @@ def _persona(contract: ScenarioDefinition, created_at: datetime) -> Persona:
     )
 
 
-def _sha256(value: bytes) -> str:
-    return hashlib.sha256(value).hexdigest()
-
-
-__all__ = ["CampaignExecution", "CampaignRunRecord", "execute_mock_campaign"]
+__all__ = [
+    "CampaignExecution",
+    "CampaignRunRecord",
+    "MockCampaignPreparation",
+    "execute_mock_campaign",
+    "prepare_mock_campaign",
+]

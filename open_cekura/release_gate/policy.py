@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+from collections import Counter
 from datetime import datetime
+import hashlib
+import json
 from types import MappingProxyType
-from typing import Mapping, Protocol
+from typing import Annotated, Literal, Mapping, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -50,7 +53,16 @@ _RELEASE_GATE_V1_ZERO_TOLERANCE = MappingProxyType(
 
 
 class ReleaseGateError(ValueError):
-    """Gate input is incomplete or comparison contracts are incompatible."""
+    """Release-gate input, policy, or computation is invalid."""
+
+    code = "release_gate_error"
+
+
+class IncomparableCampaignsError(ReleaseGateError):
+    """Baseline and candidate cannot be compared under one frozen contract."""
+
+    code = "incomparable_campaigns"
+    comparison_status = "INCOMPARABLE"
 
 
 class _GateContract(BaseModel):
@@ -64,6 +76,13 @@ class CampaignGateInput(_GateContract):
     scenario_ids: list[StableIdentifier]
     scenario_sha256_by_id: dict[StableIdentifier, Sha256Digest]
     evaluator_versions: list[StableIdentifier]
+    scenario_suite_sha256: Sha256Digest
+    scenario_schema_version: Literal[1]
+    evaluator_policy_sha256: Sha256Digest
+    mock_backend_version: StableIdentifier
+    tool_contract_version: StableIdentifier
+    deterministic_mode: bool
+    random_seed: Annotated[int, Field(strict=True, ge=0)]
     evidence_verified: bool
     evidence_refs: list[str] = Field(default_factory=list)
 
@@ -89,6 +108,17 @@ class CampaignGateInput(_GateContract):
         }
         if set(self.evaluator_versions) != observed_versions:
             raise ValueError("evaluator_versions must match deterministic results")
+        if self.scenario_suite_sha256 != scenario_suite_sha256(
+            self.scenario_schema_version,
+            self.scenario_sha256_by_id,
+        ):
+            raise ValueError("scenario_suite_sha256 does not match Scenario contracts")
+        if self.evaluator_policy_sha256 != evaluator_policy_sha256(
+            self.evaluator_versions
+        ):
+            raise ValueError("evaluator_policy_sha256 does not match evaluator policy")
+        if not self.deterministic_mode:
+            raise ValueError("release comparisons require deterministic_mode=true")
         if not _RELEASE_GATE_V1_REQUIRED_EVALUATORS.issubset(observed_versions):
             missing = sorted(_RELEASE_GATE_V1_REQUIRED_EVALUATORS - observed_versions)
             raise ValueError(f"deterministic evaluation set is incomplete: {missing}")
@@ -101,6 +131,55 @@ class CampaignGateInput(_GateContract):
                     f"run {group.run_id} has an incomplete deterministic evaluation set"
                 )
         return self
+
+
+def _canonical_sha256(payload: object) -> str:
+    encoded = json.dumps(
+        payload,
+        ensure_ascii=False,
+        allow_nan=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def scenario_suite_sha256(
+    schema_version: int,
+    scenario_sha256_by_id: Mapping[str, str],
+) -> str:
+    """Hash normalized Scenario contracts without paths or YAML formatting."""
+
+    return _canonical_sha256(
+        {
+            "scenario_schema_version": schema_version,
+            "scenarios": dict(sorted(scenario_sha256_by_id.items())),
+        }
+    )
+
+
+def evaluator_policy_sha256(evaluator_versions: list[str]) -> str:
+    """Fingerprint the frozen deterministic evaluator and gate policy contract."""
+
+    return _canonical_sha256(
+        {
+            "release_gate_policy_version": _RELEASE_GATE_V1_POLICY_VERSION,
+            "evaluator_versions": sorted(evaluator_versions),
+            "required_evaluators": sorted(_RELEASE_GATE_V1_REQUIRED_EVALUATORS),
+            "zero_tolerance_rules": {
+                evaluator_id: list(rule)
+                for evaluator_id, rule in sorted(
+                    _RELEASE_GATE_V1_ZERO_TOLERANCE.items()
+                )
+            },
+            "thresholds": {
+                "task_success_regression_percentage_points": 5.0,
+                "median_turn_regression": 0.20,
+                "timeout_safe_harbor": 0.02,
+                "deterministic_error_rate": 0.0,
+            },
+        }
+    )
 
 
 def _unique(values: list[str]) -> list[str]:
@@ -145,22 +224,66 @@ def _comparison_is_compatible(
     baseline: CampaignGateInput,
 ) -> None:
     if set(candidate.scenario_ids) != set(baseline.scenario_ids):
-        raise ReleaseGateError("baseline and candidate scenario sets are incompatible")
+        raise IncomparableCampaignsError(
+            "baseline and candidate scenario sets are incompatible"
+        )
+    if Counter(candidate.scenario_by_run.values()) != Counter(
+        baseline.scenario_by_run.values()
+    ):
+        raise IncomparableCampaignsError(
+            "baseline and candidate scenario run counts are incompatible"
+        )
     if candidate.scenario_sha256_by_id != baseline.scenario_sha256_by_id:
-        raise ReleaseGateError(
+        raise IncomparableCampaignsError(
             "baseline and candidate scenario contract digests are incompatible"
         )
+    if candidate.scenario_suite_sha256 != scenario_suite_sha256(
+        candidate.scenario_schema_version,
+        candidate.scenario_sha256_by_id,
+    ) or baseline.scenario_suite_sha256 != scenario_suite_sha256(
+        baseline.scenario_schema_version,
+        baseline.scenario_sha256_by_id,
+    ):
+        raise IncomparableCampaignsError(
+            "baseline and candidate execution contracts are incompatible"
+        )
     if set(candidate.evaluator_versions) != set(baseline.evaluator_versions):
-        raise ReleaseGateError("baseline and candidate evaluator sets are incompatible")
+        raise IncomparableCampaignsError(
+            "baseline and candidate evaluator sets are incompatible"
+        )
+    if candidate.evaluator_policy_sha256 != evaluator_policy_sha256(
+        candidate.evaluator_versions
+    ) or baseline.evaluator_policy_sha256 != evaluator_policy_sha256(
+        baseline.evaluator_versions
+    ):
+        raise IncomparableCampaignsError(
+            "baseline and candidate execution contracts are incompatible"
+        )
+    execution_contract_fields = (
+        "scenario_suite_sha256",
+        "scenario_schema_version",
+        "evaluator_policy_sha256",
+        "mock_backend_version",
+        "tool_contract_version",
+        "deterministic_mode",
+        "random_seed",
+    )
+    if any(
+        getattr(candidate, field) != getattr(baseline, field)
+        for field in execution_contract_fields
+    ):
+        raise IncomparableCampaignsError(
+            "baseline and candidate execution contracts are incompatible"
+        )
     if not baseline.evidence_verified:
-        raise ReleaseGateError("baseline evidence is not verified")
+        raise IncomparableCampaignsError("baseline evidence is not verified")
     baseline_error_rate = baseline.metrics.deterministic_error_rate
     if baseline_error_rate is None:
-        raise ReleaseGateError(
+        raise IncomparableCampaignsError(
             "baseline deterministic evaluator error rate is unavailable"
         )
     if baseline_error_rate > 0.0:
-        raise ReleaseGateError(
+        raise IncomparableCampaignsError(
             "baseline deterministic evaluator error rate must be zero"
         )
 
@@ -392,10 +515,13 @@ def evaluate_release_gate_for_policy(
 
 __all__ = [
     "CampaignGateInput",
+    "IncomparableCampaignsError",
     "POLICY_VERSION",
     "RELEASE_GATE_POLICY_REGISTRY",
     "ReleaseGateError",
     "ReleaseGatePolicy",
     "evaluate_release_gate",
     "evaluate_release_gate_for_policy",
+    "evaluator_policy_sha256",
+    "scenario_suite_sha256",
 ]

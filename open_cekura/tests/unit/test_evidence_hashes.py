@@ -9,6 +9,9 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
+import yaml
+
+from open_cekura.scenarios.schema import ScenarioDefinition
 
 
 CREATED_AT = datetime(2026, 8, 11, 12, 30, tzinfo=timezone.utc)
@@ -25,6 +28,7 @@ REQUIRED_CAMPAIGN_FILES = {
     "campaign_summary.json",
     "baseline_candidate_diff.json",
     "gate_history.json",
+    "regression_replay.json",
     "release_gate.json",
     "regression_cases.json",
 }
@@ -181,7 +185,7 @@ def test_write_run_bundle_creates_exact_canonical_files_and_hashes(
         written.manifest_path.read_bytes()
     )
     assert written.manifest_path.read_bytes() == written.manifest.canonical_json_bytes()
-    assert written.manifest.schema_version == 2
+    assert written.manifest.schema_version == 3
     assert set(written.manifest.artifacts) == REQUIRED_RUN_FILES - {
         "evidence_manifest.json"
     }
@@ -189,7 +193,8 @@ def test_write_run_bundle_creates_exact_canonical_files_and_hashes(
         stored = (written.path / relative_path).read_bytes()
         assert hashlib.sha256(stored).hexdigest() == expected_digest
 
-    assert written.manifest.scenario_sha256 == hashlib.sha256(SCENARIO_YAML).hexdigest()
+    scenario = ScenarioDefinition.model_validate(yaml.safe_load(SCENARIO_YAML))
+    assert written.manifest.scenario_sha256 == scenario.canonical_sha256()
     agent_envelope_bytes = (written.path / "agent_version.json").read_bytes()
     assert (
         written.manifest.agent_config_sha256
@@ -210,6 +215,44 @@ def test_write_run_bundle_creates_exact_canonical_files_and_hashes(
     assert timing["observed_final_state"] == {"found": True}
 
 
+def test_scenario_manifest_digest_ignores_yaml_formatting_but_artifact_hash_does_not(
+    tmp_path: Path,
+) -> None:
+    bundle, manifest_module = _evidence_modules()
+    inputs = _inputs(bundle, manifest_module)
+    reformatted = yaml.safe_dump(
+        yaml.safe_load(SCENARIO_YAML), sort_keys=True
+    ).replace("\n", "\r\n").encode("utf-8")
+
+    first = bundle.write_run_bundle(tmp_path / "first", inputs)
+    second = bundle.write_run_bundle(
+        tmp_path / "second",
+        replace(inputs, scenario_yaml=reformatted),
+    )
+
+    assert first.manifest.scenario_sha256 == second.manifest.scenario_sha256
+    assert (
+        first.manifest.artifacts["scenario.yaml"]
+        != second.manifest.artifacts["scenario.yaml"]
+    )
+
+
+def test_run_verifier_rejects_tampered_scenario_semantic_digest(
+    tmp_path: Path,
+) -> None:
+    bundle, manifest_module = _evidence_modules()
+    inputs = _inputs(bundle, manifest_module)
+    written = bundle.write_run_bundle(tmp_path, inputs)
+    payload = json.loads(written.manifest_path.read_bytes())
+    payload["scenario_sha256"] = "f" * 64
+    written.manifest_path.write_bytes(manifest_module.canonical_json_bytes(payload))
+
+    report = manifest_module.verify_run_bundles(tmp_path, inputs.campaign_id)
+
+    assert report.ok is False
+    assert "scenario_hash_mismatch" in {issue.code for issue in report.issues}
+
+
 def test_write_campaign_bundle_creates_hash_checked_gate_history_and_current_views(
     tmp_path: Path,
 ) -> None:
@@ -227,7 +270,7 @@ def test_write_campaign_bundle_creates_hash_checked_gate_history_and_current_vie
     assert diff["comparison"] == "no_comparison"
     summary_bytes = (written.path / "campaign_summary.json").read_bytes()
     summary = json.loads(summary_bytes)
-    assert summary["schema_version"] == 2
+    assert summary["schema_version"] == 3
     assert summary["campaign_id"] == "occampaign_candidate"
     assert summary["summary"] == {"pass_rate": 1.0, "run_count": 1}
     assert set(summary["artifacts"]) == REQUIRED_CAMPAIGN_FILES - {
@@ -318,6 +361,8 @@ def test_campaign_writer_never_overwrites_a_conflicting_stable_gate_snapshot(
         ("run_id", r"nested\run"),
         ("run_id", "CON"),
         ("run_id", "trailing."),
+        ("campaign_id", "Campaign-A"),
+        ("run_id", "Run-A"),
     ],
 )
 def test_write_run_bundle_rejects_unsafe_windows_path_components(

@@ -33,6 +33,9 @@ from .personas import MUTATING_TOOL_NAMES, user_messages_for
 
 DEFAULT_BOOKING_ID = "booking-001"
 DEFAULT_SLOT = "2026-08-20T09:00:00Z"
+MOCK_BACKEND_VERSION = "appointment_mock_backend.v1"
+TOOL_CONTRACT_VERSION = "appointment_tool_contract.v1"
+DETERMINISTIC_RANDOM_SEED = 0
 
 
 class MockAgentConfig(BaseModel):
@@ -362,6 +365,9 @@ class MockAgentAdapter(AgentAdapter):
 __all__ = [
     "DEFAULT_BOOKING_ID",
     "DEFAULT_SLOT",
+    "DETERMINISTIC_RANDOM_SEED",
+    "MOCK_BACKEND_VERSION",
     "MockAgentAdapter",
     "MockAgentConfig",
+    "TOOL_CONTRACT_VERSION",
 ]

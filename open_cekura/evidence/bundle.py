@@ -93,6 +93,7 @@ class CampaignBundleInputs:
     baseline_candidate_diff: Mapping[str, JsonValue] | None
     release_gate: Mapping[str, JsonValue]
     regression_cases: tuple[JsonValue, ...]
+    regression_replay: Mapping[str, JsonValue] | None = None
     gate_history: tuple["GateSnapshotInputs", ...] = ()
 
 
@@ -200,6 +201,10 @@ def _prepare_campaign_artifacts(
         raise EvidenceInputError("release_gate must be a JSON object")
     if not isinstance(inputs.regression_cases, tuple):
         raise EvidenceInputError("regression_cases must be a tuple of JSON values")
+    if inputs.regression_replay is not None and not isinstance(
+        inputs.regression_replay, Mapping
+    ):
+        raise EvidenceInputError("regression_replay must be a JSON object or null")
     if not isinstance(inputs.gate_history, tuple) or any(
         not isinstance(snapshot, GateSnapshotInputs) for snapshot in inputs.gate_history
     ):
@@ -218,6 +223,11 @@ def _prepare_campaign_artifacts(
     )
     release_gate_payload = dict(inputs.release_gate)
     regression_payload = list(inputs.regression_cases)
+    regression_replay_payload = (
+        dict(inputs.regression_replay)
+        if inputs.regression_replay is not None
+        else None
+    )
     history_payload, gate_snapshots = _prepare_gate_history(
         inputs,
         current_gate=release_gate_payload,
@@ -230,6 +240,7 @@ def _prepare_campaign_artifacts(
             diff_payload,
             release_gate_payload,
             regression_payload,
+            regression_replay_payload,
             history_payload,
         )
     ) or any(
@@ -247,6 +258,9 @@ def _prepare_campaign_artifacts(
             "gate_history.json": canonical_json_bytes(history_payload),
             "release_gate.json": canonical_json_bytes(release_gate_payload),
             "regression_cases.json": canonical_json_bytes(regression_payload),
+            "regression_replay.json": canonical_json_bytes(
+                regression_replay_payload
+            ),
         }
     except (TypeError, ValueError, UnicodeError, RecursionError) as error:
         raise EvidenceInputError(
@@ -258,7 +272,7 @@ def _prepare_campaign_artifacts(
     try:
         artifact_bytes[CAMPAIGN_SUMMARY_FILENAME] = canonical_json_bytes(
             {
-                "schema_version": 2,
+                "schema_version": 3,
                 "campaign_id": inputs.campaign_id,
                 "summary": summary_payload,
                 "artifacts": covered_hashes,
@@ -507,7 +521,7 @@ def _prepare_artifacts(
             mis_plan_evidence_manifest_id=inputs.mis_plan_evidence_manifest_id,
             git_commit_sha=inputs.git_commit_sha,
             environment=inputs.environment,
-            scenario_sha256=artifact_hashes["scenario.yaml"],
+            scenario_sha256=scenario.canonical_sha256(),
             agent_config_sha256=sha256_bytes(config_bytes),
             evaluator_versions=evaluator_versions,
             artifacts=artifact_hashes,

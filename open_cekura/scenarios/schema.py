@@ -1,6 +1,8 @@
 """Pydantic contract for OpenCekura Scenario YAML schema version 1."""
 from __future__ import annotations
 
+import hashlib
+import json
 from enum import Enum
 from typing import Annotated, Literal
 
@@ -150,3 +152,17 @@ class ScenarioDefinition(StrictContract):
         if len(value) != len(set(value)):
             raise ValueError("tags must not contain duplicates")
         return value
+
+    def canonical_json_bytes(self) -> bytes:
+        """Return the semantic Scenario contract independent of YAML encoding."""
+
+        return json.dumps(
+            self.model_dump(mode="json"),
+            ensure_ascii=False,
+            allow_nan=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+
+    def canonical_sha256(self) -> str:
+        return hashlib.sha256(self.canonical_json_bytes()).hexdigest()

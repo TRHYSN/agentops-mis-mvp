@@ -161,7 +161,7 @@ def domain_objects():
             mis_approval_id="ap_gate_candidate",
         ),
         models.EvidenceManifest(
-            **{**shared, "schema_version": 2},
+            **{**shared, "schema_version": 3},
             id="ocmanifest_change_after_interrupt",
             campaign_id="occampaign_candidate",
             run_id="ocrun_change_after_interrupt",
@@ -210,7 +210,7 @@ def test_all_fifteen_domain_objects_round_trip_canonical_json() -> None:
     for item in objects:
         assert isinstance(item, BaseModel)
         assert item.schema_version == (
-            2 if isinstance(item, models.EvidenceManifest) else 1
+            3 if isinstance(item, models.EvidenceManifest) else 1
         )
         assert item.id
         assert item.created_at.tzinfo is timezone.utc
@@ -278,7 +278,7 @@ def test_derived_objects_keep_explicit_parent_ids() -> None:
             assert getattr(objects[class_name], field_name) == expected
 
 
-def test_evidence_manifest_v2_rejects_pre_release_v1() -> None:
+def test_evidence_manifest_v3_rejects_pre_release_versions() -> None:
     models, _, _ = domain_modules()
     manifest = next(
         item for item in domain_objects() if isinstance(item, models.EvidenceManifest)
@@ -360,12 +360,12 @@ def test_evaluation_status_and_score_are_consistent() -> None:
         )
 
 
-def test_manifest_requires_matching_core_artifact_hashes() -> None:
+def test_manifest_requires_scenario_artifact_coverage() -> None:
     models, enums, _ = domain_modules()
 
-    with pytest.raises(ValidationError, match="scenario_sha256"):
+    with pytest.raises(ValidationError, match="scenario.yaml"):
         models.EvidenceManifest(
-            schema_version=2,
+            schema_version=3,
             id="ocmanifest_invalid",
             campaign_id="occampaign_invalid",
             run_id="ocrun_invalid",
@@ -381,7 +381,6 @@ def test_manifest_requires_matching_core_artifact_hashes() -> None:
             agent_config_sha256="c" * 64,
             evaluator_versions=["task_success.v1"],
             artifacts={
-                "scenario.yaml": "d" * 64,
                 "agent_version.json": "c" * 64,
             },
             started_at=CREATED_AT,

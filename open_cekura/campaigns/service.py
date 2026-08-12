@@ -15,15 +15,28 @@ import os
 import platform
 import sqlite3
 import subprocess
+import tempfile
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from importlib import resources
 from pathlib import Path
 from typing import Any, Mapping
 
 import yaml
 from pydantic import TypeAdapter, ValidationError
 
-from open_cekura.campaigns.runner import CampaignExecution, execute_mock_campaign
-from open_cekura.domain.enums import EvaluationStatus, GateDecision, RunFinalState
+from open_cekura.campaigns.runner import (
+    CampaignExecution,
+    MockCampaignPreparation,
+    execute_mock_campaign,
+    prepare_mock_campaign,
+)
+from open_cekura.domain.enums import (
+    CampaignStatus,
+    EvaluationStatus,
+    GateDecision,
+    RunFinalState,
+)
 from open_cekura.domain.ids import stable_id
 from open_cekura.domain.models import (
     AgentUnderTest,
@@ -35,6 +48,7 @@ from open_cekura.domain.models import (
     EvaluationResult,
     ObservedToolCall,
     RegressionCase,
+    RegressionReplayMapping,
     ReleaseGateDecision,
     ScenarioSuite,
 )
@@ -51,6 +65,7 @@ from open_cekura.evidence.manifest import (
     canonical_json_bytes,
     is_symlink_or_reparse,
     sha256_bytes,
+    validate_path_component,
     verified_campaign_json,
     verify_campaign,
     verify_run_bundles,
@@ -73,13 +88,17 @@ from open_cekura.evidence.publication import (
 from open_cekura.mis.persistence import (
     MISBridgeError,
     PersistedCampaignMappings,
+    persist_campaign_failure,
     persist_campaign_execution,
+    persist_campaign_preparation,
     safe_mis_metadata,
+    validate_plan_authority,
 )
 from open_cekura.release_gate.policy import (
     CampaignGateInput,
     evaluate_release_gate,
 )
+from open_cekura.regression.builder import regression_input_snapshot
 from open_cekura.simulation.mock_agent import MockAgentConfig
 from open_cekura.scenarios.schema import ScenarioDefinition
 from open_cekura.storage.repository import RepositoryError
@@ -92,10 +111,12 @@ DEFAULT_ARTIFACT_ROOT = REPO_ROOT / "artifacts" / "open-cekura"
 EXIT_BLOCKED = 3
 EXIT_EVIDENCE_INVALID = 4
 _MAX_AUTHORITY_ARTIFACT_BYTES = 8 * 1024 * 1024
+_MAX_AUTHORITY_CAMPAIGN_DEPTH = 8
 _EVALUATION_RESULTS_ADAPTER = TypeAdapter(list[EvaluationResult])
 _TURN_RESULTS_ADAPTER = TypeAdapter(list[ConversationTurn])
 _TOOL_CALL_RESULTS_ADAPTER = TypeAdapter(list[ObservedToolCall])
 _REGRESSION_RESULTS_ADAPTER = TypeAdapter(list[RegressionCase])
+_REGRESSION_REPLAY_RESULTS_ADAPTER = TypeAdapter(list[RegressionReplayMapping])
 
 
 class CampaignServiceError(RuntimeError):
@@ -106,13 +127,34 @@ class CampaignServiceError(RuntimeError):
         self.code = code
 
 
+@dataclass(frozen=True, slots=True)
+class _RegressionReplayContext:
+    """Internal request binding for one governed source-to-target replay."""
+
+    source_campaign_id: str
+
+
+def _default_state_root() -> Path:
+    """Keep source runs in-repo and installed runs in the caller's directory."""
+
+    return REPO_ROOT if (REPO_ROOT / ".git").exists() else Path.cwd()
+
+
 def resolve_db_path(value: str | Path | None) -> Path:
     raw = value if value is not None else os.environ.get("AGENTOPS_DB_PATH")
-    return Path(raw).resolve() if raw else (REPO_ROOT / "agentops_mis.db").resolve()
+    return (
+        Path(raw).resolve()
+        if raw
+        else (_default_state_root() / "agentops_mis.db").resolve()
+    )
 
 
 def resolve_artifact_root(value: str | Path | None) -> Path:
-    raw = value if value is not None else DEFAULT_ARTIFACT_ROOT
+    raw = (
+        value
+        if value is not None
+        else _default_state_root() / "artifacts" / "open-cekura"
+    )
     return Path(os.path.abspath(os.fspath(raw)))
 
 
@@ -125,6 +167,7 @@ def run_campaign(
     workspace_id: str,
     db_path: str | Path | None,
     artifact_root: str | Path | None,
+    _regression_replay: _RegressionReplayContext | None = None,
 ) -> dict[str, Any]:
     """Execute, govern, persist, bundle, and verify one deterministic campaign."""
 
@@ -134,51 +177,158 @@ def run_campaign(
         )
     config = _mock_config(version)
     artifacts = resolve_artifact_root(artifact_root)
-    database = resolve_db_path(db_path)
+    governed = workspace_id is not None
+    database = resolve_db_path(db_path) if governed else None
     campaign_id = campaign_id or stable_id(
         "occampaign",
         workspace_id,
         version,
         datetime.now(timezone.utc).isoformat(),
     )
-    _recover_campaign_publication_entry(
-        artifact_root=artifacts,
-        db_path=database,
-        workspace_id=workspace_id,
-        campaign_id=campaign_id,
-    )
+    validate_path_component(workspace_id, label="workspace_id")
+    validate_path_component(campaign_id, label="campaign_id")
+    if (
+        _regression_replay is not None
+        and _regression_replay.source_campaign_id == campaign_id
+    ):
+        raise CampaignServiceError(
+            "regression_replay_campaign_conflict",
+            "replay campaign must differ from its source campaign",
+        )
+    try:
+        _recover_campaign_publication_entry(
+            artifact_root=artifacts,
+            db_path=database,
+            workspace_id=workspace_id,
+            campaign_id=campaign_id,
+        )
+    except CampaignServiceError:
+        raise
+    except Exception:
+        raise CampaignServiceError(
+            "campaign_recovery_failed", "campaign recovery failed"
+        ) from None
     existing_facts = _existing_campaign_facts(artifacts, campaign_id)
     created_at = existing_facts["created_at"] if existing_facts is not None else None
-    execution = asyncio.run(
-        execute_mock_campaign(
-            suite_path=Path(suite_path).resolve(),
-            config=config,
-            version=version,
-            campaign_id=campaign_id,
-            workspace_id=workspace_id,
-            created_at=created_at,
-        )
+    preparation = prepare_mock_campaign(
+        suite_path=Path(suite_path).resolve(),
+        config=config,
+        version=version,
+        campaign_id=campaign_id,
+        workspace_id=workspace_id,
+        created_at=created_at,
     )
     if existing_facts is not None:
-        _validate_idempotent_execution(
-            execution,
+        _validate_idempotent_preparation(
+            preparation,
             facts=existing_facts,
             workspace_id=workspace_id,
+            regression_replay=_regression_replay,
         )
         if not database.is_file():
             raise CampaignServiceError(
                 "campaign_ledger_missing",
                 "existing campaign evidence requires its authoritative MIS ledger",
             )
-    git_commit_sha = _git_commit_sha()
-    environment = _environment()
-
     conn, mis = _open_mis_database(database)
-    publication: CampaignPublication | None = None
     try:
         repository = SQLiteRepository(conn, workspace_id=workspace_id)
         repository.initialize_schema()
+        stored_campaign = repository.get_campaign(campaign_id)
+        if existing_facts is None and stored_campaign is not None:
+            stored_created_at = _parse_utc(stored_campaign["created_at"])
+            if stored_created_at is None:
+                raise CampaignServiceError(
+                    "campaign_ledger_mismatch",
+                    "campaign authority has an invalid creation timestamp",
+                )
+            preparation = preparation.with_created_at(stored_created_at)
+        conn.execute("BEGIN IMMEDIATE")
+        prepared = persist_campaign_preparation(
+            conn,
+            preparation,
+            workspace_id=workspace_id,
+        )
+        conn.commit()
+    except BaseException:
+        if conn.in_transaction:
+            conn.rollback()
+        conn.close()
+        raise
+
+    if prepared.status is CampaignStatus.ERROR:
+        conn.close()
+        raise CampaignServiceError(
+            "campaign_simulation_failed", "campaign simulation failed"
+        )
+    if not prepared.should_execute and prepared.status is CampaignStatus.RUNNING:
+        conn.close()
+        raise CampaignServiceError(
+            "campaign_already_running", "campaign simulation is already running"
+        )
+    if prepared.status is CampaignStatus.COMPLETED and existing_facts is None:
+        conn.close()
+        raise CampaignServiceError(
+            "campaign_ledger_incomplete",
+            "completed campaign authority is missing its evidence bundle",
+        )
+    try:
+        execution = asyncio.run(
+            execute_mock_campaign(
+                suite_path=preparation.suite_path,
+                config=config,
+                version=version,
+                campaign_id=campaign_id,
+                workspace_id=workspace_id,
+                created_at=preparation.campaign.created_at,
+                preparation=preparation,
+            )
+        )
+    except Exception as exc:
+        failure_category = (
+            "simulation_service_error"
+            if isinstance(exc, CampaignServiceError)
+            else "simulation_runtime_error"
+            if isinstance(exc, RuntimeError)
+            else "simulation_error"
+        )
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            persist_campaign_failure(
+                conn,
+                preparation,
+                workspace_id=workspace_id,
+                failure_category=failure_category,
+            )
+            conn.commit()
+        except Exception:
+            if conn.in_transaction:
+                conn.rollback()
+            conn.close()
+            raise
+        conn.close()
+        raise CampaignServiceError(
+            "campaign_simulation_failed", "campaign simulation failed"
+        ) from None
+    except BaseException:
+        # Do not convert operator interrupts into an application failure, but
+        # always release this process's SQLite handle.  The durable RUNNING
+        # authority remains visible for explicit operator recovery.
+        conn.close()
+        raise
+
+    publication: CampaignPublication | None = None
+    try:
+        git_commit_sha = _git_commit_sha()
+        environment = _environment()
+        repository = SQLiteRepository(conn, workspace_id=workspace_id)
+        repository.initialize_schema()
         if existing_facts is not None:
+            _validate_idempotent_execution(
+                execution,
+                facts=existing_facts,
+                workspace_id=workspace_id,
+            )
             if _database_campaign_is_closed(
                 conn,
                 mis=mis,
@@ -202,6 +352,14 @@ def run_campaign(
             execution,
             workspace_id=workspace_id,
         )
+        replay_artifact, replay_pointer = _persist_regression_replay_provenance(
+            conn,
+            mis=mis,
+            repository=repository,
+            execution=execution,
+            artifact_root=artifacts,
+            context=_regression_replay,
+        )
         gate_input = execution.gate_input(evidence_verified=True)
         predicted_gate = evaluate_release_gate(
             gate_input,
@@ -219,6 +377,14 @@ def run_campaign(
             ),
             expected_previous_tree_sha256=None,
         )
+        if _regression_replay is not None:
+            _stage_campaign_reference_closure(
+                publication,
+                gate_history=(),
+                additional_campaign_ids=(
+                    _regression_replay.source_campaign_id,
+                ),
+            )
         manifests = _write_governed_run_bundles(
             conn=conn,
             mis=mis,
@@ -255,6 +421,7 @@ def run_campaign(
             manifests=manifests,
             git_commit_sha=git_commit_sha,
             workspace_id=workspace_id,
+            regression_replay=replay_pointer,
         )
         write_campaign_bundle(
             publication.stage_root,
@@ -264,6 +431,7 @@ def run_campaign(
                 baseline_candidate_diff=None,
                 release_gate=gate.model_dump(mode="json"),
                 regression_cases=_mapped_regressions(execution, mappings),
+                regression_replay=replay_artifact,
             ),
         )
         staged_facts = _load_campaign_facts(publication.stage_root, campaign_id)
@@ -288,17 +456,40 @@ def run_campaign(
             facts=closed_facts,
         )
         conn.commit()
-    except BaseException:
+    except BaseException as exc:
         if conn.in_transaction:
             conn.rollback()
-        _release_or_discard_owned_publication(publication)
-        _recover_campaign_publication_in_connection(
-            conn,
-            mis=mis,
-            repository=SQLiteRepository(conn, workspace_id=workspace_id),
-            artifact_root=artifacts,
-            campaign_id=campaign_id,
-        )
+        try:
+            _release_or_discard_owned_publication(publication)
+            _recover_campaign_publication_in_connection(
+                conn,
+                mis=mis,
+                repository=SQLiteRepository(conn, workspace_id=workspace_id),
+                artifact_root=artifacts,
+                campaign_id=campaign_id,
+            )
+        except BaseException:
+            # Publication recovery is best-effort on a failed run.  Its raw
+            # exception must neither replace the primary failure nor prevent
+            # the authoritative Campaign/Task lifecycle from closing.
+            pass
+        if isinstance(exc, Exception):
+            try:
+                _close_running_campaign_after_failure(
+                    conn,
+                    preparation=preparation,
+                    workspace_id=workspace_id,
+                )
+            except Exception:
+                raise CampaignServiceError(
+                    "campaign_failure_recording_failed",
+                    "campaign failure could not be recorded",
+                ) from None
+            if isinstance(exc, CampaignServiceError):
+                raise exc from None
+            raise CampaignServiceError(
+                "campaign_execution_failed", "campaign execution failed"
+            ) from None
         raise
     else:
         _release_or_discard_owned_publication(publication)
@@ -346,6 +537,9 @@ def compare_campaigns(
             "incompatible_campaigns",
             "baseline and candidate must be different campaigns",
         )
+    validate_path_component(workspace_id, label="workspace_id")
+    validate_path_component(baseline_campaign_id, label="baseline_campaign_id")
+    validate_path_component(candidate_campaign_id, label="candidate_campaign_id")
     artifacts = resolve_artifact_root(artifact_root)
     database = resolve_db_path(db_path)
     conn, mis = _open_mis_database(database)
@@ -423,7 +617,14 @@ def compare_campaigns(
         _stage_campaign_reference_closure(
             publication,
             gate_history=candidate["gate_history"],
-            additional_campaign_ids=(baseline_campaign_id,),
+            additional_campaign_ids=tuple(
+                campaign_reference
+                for campaign_reference in (
+                    baseline_campaign_id,
+                    _stored_replay_source_id(candidate.get("regression_replay")),
+                )
+                if campaign_reference is not None
+            ),
         )
         write_campaign_bundle(
             publication.stage_root,
@@ -436,6 +637,7 @@ def compare_campaigns(
                 baseline_candidate_diff=comparison,
                 release_gate=gate.model_dump(mode="json"),
                 regression_cases=tuple(candidate["regression_cases"]),
+                regression_replay=candidate.get("regression_replay"),
                 gate_history=(
                     *candidate["gate_history"],
                     GateSnapshotInputs(
@@ -515,6 +717,12 @@ def evaluate_campaign_gate(
     """Recompute a gate from verified persisted facts, optionally as a comparison."""
 
     artifacts = resolve_artifact_root(artifact_root)
+    validate_path_component(workspace_id, label="workspace_id")
+    validate_path_component(campaign_id, label="campaign_id")
+    if baseline_campaign_id is not None:
+        validate_path_component(
+            baseline_campaign_id, label="baseline_campaign_id"
+        )
     database = resolve_db_path(db_path)
     conn, mis = _open_mis_database(database)
     publication: CampaignPublication | None = None
@@ -602,8 +810,13 @@ def evaluate_campaign_gate(
         _stage_campaign_reference_closure(
             publication,
             gate_history=candidate["gate_history"],
-            additional_campaign_ids=(
-                (selected_baseline,) if selected_baseline is not None else ()
+            additional_campaign_ids=tuple(
+                campaign_reference
+                for campaign_reference in (
+                    selected_baseline,
+                    _stored_replay_source_id(candidate.get("regression_replay")),
+                )
+                if campaign_reference is not None
             ),
         )
         write_campaign_bundle(
@@ -617,6 +830,7 @@ def evaluate_campaign_gate(
                 baseline_candidate_diff=comparison,
                 release_gate=gate.model_dump(mode="json"),
                 regression_cases=tuple(candidate["regression_cases"]),
+                regression_replay=candidate.get("regression_replay"),
                 gate_history=(
                     *candidate["gate_history"],
                     GateSnapshotInputs(
@@ -692,22 +906,366 @@ def evaluate_campaign_gate(
 
 
 def verify_campaign_evidence(
-    *, campaign_id: str, artifact_root: str | Path | None, strict: bool = False
+    *,
+    campaign_id: str,
+    workspace_id: str | None = None,
+    db_path: str | Path | None = None,
+    artifact_root: str | Path | None,
+    strict: bool = False,
 ) -> dict[str, Any]:
     artifacts = resolve_artifact_root(artifact_root)
+    validate_path_component(campaign_id, label="campaign_id")
+    if workspace_id is not None:
+        validate_path_component(workspace_id, label="workspace_id")
+    governed = workspace_id is not None
+    database = resolve_db_path(db_path) if governed else None
     report = verify_campaign(artifacts, campaign_id, strict=strict)
     issues = _public_issues(report)
+    authority_verified: bool | None = None
+    if report.ok and governed:
+        assert workspace_id is not None and database is not None
+        conn, mis = _open_mis_database(database)
+        try:
+            repository = SQLiteRepository(conn, workspace_id=workspace_id)
+            repository.initialize_schema()
+            _recover_campaign_publication_in_connection(
+                conn,
+                mis=mis,
+                repository=repository,
+                artifact_root=artifacts,
+                campaign_id=campaign_id,
+            )
+            conn.execute("BEGIN IMMEDIATE")
+            facts = _load_campaign_facts(artifacts, campaign_id)
+            _require_authoritative_campaign(
+                conn,
+                mis=mis,
+                repository=repository,
+                facts=facts,
+            )
+            conn.commit()
+            authority_verified = True
+        except BaseException:
+            if conn.in_transaction:
+                conn.rollback()
+            raise
+        finally:
+            conn.close()
+    verified = report.ok and authority_verified is not False
     return {
-        "ok": report.ok,
+        "ok": verified,
         "operation": "evidence_verify",
         "campaign_id": campaign_id,
-        "verified": report.ok,
+        "verified": verified,
+        "authority_verified": authority_verified,
         "run_count": len(report.runs),
         "issue_count": len(issues),
         "issues": issues,
         "artifact_root": str(artifacts),
+        "database": None if database is None else str(database),
         "token_omitted": True,
     }
+
+
+def replay_campaign_regressions(
+    *,
+    source_campaign_id: str,
+    version: str = "candidate",
+    replay_campaign_id: str | None = None,
+    workspace_id: str,
+    db_path: str | Path | None,
+    artifact_root: str | Path | None,
+) -> dict[str, Any]:
+    """Replay persisted RegressionCases through a complete governed Campaign."""
+
+    artifacts = resolve_artifact_root(artifact_root)
+    validate_path_component(workspace_id, label="workspace_id")
+    validate_path_component(source_campaign_id, label="source_campaign_id")
+    if replay_campaign_id is not None:
+        validate_path_component(replay_campaign_id, label="replay_campaign_id")
+    database = resolve_db_path(db_path)
+    conn, mis = _open_mis_database(database)
+    try:
+        repository = SQLiteRepository(conn, workspace_id=workspace_id)
+        repository.initialize_schema()
+        _recover_campaign_publication_in_connection(
+            conn,
+            mis=mis,
+            repository=repository,
+            artifact_root=artifacts,
+            campaign_id=source_campaign_id,
+        )
+        conn.execute("BEGIN IMMEDIATE")
+        # Loading facts performs content-addressed Evidence verification while
+        # the matching MIS authority is held stable in this read transaction.
+        source_facts = _load_campaign_facts(artifacts, source_campaign_id)
+        source_campaign = _require_authoritative_campaign(
+            conn,
+            mis=mis,
+            repository=repository,
+            facts=source_facts,
+        )
+        try:
+            regressions = _REGRESSION_RESULTS_ADAPTER.validate_json(
+                canonical_json_bytes(source_facts["regression_cases"])
+            )
+        except (TypeError, ValueError, ValidationError) as exc:
+            raise CampaignServiceError(
+                "regression_contract_invalid",
+                "verified regression cases do not satisfy the RegressionCase contract",
+            ) from exc
+        if not regressions:
+            raise CampaignServiceError(
+                "regression_cases_not_found",
+                "source campaign has no persisted regression cases to replay",
+            )
+        source_scenarios = _reconciled_regression_scenarios(
+            conn,
+            workspace_id=workspace_id,
+            source_campaign_id=source_campaign_id,
+            source_suite_id=str(source_campaign["scenario_suite_id"]),
+            regressions=tuple(regressions),
+        )
+        conn.commit()
+    except BaseException:
+        if conn.in_transaction:
+            conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+    # Reject unsupported profiles only after the source evidence/authority
+    # chain has been checked.  No target rows exist at this point.
+    _mock_config(version)
+    replay_digest = sha256_bytes(
+        canonical_json_bytes(
+            [
+                {
+                    "regression_id": regression.id,
+                    "scenario_id": regression.scenario_id,
+                    "scenario_sha256": source_scenarios[
+                        regression.scenario_id
+                    ].canonical_sha256(),
+                }
+                for regression in sorted(regressions, key=lambda item: item.id)
+            ]
+        )
+    )
+    target_campaign_id = replay_campaign_id or stable_id(
+        "occampaign",
+        "regression_replay",
+        workspace_id,
+        source_campaign_id,
+        version,
+        replay_digest,
+    )
+    if target_campaign_id == source_campaign_id:
+        raise CampaignServiceError(
+            "regression_replay_campaign_conflict",
+            "replay campaign must differ from its source campaign",
+        )
+
+    replay_scenarios, scenario_id_mapping = _derive_replay_scenarios(
+        source_campaign_id=source_campaign_id,
+        regressions=tuple(regressions),
+        source_scenarios=source_scenarios,
+    )
+    ordered_scenarios = tuple(replay_scenarios[key] for key in sorted(replay_scenarios))
+    with tempfile.TemporaryDirectory(prefix="open-cekura-regression-") as temporary:
+        suite_path = Path(temporary)
+        for index, scenario in enumerate(ordered_scenarios):
+            name = f"{index:03d}-{scenario.canonical_sha256()[:16]}.yaml"
+            _atomic_write_replay_scenario(
+                suite_path / name,
+                scenario.canonical_json_bytes() + b"\n",
+            )
+        run_result = run_campaign(
+            suite_path=suite_path,
+            agent="mock",
+            version=version,
+            campaign_id=target_campaign_id,
+            workspace_id=workspace_id,
+            db_path=database,
+            artifact_root=artifacts,
+            _regression_replay=_RegressionReplayContext(
+                source_campaign_id=source_campaign_id,
+            ),
+        )
+
+    return {
+        "ok": bool(run_result.get("ok")),
+        "operation": "regression_replay",
+        "source_campaign_id": source_campaign_id,
+        "replay_campaign_id": target_campaign_id,
+        "version": version,
+        "regression_count": len(regressions),
+        "scenario_count": len(ordered_scenarios),
+        "regression_case_ids": [item.id for item in regressions],
+        "scenario_ids": [item.id for item in ordered_scenarios],
+        "source_scenario_ids": sorted(source_scenarios),
+        "scenario_id_mapping": scenario_id_mapping,
+        "run_result": run_result,
+        "token_omitted": True,
+    }
+
+
+def _persist_regression_replay_provenance(
+    conn: sqlite3.Connection,
+    *,
+    mis: Any,
+    repository: SQLiteRepository,
+    execution: CampaignExecution,
+    artifact_root: Path,
+    context: _RegressionReplayContext | None,
+) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    """Persist and serialize one replay edge inside the campaign transaction."""
+
+    existing_rows = repository.list_regression_replays(execution.campaign.id)
+    if context is None:
+        if existing_rows:
+            raise CampaignServiceError(
+                "campaign_id_conflict",
+                "non-replay campaign ID is already bound to replay provenance",
+            )
+        return None, None
+
+    source_facts = _load_campaign_facts(
+        artifact_root,
+        context.source_campaign_id,
+    )
+    source_campaign = _require_authoritative_campaign(
+        conn,
+        mis=mis,
+        repository=repository,
+        facts=source_facts,
+    )
+    try:
+        regressions = tuple(
+            _REGRESSION_RESULTS_ADAPTER.validate_json(
+                canonical_json_bytes(source_facts["regression_cases"])
+            )
+        )
+    except (TypeError, ValueError, ValidationError) as exc:
+        raise CampaignServiceError(
+            "regression_contract_invalid",
+            "verified regression cases do not satisfy the RegressionCase contract",
+        ) from exc
+    if not regressions:
+        raise CampaignServiceError(
+            "regression_cases_not_found",
+            "source campaign has no persisted regression cases to replay",
+        )
+
+    source_scenarios = _reconciled_regression_scenarios(
+        conn,
+        workspace_id=repository.workspace_id,
+        source_campaign_id=context.source_campaign_id,
+        source_suite_id=str(source_campaign["scenario_suite_id"]),
+        regressions=regressions,
+    )
+    expected_replay_scenarios, scenario_id_mapping = _derive_replay_scenarios(
+        source_campaign_id=context.source_campaign_id,
+        regressions=regressions,
+        source_scenarios=source_scenarios,
+    )
+    expected_by_replay_id = {
+        scenario.id: scenario for scenario in expected_replay_scenarios.values()
+    }
+    actual_replay_scenarios = {
+        record.scenario_contract.id: record.scenario_contract
+        for record in execution.records
+    }
+    replay_run_by_scenario = {
+        record.scenario.id: record.simulation.run.id
+        for record in execution.records
+    }
+    if (
+        actual_replay_scenarios != expected_by_replay_id
+        or set(replay_run_by_scenario) != set(expected_by_replay_id)
+        or len(replay_run_by_scenario) != len(execution.records)
+    ):
+        raise CampaignServiceError(
+            "regression_replay_contract_drift",
+            "target campaign scenarios do not match the source regression contract",
+        )
+
+    persisted: list[RegressionReplayMapping] = []
+    for regression in sorted(regressions, key=lambda item: item.id):
+        replay_scenario_id = scenario_id_mapping.get(regression.scenario_id)
+        replay_scenario = expected_by_replay_id.get(replay_scenario_id or "")
+        replay_run_id = replay_run_by_scenario.get(replay_scenario_id or "")
+        failure = conn.execute(
+            """SELECT evaluation_result_id FROM reliability_failures
+            WHERE workspace_id=? AND failure_id=?""",
+            (repository.workspace_id, regression.failure_case_id),
+        ).fetchone()
+        if (
+            replay_scenario_id is None
+            or replay_scenario is None
+            or replay_run_id is None
+            or failure is None
+            or not failure["evaluation_result_id"]
+            or regression.mis_memory_id is None
+        ):
+            raise CampaignServiceError(
+                "campaign_ledger_mismatch",
+                "regression replay provenance lacks authoritative source or target facts",
+            )
+        mapping = RegressionReplayMapping(
+            schema_version=1,
+            id=stable_id(
+                "ocreplaymap",
+                repository.workspace_id,
+                execution.campaign.id,
+                regression.id,
+                replay_run_id,
+            ),
+            source_campaign_id=context.source_campaign_id,
+            target_campaign_id=execution.campaign.id,
+            regression_case_id=regression.id,
+            source_run_id=regression.source_run_id,
+            source_evaluation_result_id=str(failure["evaluation_result_id"]),
+            evaluator_id=regression.evaluator_id,
+            source_scenario_id=regression.scenario_id,
+            replay_scenario_id=replay_scenario_id,
+            replay_run_id=replay_run_id,
+            source_snapshot_sha256=sha256_bytes(
+                canonical_json_bytes(regression.original_input)
+            ),
+            source_scenario_sha256=source_scenarios[
+                regression.scenario_id
+            ].canonical_sha256(),
+            replay_scenario_sha256=replay_scenario.canonical_sha256(),
+            mis_memory_id=regression.mis_memory_id,
+            created_at=execution.campaign.created_at,
+        )
+        try:
+            repository.upsert_regression_replay(mapping)
+        except RepositoryError as exc:
+            raise CampaignServiceError(
+                "campaign_ledger_mismatch",
+                "regression replay provenance does not match MIS authority",
+            ) from exc
+        persisted.append(mapping)
+
+    mapping_payload = [
+        mapping.model_dump(mode="json")
+        for mapping in sorted(persisted, key=lambda item: item.id)
+    ]
+    artifact = {
+        "schema_version": 1,
+        "source_campaign_id": context.source_campaign_id,
+        "target_campaign_id": execution.campaign.id,
+        "mappings": mapping_payload,
+    }
+    pointer = {
+        "schema_version": 1,
+        "source_campaign_id": context.source_campaign_id,
+        "target_campaign_id": execution.campaign.id,
+        "mapping_ids": [mapping["id"] for mapping in mapping_payload],
+        "mapping_sha256": sha256_bytes(canonical_json_bytes(mapping_payload)),
+    }
+    return artifact, pointer
 
 
 def _mock_config(version: str) -> MockAgentConfig:
@@ -718,6 +1276,167 @@ def _mock_config(version: str) -> MockAgentConfig:
     raise CampaignServiceError(
         "unsupported_mock_version", "mock version must be baseline or candidate"
     )
+
+
+def _reconciled_regression_scenarios(
+    conn: sqlite3.Connection,
+    *,
+    workspace_id: str,
+    source_campaign_id: str,
+    source_suite_id: str,
+    regressions: tuple[RegressionCase, ...],
+) -> dict[str, ScenarioDefinition]:
+    """Rebuild replay inputs from already-reconciled typed SQLite columns."""
+
+    run_rows = {
+        str(row["run_id"]): str(row["scenario_id"])
+        for row in conn.execute(
+            """SELECT run_id,scenario_id FROM reliability_conversation_runs
+            WHERE workspace_id=? AND campaign_id=?""",
+            (workspace_id, source_campaign_id),
+        ).fetchall()
+    }
+    scenarios: dict[str, ScenarioDefinition] = {}
+    for regression in regressions:
+        if run_rows.get(regression.source_run_id) != regression.scenario_id:
+            raise CampaignServiceError(
+                "regression_source_mismatch",
+                "regression source run is not anchored to its source campaign scenario",
+            )
+        row = conn.execute(
+            """SELECT schema_version,scenario_id,suite_id,name,initial_message,
+                      goal_type,source_sha256,persona_json,goal_json,
+                      challenges_json,expectations_json,tags_json
+            FROM reliability_scenarios
+            WHERE workspace_id=? AND suite_id=? AND scenario_id=?""",
+            (workspace_id, source_suite_id, regression.scenario_id),
+        ).fetchone()
+        if row is None:
+            raise CampaignServiceError(
+                "regression_contract_drift",
+                "regression scenario is missing from its authoritative source suite",
+            )
+        try:
+            scenario = ScenarioDefinition.model_validate(
+                {
+                    "schema_version": row["schema_version"],
+                    "id": row["scenario_id"],
+                    "name": row["name"],
+                    "persona": json.loads(row["persona_json"]),
+                    "initial_message": row["initial_message"],
+                    "goal": json.loads(row["goal_json"]),
+                    "challenges": json.loads(row["challenges_json"]),
+                    "expectations": json.loads(row["expectations_json"]),
+                    "tags": json.loads(row["tags_json"]),
+                }
+            )
+        except (TypeError, ValueError, json.JSONDecodeError, ValidationError) as exc:
+            raise CampaignServiceError(
+                "regression_contract_drift",
+                "authoritative regression scenario columns are not a valid Scenario v1 contract",
+            ) from exc
+        if (
+            scenario.goal.type.value != row["goal_type"]
+            or scenario.canonical_sha256() != row["source_sha256"]
+            or regression.original_input != regression_input_snapshot(scenario)
+        ):
+            raise CampaignServiceError(
+                "regression_contract_drift",
+                "authoritative regression scenario no longer matches its captured input snapshot",
+            )
+        previous = scenarios.get(scenario.id)
+        if (
+            previous is not None
+            and previous.canonical_json_bytes() != scenario.canonical_json_bytes()
+        ):
+            raise CampaignServiceError(
+                "regression_contract_drift",
+                "duplicate regression scenario IDs resolve to different contracts",
+            )
+        scenarios[scenario.id] = scenario
+    return scenarios
+
+
+def _derive_replay_scenarios(
+    *,
+    source_campaign_id: str,
+    regressions: tuple[RegressionCase, ...],
+    source_scenarios: Mapping[str, ScenarioDefinition],
+) -> tuple[dict[str, ScenarioDefinition], dict[str, str]]:
+    """Derive replay-local IDs without rebinding authoritative source rows."""
+
+    regression_ids_by_scenario: dict[str, list[str]] = {}
+    for regression in regressions:
+        regression_ids_by_scenario.setdefault(regression.scenario_id, []).append(
+            regression.id
+        )
+    replay_scenarios: dict[str, ScenarioDefinition] = {}
+    mapping: dict[str, str] = {}
+    for source_scenario_id in sorted(source_scenarios):
+        source = source_scenarios[source_scenario_id]
+        replay_scenario_id = stable_id(
+            "ocreplay",
+            source_campaign_id,
+            source_scenario_id,
+            source.canonical_sha256(),
+            *sorted(regression_ids_by_scenario[source_scenario_id]),
+        )
+        replay_scenarios[source_scenario_id] = source.model_copy(
+            update={"id": replay_scenario_id}
+        )
+        mapping[source_scenario_id] = replay_scenario_id
+    return replay_scenarios, mapping
+
+
+def _atomic_write_replay_scenario(path: Path, content: bytes) -> None:
+    """Write one temporary replay Scenario with Windows-safe replacement."""
+
+    descriptor, temporary_name = tempfile.mkstemp(
+        dir=path.parent,
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+    )
+    temporary_path = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "wb") as stream:
+            descriptor = -1
+            stream.write(content)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary_path, path)
+    except BaseException:
+        if descriptor >= 0:
+            os.close(descriptor)
+        temporary_path.unlink(missing_ok=True)
+        raise
+
+
+def _close_running_campaign_after_failure(
+    conn: sqlite3.Connection,
+    *,
+    preparation: MockCampaignPreparation,
+    workspace_id: str,
+) -> None:
+    row = conn.execute(
+        """SELECT status FROM reliability_campaigns
+        WHERE workspace_id=? AND campaign_id=?""",
+        (workspace_id, preparation.campaign.id),
+    ).fetchone()
+    if row is None or row["status"] != CampaignStatus.RUNNING.value:
+        return
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        persist_campaign_failure(
+            conn,
+            preparation,
+            workspace_id=workspace_id,
+            failure_category="post_simulation_error",
+        )
+        conn.commit()
+    except Exception:
+        if conn.in_transaction:
+            conn.rollback()
+        raise
 
 
 def _existing_campaign_facts(
@@ -804,6 +1523,7 @@ def _database_campaign_is_closed(
             repository=repository,
             campaign=campaign,
             facts=facts,
+            authority_stack=frozenset({campaign_id}),
         )
     except (
         MISBridgeError,
@@ -1123,6 +1843,42 @@ def _validate_idempotent_execution(
         "scenario suite": isinstance(stored_suite, dict)
         and stored_suite.get("id") == execution.scenario_suite.id,
         "campaign": facts["gate_input"].campaign_id == execution.campaign.id,
+    }
+    failed = [name for name, matches in checks.items() if not matches]
+    if failed:
+        raise CampaignServiceError(
+            "campaign_id_conflict",
+            "existing campaign ID is bound to different " + ", ".join(failed),
+        )
+
+
+def _validate_idempotent_preparation(
+    preparation: MockCampaignPreparation,
+    *,
+    facts: Mapping[str, Any],
+    workspace_id: str,
+    regression_replay: _RegressionReplayContext | None,
+) -> None:
+    summary = facts["summary"]
+    stored_version = summary.get("agent_version")
+    stored_suite = summary.get("scenario_suite")
+    stored_replay_source = _stored_replay_source_id(
+        facts.get("regression_replay")
+    )
+    expected_replay_source = (
+        None
+        if regression_replay is None
+        else regression_replay.source_campaign_id
+    )
+    checks = {
+        "workspace": summary.get("workspace_id") == workspace_id,
+        "agent version": isinstance(stored_version, dict)
+        and stored_version.get("id") == preparation.agent_version.id,
+        "scenario suite": isinstance(stored_suite, dict)
+        and stored_suite.get("id") == preparation.scenario_suite.id,
+        "campaign": facts["gate_input"].campaign_id == preparation.campaign.id,
+        "regression replay": stored_replay_source == expected_replay_source
+        and ((facts.get("regression_replay") is None) == (regression_replay is None)),
     }
     failed = [name for name, matches in checks.items() if not matches]
     if failed:
@@ -1848,9 +2604,10 @@ def _campaign_summary(
     manifests: tuple[dict[str, Any], ...],
     git_commit_sha: str,
     workspace_id: str,
+    regression_replay: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     return {
-        "schema_version": 2,
+        "schema_version": 3,
         "campaign": execution.campaign.model_dump(mode="json"),
         "campaign_created_at": _utc_text(execution.campaign.created_at),
         "workspace_id": workspace_id,
@@ -1879,6 +2636,9 @@ def _campaign_summary(
         "git_commit_sha": git_commit_sha,
         "failure_count": len(execution.failures),
         "regression_count": len(execution.regressions),
+        "regression_replay": (
+            dict(regression_replay) if regression_replay is not None else None
+        ),
     }
 
 
@@ -1916,6 +2676,10 @@ def _load_campaign_facts(artifact_root: Path, campaign_id: str) -> dict[str, Any
         regressions = verified_campaign_json(
             report,
             "regression_cases.json",
+        )
+        regression_replay = verified_campaign_json(
+            report,
+            "regression_replay.json",
         )
         release_gate = ReleaseGateDecision.model_validate_json(
             canonical_json_bytes(
@@ -1960,6 +2724,7 @@ def _load_campaign_facts(artifact_root: Path, campaign_id: str) -> dict[str, Any
         "created_at": created_at,
         "diff": diff,
         "regression_cases": regressions,
+        "regression_replay": regression_replay,
         "release_gate": release_gate,
         "gate_history": gate_history,
         "current_gate_id": current_gate_id,
@@ -1986,6 +2751,7 @@ def _require_authoritative_campaign(
     mis: Any,
     repository: SQLiteRepository,
     facts: Mapping[str, Any],
+    _authority_stack: frozenset[str] = frozenset(),
 ) -> Mapping[str, Any]:
     """Reconcile verified files with both vertical and core MIS authority."""
 
@@ -1996,6 +2762,14 @@ def _require_authoritative_campaign(
             "verified campaign facts cannot be reconciled with the MIS ledger",
         )
     campaign = _require_persisted_campaign(repository, gate_input.campaign_id)
+    if (
+        gate_input.campaign_id in _authority_stack
+        or len(_authority_stack) >= _MAX_AUTHORITY_CAMPAIGN_DEPTH
+    ):
+        raise CampaignServiceError(
+            "campaign_ledger_mismatch",
+            "campaign replay authority contains a cycle or exceeds its depth limit",
+        )
     try:
         matches = _campaign_authority_matches(
             conn,
@@ -2003,8 +2777,17 @@ def _require_authoritative_campaign(
             repository=repository,
             campaign=campaign,
             facts=facts,
+            authority_stack=_authority_stack | {gate_input.campaign_id},
         )
-    except (OSError, sqlite3.Error, ValidationError, ValueError, TypeError) as exc:
+    except (
+        MISBridgeError,
+        OSError,
+        RepositoryError,
+        sqlite3.Error,
+        ValidationError,
+        ValueError,
+        TypeError,
+    ) as exc:
         raise CampaignServiceError(
             "campaign_ledger_mismatch",
             f"campaign {gate_input.campaign_id} evidence does not match its authoritative MIS ledger",
@@ -2024,6 +2807,7 @@ def _campaign_authority_matches(
     repository: SQLiteRepository,
     campaign: Mapping[str, Any],
     facts: Mapping[str, Any],
+    authority_stack: frozenset[str],
 ) -> bool:
     gate_input = facts["gate_input"]
     summary = facts.get("summary")
@@ -2058,6 +2842,7 @@ def _campaign_authority_matches(
         task is None
         or plan is None
         or task["workspace_id"] != repository.workspace_id
+        or task["status"] != "completed"
         or plan["workspace_id"] != repository.workspace_id
         or plan["task_id"] != campaign["mis_task_id"]
         or plan["agent_id"] != task["owner_agent_id"]
@@ -2077,6 +2862,8 @@ def _campaign_authority_matches(
         )
     ):
         return False
+
+    validate_plan_authority(conn, mis=mis, plan=plan)
 
     run_rows = {
         row["run_id"]: row
@@ -2180,6 +2967,17 @@ def _campaign_authority_matches(
         evaluations=verified_evaluations,
     ):
         return False
+    if not _regression_replay_authority_matches(
+        conn=conn,
+        mis=mis,
+        repository=repository,
+        campaign=campaign,
+        facts=facts,
+        summary=summary,
+        replay_payload=facts.get("regression_replay"),
+        authority_stack=authority_stack,
+    ):
+        return False
     return _gate_history_authority_matches(
         conn,
         repository=repository,
@@ -2265,7 +3063,7 @@ def _vertical_campaign_hierarchy_matches(
             contract = ScenarioDefinition.model_validate_json(
                 canonical_json_bytes(yaml.safe_load(source))
             )
-            digest = sha256_bytes(source)
+            digest = contract.canonical_sha256()
             previous = contracts.get(contract.id)
             if previous is not None and previous != (contract, digest):
                 return False
@@ -2794,6 +3592,76 @@ def _regression_authority_matches(
     return True
 
 
+def _regression_replay_authority_matches(
+    *,
+    conn: sqlite3.Connection,
+    mis: Any,
+    repository: SQLiteRepository,
+    campaign: Mapping[str, Any],
+    facts: Mapping[str, Any],
+    summary: Mapping[str, Any],
+    replay_payload: object,
+    authority_stack: frozenset[str],
+) -> bool:
+    """Reconcile immutable replay Evidence with its typed SQLite/MIS edge."""
+
+    rows = repository.list_regression_replays(str(campaign.get("campaign_id") or ""))
+    if replay_payload is None:
+        return not rows and summary.get("regression_replay") is None
+    if (
+        not isinstance(replay_payload, dict)
+        or replay_payload.get("schema_version") != 1
+        or not isinstance(replay_payload.get("source_campaign_id"), str)
+        or replay_payload.get("target_campaign_id") != campaign.get("campaign_id")
+        or not isinstance(replay_payload.get("mappings"), list)
+    ):
+        return False
+    report = facts.get("verification_report")
+    if not isinstance(report, VerificationReport):
+        return False
+    try:
+        source_facts = _load_campaign_facts(
+            report.root,
+            str(replay_payload["source_campaign_id"]),
+        )
+        _require_authoritative_campaign(
+            conn,
+            mis=mis,
+            repository=repository,
+            facts=source_facts,
+            _authority_stack=authority_stack,
+        )
+    except CampaignServiceError:
+        return False
+    try:
+        mappings = _REGRESSION_REPLAY_RESULTS_ADAPTER.validate_json(
+            canonical_json_bytes(replay_payload["mappings"])
+        )
+    except (TypeError, ValueError, ValidationError):
+        return False
+    expected_rows: dict[str, dict[str, Any]] = {}
+    for mapping in mappings:
+        data = mapping.model_dump(mode="json")
+        expected_rows[mapping.id] = {
+            "workspace_id": repository.workspace_id,
+            "mapping_id": data.pop("id"),
+            **data,
+        }
+    actual_rows = {
+        str(row.get("mapping_id") or ""): dict(row)
+        for row in rows
+    }
+    if actual_rows != expected_rows:
+        return False
+    try:
+        return all(
+            repository.upsert_regression_replay(mapping) == "unchanged"
+            for mapping in mappings
+        )
+    except RepositoryError:
+        return False
+
+
 def _compact_json(value: object) -> str:
     return json.dumps(
         value,
@@ -2999,6 +3867,13 @@ def _stored_baseline_id(value: object) -> str | None:
     return baseline if isinstance(baseline, str) and baseline else None
 
 
+def _stored_replay_source_id(value: object) -> str | None:
+    if not isinstance(value, dict):
+        return None
+    source = value.get("source_campaign_id")
+    return source if isinstance(source, str) and source else None
+
+
 def _stage_campaign_reference_closure(
     publication: CampaignPublication,
     *,
@@ -3041,6 +3916,11 @@ def _stage_campaign_reference_closure(
             )
             is not None
         )
+        replay_source_id = _stored_replay_source_id(
+            facts.get("regression_replay")
+        )
+        if replay_source_id is not None:
+            pending.append(replay_source_id)
 
 
 def _deterministic_final_state(evaluations: tuple[Any, ...]) -> RunFinalState:
@@ -3055,6 +3935,7 @@ def _deterministic_final_state(evaluations: tuple[Any, ...]) -> RunFinalState:
 
 
 def _git_commit_sha() -> str:
+    commit = ""
     try:
         result = subprocess.run(
             ["git", "-C", str(REPO_ROOT), "rev-parse", "HEAD"],
@@ -3065,20 +3946,34 @@ def _git_commit_sha() -> str:
             check=False,
             shell=False,
         )
-    except (OSError, subprocess.SubprocessError) as exc:
-        raise CampaignServiceError(
-            "git_commit_unavailable", "cannot determine the repository commit"
-        ) from exc
-    commit = result.stdout.strip().lower()
-    if (
-        result.returncode != 0
-        or len(commit) != 40
-        or any(character not in "0123456789abcdef" for character in commit)
-    ):
-        raise CampaignServiceError(
-            "git_commit_unavailable", "cannot determine the repository commit"
+    except (OSError, subprocess.SubprocessError):
+        result = None
+    if result is not None and result.returncode == 0:
+        commit = result.stdout.strip().lower()
+    if _is_commit_sha(commit):
+        return commit
+
+    try:
+        packaged = (
+            resources.files("open_cekura")
+            .joinpath("_build_commit.txt")
+            .read_text(encoding="ascii")
+            .strip()
+            .lower()
         )
-    return commit
+    except (FileNotFoundError, OSError, TypeError):
+        packaged = ""
+    if _is_commit_sha(packaged):
+        return packaged
+    raise CampaignServiceError(
+        "git_commit_unavailable", "cannot determine the repository commit"
+    )
+
+
+def _is_commit_sha(value: str) -> bool:
+    return len(value) == 40 and all(
+        character in "0123456789abcdef" for character in value
+    )
 
 
 def _environment() -> EvidenceEnvironment:
@@ -3167,6 +4062,7 @@ __all__ = [
     "EXIT_EVIDENCE_INVALID",
     "compare_campaigns",
     "evaluate_campaign_gate",
+    "replay_campaign_regressions",
     "resolve_artifact_root",
     "resolve_db_path",
     "run_campaign",

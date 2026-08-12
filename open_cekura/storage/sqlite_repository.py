@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import itertools
 import json
 import re
@@ -24,6 +25,7 @@ from open_cekura.domain.models import (
     ObservedToolCall,
     Persona,
     RegressionCase,
+    RegressionReplayMapping,
     ReleaseGateDecision,
     Scenario,
     ScenarioSuite,
@@ -155,6 +157,14 @@ _STRUCTURAL_PUBLIC_KEYS = frozenset(
         "policyversion",
         "reasoncodes",
         "regressionid",
+        "mappingid",
+        "regressioncaseid",
+        "replayrunid",
+        "replayscenarioid",
+        "sourcecampaignid",
+        "sourceevaluationresultid",
+        "sourcescenarioid",
+        "targetcampaignid",
         "role",
         "runid",
         "schemaversion",
@@ -184,6 +194,7 @@ _DOMAIN_ROW_ID_KEYS = frozenset(
         "manifestid",
         "personaid",
         "regressionid",
+        "mappingid",
         "runid",
         "scenarioid",
         "suiteid",
@@ -450,6 +461,45 @@ CREATE TABLE IF NOT EXISTS reliability_regressions (
     FOREIGN KEY(mis_memory_id) REFERENCES memories(memory_id)
 );
 
+CREATE TABLE IF NOT EXISTS reliability_regression_replays (
+    workspace_id TEXT NOT NULL,
+    mapping_id TEXT NOT NULL,
+    schema_version INTEGER NOT NULL CHECK(schema_version = 1),
+    source_campaign_id TEXT NOT NULL,
+    target_campaign_id TEXT NOT NULL,
+    regression_case_id TEXT NOT NULL,
+    source_run_id TEXT NOT NULL,
+    source_evaluation_result_id TEXT NOT NULL,
+    evaluator_id TEXT NOT NULL,
+    source_scenario_id TEXT NOT NULL,
+    replay_scenario_id TEXT NOT NULL,
+    replay_run_id TEXT NOT NULL,
+    source_snapshot_sha256 TEXT NOT NULL CHECK(length(source_snapshot_sha256) = 64),
+    source_scenario_sha256 TEXT NOT NULL CHECK(length(source_scenario_sha256) = 64),
+    replay_scenario_sha256 TEXT NOT NULL CHECK(length(replay_scenario_sha256) = 64),
+    mis_memory_id TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY(workspace_id, mapping_id),
+    UNIQUE(workspace_id, target_campaign_id, regression_case_id),
+    FOREIGN KEY(workspace_id, source_campaign_id)
+        REFERENCES reliability_campaigns(workspace_id, campaign_id),
+    FOREIGN KEY(workspace_id, target_campaign_id)
+        REFERENCES reliability_campaigns(workspace_id, campaign_id),
+    FOREIGN KEY(workspace_id, regression_case_id)
+        REFERENCES reliability_regressions(workspace_id, regression_id),
+    FOREIGN KEY(workspace_id, source_scenario_id)
+        REFERENCES reliability_scenarios(workspace_id, scenario_id),
+    FOREIGN KEY(workspace_id, replay_scenario_id)
+        REFERENCES reliability_scenarios(workspace_id, scenario_id),
+    FOREIGN KEY(workspace_id, source_run_id)
+        REFERENCES reliability_conversation_runs(workspace_id, run_id),
+    FOREIGN KEY(workspace_id, replay_run_id)
+        REFERENCES reliability_conversation_runs(workspace_id, run_id),
+    FOREIGN KEY(workspace_id, source_evaluation_result_id)
+        REFERENCES reliability_evaluation_results(workspace_id, evaluation_id),
+    FOREIGN KEY(mis_memory_id) REFERENCES memories(memory_id)
+);
+
 CREATE TABLE IF NOT EXISTS reliability_release_gates (
     workspace_id TEXT NOT NULL,
     gate_id TEXT NOT NULL,
@@ -505,7 +555,7 @@ CREATE TABLE IF NOT EXISTS reliability_evidence_publications (
 CREATE TABLE IF NOT EXISTS reliability_evidence_manifests (
     workspace_id TEXT NOT NULL,
     manifest_id TEXT NOT NULL,
-    schema_version INTEGER NOT NULL CHECK(schema_version = 2),
+    schema_version INTEGER NOT NULL CHECK(schema_version = 3),
     campaign_id TEXT NOT NULL,
     run_id TEXT NOT NULL,
     mis_artifact_id TEXT,
@@ -640,12 +690,12 @@ class SQLiteRepository:
             "WHERE type='table' AND name='reliability_evidence_manifests'"
         ).fetchone()
         if manifest_table is not None and re.search(
-            r"CHECK\s*\(\s*schema_version\s*=\s*2\s*\)",
+            r"CHECK\s*\(\s*schema_version\s*=\s*3\s*\)",
             str(manifest_table[0] or ""),
             flags=re.IGNORECASE,
         ) is None:
             raise RepositoryError(
-                "OpenCekura pre-release EvidenceManifest schema v1 database is "
+                "OpenCekura pre-release EvidenceManifest schema v1/v2 database is "
                 "unsupported; create a fresh database and regenerate campaign "
                 "evidence"
             )
@@ -1303,6 +1353,220 @@ class SQLiteRepository:
             },
         )
 
+    def upsert_regression_replay(self, mapping: RegressionReplayMapping) -> str:
+        """Persist an immutable, authority-checked regression replay edge."""
+
+        self._expect_model(mapping, RegressionReplayMapping, "mapping")
+        source_campaign = self._require_vertical(
+            "reliability_campaigns", "campaign_id", mapping.source_campaign_id
+        )
+        target_campaign = self._require_vertical(
+            "reliability_campaigns", "campaign_id", mapping.target_campaign_id
+        )
+        if mapping.source_campaign_id == mapping.target_campaign_id:
+            raise RepositoryConflictError(
+                "regression replay source and target campaigns must differ"
+            )
+        regression = self._require_vertical(
+            "reliability_regressions", "regression_id", mapping.regression_case_id
+        )
+        failure = self._require_vertical(
+            "reliability_failures", "failure_id", regression["failure_case_id"]
+        )
+        source_run = self._require_vertical(
+            "reliability_conversation_runs", "run_id", mapping.source_run_id
+        )
+        replay_run = self._require_vertical(
+            "reliability_conversation_runs", "run_id", mapping.replay_run_id
+        )
+        source_scenario = self._require_vertical(
+            "reliability_scenarios", "scenario_id", mapping.source_scenario_id
+        )
+        replay_scenario = self._require_vertical(
+            "reliability_scenarios", "scenario_id", mapping.replay_scenario_id
+        )
+        evaluation = self._require_vertical(
+            "reliability_evaluation_results",
+            "evaluation_id",
+            mapping.source_evaluation_result_id,
+        )
+
+        if source_run["campaign_id"] != mapping.source_campaign_id:
+            raise RepositoryConflictError(
+                "source run does not belong to the source campaign"
+            )
+        if source_run["scenario_id"] != mapping.source_scenario_id:
+            raise RepositoryConflictError(
+                "source run does not use the source scenario"
+            )
+        if replay_run["campaign_id"] != mapping.target_campaign_id:
+            raise RepositoryConflictError(
+                "replay run does not belong to the target campaign"
+            )
+        if replay_run["scenario_id"] != mapping.replay_scenario_id:
+            raise RepositoryConflictError(
+                "replay run does not use the replay scenario"
+            )
+        if source_scenario["suite_id"] != source_campaign["scenario_suite_id"]:
+            raise RepositoryConflictError(
+                "source scenario does not belong to the source campaign suite"
+            )
+        if replay_scenario["suite_id"] != target_campaign["scenario_suite_id"]:
+            raise RepositoryConflictError(
+                "replay scenario does not belong to the target campaign suite"
+            )
+        if (
+            regression["source_run_id"] != mapping.source_run_id
+            or regression["scenario_id"] != mapping.source_scenario_id
+        ):
+            raise RepositoryConflictError(
+                "regression case does not match its source run and scenario"
+            )
+        if (
+            failure["run_id"] != mapping.source_run_id
+            or failure["scenario_id"] != mapping.source_scenario_id
+            or failure["evaluation_result_id"]
+            != mapping.source_evaluation_result_id
+        ):
+            raise RepositoryConflictError(
+                "source failure does not match the replay provenance"
+            )
+        if evaluation["run_id"] != mapping.source_run_id:
+            raise RepositoryConflictError(
+                "source evaluation does not belong to the source run"
+            )
+        if (
+            evaluation["evaluator_id"] != mapping.evaluator_id
+            or regression["evaluator_id"] != mapping.evaluator_id
+        ):
+            raise RepositoryConflictError(
+                "replay evaluator does not match the source evaluation and regression"
+            )
+
+        snapshot_sha256 = hashlib.sha256(
+            regression["original_input_json"].encode("utf-8")
+        ).hexdigest()
+        if snapshot_sha256 != mapping.source_snapshot_sha256:
+            raise RepositoryConflictError(
+                "source snapshot hash does not match the regression input"
+            )
+        if source_scenario["source_sha256"] != mapping.source_scenario_sha256:
+            raise RepositoryConflictError(
+                "source scenario hash does not match the source scenario"
+            )
+        if replay_scenario["source_sha256"] != mapping.replay_scenario_sha256:
+            raise RepositoryConflictError(
+                "replay scenario hash does not match the replay scenario"
+            )
+        if regression.get("mis_memory_id") != mapping.mis_memory_id:
+            raise AuthorityMappingError(
+                "MIS memory mapping does not match the regression case"
+            )
+
+        source_mis_run_id = source_run.get("mis_run_id")
+        source_mis_evaluation_id = evaluation.get("mis_evaluation_id")
+        replay_mis_run_id = replay_run.get("mis_run_id")
+        if not source_mis_run_id or not source_mis_evaluation_id:
+            raise AuthorityMappingError(
+                "source MIS run and evaluation mappings are required"
+            )
+        if not replay_mis_run_id:
+            raise AuthorityMappingError("target run MIS mapping is required")
+        source_authority_run = self._authority("run", source_mis_run_id)
+        source_authority_evaluation = self._authority(
+            "evaluation", source_mis_evaluation_id
+        )
+        replay_authority_run = self._authority("run", replay_mis_run_id)
+        memory = self._authority("memory", mapping.mis_memory_id)
+
+        if (
+            not source_campaign.get("mis_task_id")
+            or not source_campaign.get("mis_plan_id")
+            or source_authority_run is None
+            or source_authority_run.get("task_id") != source_campaign["mis_task_id"]
+            or source_authority_run.get("agent_plan_id")
+            != source_campaign["mis_plan_id"]
+        ):
+            raise AuthorityMappingError(
+                "source MIS run does not match the source campaign task and plan"
+            )
+        if (
+            source_authority_evaluation is None
+            or source_authority_evaluation.get("run_id") != source_mis_run_id
+            or source_authority_evaluation.get("task_id")
+            != source_campaign["mis_task_id"]
+            or source_authority_evaluation.get("agent_id")
+            != source_authority_run.get("agent_id")
+        ):
+            raise AuthorityMappingError(
+                "source MIS evaluation does not match the source MIS run authority"
+            )
+        if (
+            not target_campaign.get("mis_task_id")
+            or not target_campaign.get("mis_plan_id")
+            or replay_authority_run is None
+            or replay_authority_run.get("task_id") != target_campaign["mis_task_id"]
+            or replay_authority_run.get("agent_plan_id")
+            != target_campaign["mis_plan_id"]
+        ):
+            raise AuthorityMappingError(
+                "target MIS run does not match the target campaign task and plan"
+            )
+        if (
+            memory is None
+            or memory.get("memory_type") != "failure_case"
+            or memory.get("task_id") != source_campaign["mis_task_id"]
+            or memory.get("source_ref") != source_mis_run_id
+            or memory.get("review_status") != "candidate"
+        ):
+            raise AuthorityMappingError(
+                "MIS memory does not match the source regression authority"
+            )
+
+        data = mapping.model_dump(mode="json")
+        return self._upsert(
+            "reliability_regression_replays",
+            "mapping_id",
+            {
+                "workspace_id": self.workspace_id,
+                "mapping_id": data["id"],
+                "schema_version": data["schema_version"],
+                "source_campaign_id": data["source_campaign_id"],
+                "target_campaign_id": data["target_campaign_id"],
+                "regression_case_id": data["regression_case_id"],
+                "source_run_id": data["source_run_id"],
+                "source_evaluation_result_id": data[
+                    "source_evaluation_result_id"
+                ],
+                "evaluator_id": data["evaluator_id"],
+                "source_scenario_id": data["source_scenario_id"],
+                "replay_scenario_id": data["replay_scenario_id"],
+                "replay_run_id": data["replay_run_id"],
+                "source_snapshot_sha256": data["source_snapshot_sha256"],
+                "source_scenario_sha256": data["source_scenario_sha256"],
+                "replay_scenario_sha256": data["replay_scenario_sha256"],
+                "mis_memory_id": data["mis_memory_id"],
+                "created_at": data["created_at"],
+            },
+            immutable={
+                "schema_version",
+                "source_campaign_id",
+                "target_campaign_id",
+                "regression_case_id",
+                "source_run_id",
+                "source_evaluation_result_id",
+                "evaluator_id",
+                "source_scenario_id",
+                "replay_scenario_id",
+                "replay_run_id",
+                "source_snapshot_sha256",
+                "source_scenario_sha256",
+                "replay_scenario_sha256",
+                "mis_memory_id",
+                "created_at",
+            },
+        )
+
     def upsert_release_gate(self, gate: ReleaseGateDecision) -> str:
         self._expect_model(gate, ReleaseGateDecision, "gate")
         campaign = self._require_vertical(
@@ -1951,6 +2215,23 @@ class SQLiteRepository:
             (self.workspace_id, regression_id),
         )
         return None if row is None else self._regression_public(row)
+
+    def list_regression_replays(
+        self, target_campaign_id: str
+    ) -> list[dict[str, Any]]:
+        """Return the immutable public replay-provenance edges for a campaign."""
+
+        if not isinstance(target_campaign_id, str) or not _WORKSPACE_ID.fullmatch(
+            target_campaign_id
+        ):
+            raise ValueError("target_campaign_id must be a bounded opaque identifier")
+        rows = self._fetchall(
+            """SELECT * FROM reliability_regression_replays
+            WHERE workspace_id=? AND target_campaign_id=?
+            ORDER BY created_at,mapping_id""",
+            (self.workspace_id, target_campaign_id),
+        )
+        return [self._public_tree(row) for row in rows]
 
     def list_release_gates(
         self,

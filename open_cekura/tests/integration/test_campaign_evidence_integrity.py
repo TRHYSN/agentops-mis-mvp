@@ -8,10 +8,12 @@ from pathlib import Path
 
 import pytest
 
+import server
 from open_cekura.evidence import manifest as evidence_manifest
 from open_cekura.campaigns.service import (
     CampaignServiceError,
     compare_campaigns,
+    evaluate_campaign_gate,
     run_campaign,
 )
 from open_cekura.evidence.manifest import (
@@ -103,6 +105,129 @@ def authority_campaigns(
             artifact_root=artifacts,
         )
     return artifacts, database
+
+
+def _copy_authority_campaigns(
+    authority_campaigns: tuple[Path, Path], tmp_path: Path
+) -> tuple[Path, Path]:
+    source_artifacts, source_database = authority_campaigns
+    artifacts = tmp_path / "artifacts"
+    database = tmp_path / "mis.db"
+    shutil.copytree(source_artifacts, artifacts)
+    with sqlite3.connect(source_database) as source, sqlite3.connect(database) as target:
+        source.backup(target)
+    return artifacts, database
+
+
+def _open_authority_database(database: Path) -> sqlite3.Connection:
+    connection = sqlite3.connect(database)
+    connection.row_factory = sqlite3.Row
+    connection.create_function(
+        "agentops_audit_chain_hash",
+        9,
+        server.audit_chain_hash_sql,
+        deterministic=True,
+    )
+    return connection
+
+
+def _candidate_authority_ids(connection: sqlite3.Connection) -> tuple[str, str]:
+    row = connection.execute(
+        """SELECT mis_task_id,mis_plan_id FROM reliability_campaigns
+        WHERE workspace_id='default' AND campaign_id=?""",
+        (AUTHORITY_CANDIDATE_ID,),
+    ).fetchone()
+    assert row is not None
+    return row["mis_task_id"], row["mis_plan_id"]
+
+
+def _gate_write_counts(connection: sqlite3.Connection) -> dict[str, int]:
+    return {
+        "approvals": connection.execute(
+            "SELECT COUNT(*) FROM approvals"
+        ).fetchone()[0],
+        "gates": connection.execute(
+            "SELECT COUNT(*) FROM reliability_release_gates"
+        ).fetchone()[0],
+        "outbox": connection.execute(
+            "SELECT COUNT(*) FROM reliability_evidence_publications"
+        ).fetchone()[0],
+    }
+
+
+def test_comparison_rejects_completed_campaign_with_replanned_core_task(
+    authority_campaigns: tuple[Path, Path],
+    tmp_path: Path,
+) -> None:
+    artifacts, database = _copy_authority_campaigns(authority_campaigns, tmp_path)
+    with _open_authority_database(database) as connection:
+        task_id, _ = _candidate_authority_ids(connection)
+        task = dict(
+            connection.execute(
+                "SELECT * FROM tasks WHERE task_id=?", (task_id,)
+            ).fetchone()
+        )
+        task.update(status="planned", updated_at=server.now_iso())
+        assert (
+            server.upsert_task(
+                connection,
+                task,
+                actor_id="open-cekura-authority-drift-test",
+            )
+            == "updated"
+        )
+        writes_before = _gate_write_counts(connection)
+
+    with pytest.raises(CampaignServiceError) as captured:
+        compare_campaigns(
+            baseline_campaign_id=AUTHORITY_BASELINE_ID,
+            candidate_campaign_id=AUTHORITY_CANDIDATE_ID,
+            workspace_id="default",
+            db_path=database,
+            artifact_root=artifacts,
+        )
+
+    assert captured.value.code == "campaign_ledger_mismatch"
+    with sqlite3.connect(database) as connection:
+        assert _gate_write_counts(connection) == writes_before
+
+
+def test_gate_rejects_completed_campaign_with_rejected_core_plan(
+    authority_campaigns: tuple[Path, Path],
+    tmp_path: Path,
+) -> None:
+    artifacts, database = _copy_authority_campaigns(authority_campaigns, tmp_path)
+    with _open_authority_database(database) as connection:
+        _, plan_id = _candidate_authority_ids(connection)
+        response, status = server.transition_agent_plan(
+            connection,
+            plan_id,
+            "rejected",
+            {},
+            {"reason": "Exercise a legitimate audited Plan rejection."},
+            actor_override={
+                "actor_type": "user",
+                "actor_id": "usr_founder",
+                "workspace_id": "default",
+                "auth_mode": "test_human_session",
+            },
+        )
+        assert status == 200
+        assert response["agent_plan"]["status"] == "rejected"
+        writes_before = _gate_write_counts(connection)
+
+    with pytest.raises(CampaignServiceError) as captured:
+        evaluate_campaign_gate(
+            campaign_id=AUTHORITY_CANDIDATE_ID,
+            baseline_campaign_id=None,
+            workspace_id="default",
+            db_path=database,
+            artifact_root=artifacts,
+        )
+
+    assert captured.value.code == "campaign_ledger_mismatch"
+    with sqlite3.connect(database) as connection:
+        assert _gate_write_counts(connection) == writes_before
 
 
 @pytest.fixture
