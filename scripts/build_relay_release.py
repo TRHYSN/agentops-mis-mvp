@@ -27,6 +27,10 @@ SYSTEMD_RELATIVE = Path("packaging/relay/systemd/agentops-mis-relay.service")
 RELEASE_INPUTS = (
     "agentops_mis_cli",
     "agentops_mis_core",
+    "agentops_mis_runtime",
+    "open_cekura",
+    "examples/open-cekura",
+    "server.py",
     "packaging/relay/config.example.json",
     "packaging/relay/systemd/agentops-mis-relay.service",
     "pyproject.toml",
@@ -192,13 +196,41 @@ def canonicalize_wheel(raw_wheel: bytes) -> bytes:
     return target.getvalue()
 
 
+def build_backend_wheel(
+    wheel_dir: Path,
+    build_backend,
+    *,
+    source_commit: str,
+) -> str:
+    """Build from the immutable snapshot with exact commit provenance."""
+
+    if not COMMIT_PATTERN.fullmatch(source_commit):
+        raise RuntimeError("source commit is not a full hexadecimal commit")
+    variable = "AGENTOPS_BUILD_COMMIT_SHA"
+    previous = os.environ.get(variable)
+    os.environ[variable] = source_commit
+    try:
+        return build_backend.build_wheel(str(wheel_dir))
+    finally:
+        if previous is None:
+            os.environ.pop(variable, None)
+        else:
+            os.environ[variable] = previous
+
+
 def build_canonical_wheel(
     temporary_root: Path,
     build_backend,
+    *,
+    source_commit: str,
 ) -> tuple[str, bytes]:
     wheel_dir = temporary_root / "wheel-build"
     wheel_dir.mkdir()
-    wheel_name = build_backend.build_wheel(str(wheel_dir))
+    wheel_name = build_backend_wheel(
+        wheel_dir,
+        build_backend,
+        source_commit=source_commit,
+    )
     if Path(wheel_name).name != wheel_name or not wheel_name.endswith(".whl"):
         raise RuntimeError("offline build backend returned an unsafe wheel name")
     wheel_path = wheel_dir / wheel_name
@@ -331,6 +363,7 @@ def build_release(output_dir: Path) -> dict[str, object]:
         wheel_name, wheel_data = build_canonical_wheel(
             temporary_root,
             build_backend,
+            source_commit=commit,
         )
 
         payload = {
