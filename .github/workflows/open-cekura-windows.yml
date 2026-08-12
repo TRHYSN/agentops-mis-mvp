@@ -69,6 +69,8 @@ jobs:
 
       - name: Run installed portability Doctor
         run: python -I -m open_cekura.windows.doctor
+        env:
+          OPEN_CEKURA_CHECKOUT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
 
       - name: Build reproducible distribution audit record
         run: python scripts/open_cekura_distribution_audit.py build --output .agentops_runtime/open-cekura-dist --result .agentops_runtime/distribution-digest-${{ runner.os }}-py${{ matrix.python-version }}.json

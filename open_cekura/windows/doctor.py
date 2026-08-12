@@ -179,7 +179,10 @@ def _branch_check(
     if branch_result.returncode == 0 and not branch_result.timed_out and branch:
         return _check("branch", True, branch[:300])
 
-    expected_commit = environ.get("GITHUB_SHA", "").strip()
+    expected_commit = (
+        environ.get("OPEN_CEKURA_CHECKOUT_SHA", "").strip()
+        or environ.get("GITHUB_SHA", "").strip()
+    ).lower()
     event_branch = (
         environ.get("GITHUB_HEAD_REF", "").strip()
         or environ.get("GITHUB_REF_NAME", "").strip()
@@ -215,12 +218,12 @@ def _branch_check(
         return _check(
             "branch",
             False,
-            "detached GitHub Actions checkout does not match GITHUB_SHA",
+            "detached GitHub Actions checkout does not match the workflow checkout SHA",
         )
     return _check(
         "branch",
         True,
-        f"{event_branch} (detached at exact GitHub Actions event SHA)",
+        f"{event_branch} (detached at exact workflow checkout SHA)",
     )
 
 

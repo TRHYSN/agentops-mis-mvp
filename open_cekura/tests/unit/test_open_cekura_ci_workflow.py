@@ -76,6 +76,7 @@ def test_each_matrix_job_runs_the_complete_offline_acceptance_contract() -> None
     )
     assert "if" not in doctor
     assert doctor["run"] == "python -I -m open_cekura.windows.doctor"
+    assert doctor["env"]["OPEN_CEKURA_CHECKOUT_SHA"] == EXPECTED_SHA
     names = [step.get("name") for step in steps]
     assert names.index("Install UI dependencies") < names.index(
         "Run installed portability Doctor"

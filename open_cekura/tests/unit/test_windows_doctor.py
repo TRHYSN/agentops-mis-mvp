@@ -264,6 +264,37 @@ def test_run_doctor_accepts_an_exact_github_actions_detached_checkout(
     assert "detached" in branch_check.message
 
 
+def test_run_doctor_accepts_an_exact_pr_head_checkout_when_github_sha_is_merge_sha(
+    doctor_repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    windows_doctor,
+) -> None:
+    head_commit = "b" * 40
+    environ = _environment_with_tools(monkeypatch, doctor_repo)
+    environ.update(
+        {
+            "GITHUB_ACTIONS": "true",
+            "GITHUB_HEAD_REF": "codex/open-cekura-windows-v0",
+            "GITHUB_SHA": "c" * 40,
+            "OPEN_CEKURA_CHECKOUT_SHA": head_commit,
+        }
+    )
+
+    report = windows_doctor.run_doctor(
+        repo_root=doctor_repo,
+        environ=environ,
+        command_runner=_command_runner(
+            doctor_repo,
+            branch_output="",
+            commit=head_commit,
+        ),
+    )
+
+    branch_check = _checks_by_id(report)["branch"]
+    assert branch_check.status == "PASS"
+    assert "exact workflow checkout SHA" in branch_check.message
+
+
 @pytest.mark.parametrize(
     "environment_override",
     [
@@ -272,6 +303,12 @@ def test_run_doctor_accepts_an_exact_github_actions_detached_checkout(
             "GITHUB_ACTIONS": "true",
             "GITHUB_HEAD_REF": "codex/open-cekura-windows-v0",
             "GITHUB_SHA": "c" * 40,
+        },
+        {
+            "GITHUB_ACTIONS": "true",
+            "GITHUB_HEAD_REF": "codex/open-cekura-windows-v0",
+            "GITHUB_SHA": "b" * 40,
+            "OPEN_CEKURA_CHECKOUT_SHA": "c" * 40,
         },
     ],
 )
