@@ -37,7 +37,7 @@ tested, but it is not yet selectable from the v0 campaign CLI.
 On Windows PowerShell:
 
 ```powershell
-python -m pip install -r requirements-open-cekura.txt
+python -m pip install '.[reliability]'
 Set-Location ui/start-building-app
 npm ci
 Set-Location ../..

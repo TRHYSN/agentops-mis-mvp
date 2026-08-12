@@ -101,13 +101,24 @@ def test_scenario_acceptance_uses_the_real_cli_ok_contract() -> None:
         )
 
 
-def test_evidence_verify_receives_only_its_supported_artifact_option(
-    tmp_path: Path,
-) -> None:
-    arguments = evidence_storage_args(tmp_path / "evidence with spaces")
+def test_evidence_verify_receives_the_governed_state_options(tmp_path: Path) -> None:
+    database = tmp_path / "state with spaces" / "reliability.db"
+    artifacts = tmp_path / "evidence with spaces"
 
-    assert arguments == ["--artifacts", str(tmp_path / "evidence with spaces")]
-    assert "--db" not in arguments
+    arguments = evidence_storage_args(
+        workspace="workspace-ci",
+        database=database,
+        artifacts=artifacts,
+    )
+
+    assert arguments == [
+        "--workspace",
+        "workspace-ci",
+        "--db",
+        str(database),
+        "--artifacts",
+        str(artifacts),
+    ]
 
 
 def test_loopback_http_opener_disables_environment_proxies() -> None:

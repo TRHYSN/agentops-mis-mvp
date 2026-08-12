@@ -415,8 +415,20 @@ def validate_scenario_output(payload: Mapping[str, Any]) -> None:
         raise AcceptanceError("Scenario v1 validation did not pass")
 
 
-def evidence_storage_args(artifacts: Path) -> list[str]:
-    return ["--artifacts", str(artifacts)]
+def evidence_storage_args(
+    *,
+    workspace: str,
+    database: Path,
+    artifacts: Path,
+) -> list[str]:
+    return [
+        "--workspace",
+        workspace,
+        "--db",
+        str(database),
+        "--artifacts",
+        str(artifacts),
+    ]
 
 
 def _run_cli_contract(
@@ -428,8 +440,12 @@ def _run_cli_contract(
 ) -> dict[str, Any]:
     python = sys.executable
     base = [python, "-m", "open_cekura.cli.main"]
-    shared = ["--db", str(database), "--artifacts", str(artifacts)]
-    evidence_args = evidence_storage_args(artifacts)
+    shared = evidence_storage_args(
+        workspace=WORKSPACE_ID,
+        database=database,
+        artifacts=artifacts,
+    )
+    evidence_args = shared
 
     scenario = run_json_command(
         [*base, "scenario", "validate", str(BASIC_SCENARIO)],

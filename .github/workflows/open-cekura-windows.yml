@@ -5,7 +5,7 @@ on:
   push:
     branches:
       - main
-      - feat/open-cekura-windows-v0
+      - codex/**
 
 permissions:
   contents: read
@@ -34,15 +34,25 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: ${{ github.event.pull_request.head.repo.full_name || github.repository }}
-          ref: ${{ github.head_ref || github.ref_name }}
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
 
-      - name: Install minimal OpenCekura Python dependencies
-        run: python -m pip install -r requirements-open-cekura.txt
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: ui/start-building-app/package-lock.json
+
+      - name: Install OpenCekura distribution and test dependencies
+        run: python -m pip install '.[reliability]' 'pytest>=8,<9'
+
+      - name: Verify the installed distribution outside the checkout
+        run: python scripts/open_cekura_installed_acceptance.py --expected-commit ${{ github.event.pull_request.head.sha || github.sha }}
 
       - name: Run OpenCekura unit tests
         run: python -m pytest open_cekura/tests/unit -q
@@ -53,20 +63,15 @@ jobs:
       - name: Validate the documented Scenario v1 fixture
         run: python -m open_cekura.cli.main scenario validate examples/open-cekura/scenarios/basic.yaml
 
-      - name: Set up Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: "20"
-          cache: npm
-          cache-dependency-path: ui/start-building-app/package-lock.json
-
       - name: Install UI dependencies
         working-directory: ui/start-building-app
         run: npm ci
 
-      - name: Run Windows Doctor
-        if: runner.os == 'Windows'
-        run: python -m open_cekura.windows.doctor
+      - name: Run installed portability Doctor
+        run: python -I -m open_cekura.windows.doctor
+
+      - name: Build reproducible distribution audit record
+        run: python scripts/open_cekura_distribution_audit.py build --output .agentops_runtime/open-cekura-dist --result .agentops_runtime/distribution-digest-${{ runner.os }}-py${{ matrix.python-version }}.json
 
       - name: Verify Reliability Lab source contract
         run: python scripts/reliability_lab_ui_smoke.py
@@ -95,3 +100,39 @@ jobs:
           path: open-cekura-ci-acceptance.json
           if-no-files-found: ignore
           retention-days: 14
+
+      - name: Upload distribution reproducibility evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: open-cekura-distribution-${{ runner.os }}-py${{ matrix.python-version }}
+          path: |
+            .agentops_runtime/distribution-digest-${{ runner.os }}-py${{ matrix.python-version }}.json
+            .agentops_runtime/open-cekura-dist/*
+          if-no-files-found: error
+          retention-days: 14
+
+  distribution-reproducibility:
+    name: OpenCekura cross-platform distribution reproducibility
+    needs: open-cekura-acceptance
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout audit verifier
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.event.pull_request.head.repo.full_name || github.repository }}
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Download matrix distribution evidence
+        uses: actions/download-artifact@v4
+        with:
+          pattern: open-cekura-distribution-*
+          path: open-cekura-distribution-audit
+
+      - name: Compare exact wheel and sdist SHA-256 across Windows and Ubuntu
+        run: python scripts/open_cekura_distribution_audit.py verify --inputs open-cekura-distribution-audit --expected-commit ${{ github.event.pull_request.head.sha || github.sha }}

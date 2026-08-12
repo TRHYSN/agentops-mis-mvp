@@ -7,6 +7,7 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[3]
 WORKFLOW = ROOT / ".github" / "workflows" / "open-cekura-windows.yml"
+EXPECTED_SHA = "${{ github.event.pull_request.head.sha || github.sha }}"
 
 
 def _workflow() -> tuple[str, dict[str, object]]:
@@ -18,6 +19,7 @@ def _workflow() -> tuple[str, dict[str, object]]:
 
 def test_ci_matrix_covers_windows_and_ubuntu_on_supported_python_versions() -> None:
     _, workflow = _workflow()
+    assert workflow["on"]["push"]["branches"] == ["main", "codex/**"]
     jobs = workflow["jobs"]
     assert isinstance(jobs, dict)
     job = jobs["open-cekura-acceptance"]
@@ -40,7 +42,11 @@ def test_each_matrix_job_runs_the_complete_offline_acceptance_contract() -> None
 
     assert "actions/setup-python@v5" in uses
     assert "actions/setup-node@v4" in uses
-    assert "python -m pip install -r requirements-open-cekura.txt" in run_commands
+    assert "python -m pip install '.[reliability]' 'pytest>=8,<9'" in run_commands
+    assert (
+        "python scripts/open_cekura_installed_acceptance.py "
+        f"--expected-commit {EXPECTED_SHA}"
+    ) in run_commands
     assert "python -m pytest open_cekura/tests/unit -q" in run_commands
     assert "python -m pytest open_cekura/tests/integration -q" in run_commands
     assert (
@@ -63,11 +69,39 @@ def test_each_matrix_job_runs_the_complete_offline_acceptance_contract() -> None
     assert "--ui-dist ui/start-building-app/dist" in windows_acceptance["run"]
     assert "--ui-dist ui/start-building-app/dist" in ubuntu_acceptance["run"]
 
-    doctor = next(step for step in steps if step.get("name") == "Run Windows Doctor")
-    assert doctor["if"] == "runner.os == 'Windows'"
-    assert doctor["run"] == "python -m open_cekura.windows.doctor"
+    doctor = next(
+        step
+        for step in steps
+        if step.get("name") == "Run installed portability Doctor"
+    )
+    assert "if" not in doctor
+    assert doctor["run"] == "python -I -m open_cekura.windows.doctor"
+    names = [step.get("name") for step in steps]
+    assert names.index("Install UI dependencies") < names.index(
+        "Run installed portability Doctor"
+    ) < names.index("Build reproducible distribution audit record")
 
     assert "${{ secrets." not in source
     assert "set -euo pipefail" not in source
     assert "python3 " not in source
     assert "bash" not in source.lower()
+
+
+def test_distribution_audit_is_bound_to_the_immutable_event_commit() -> None:
+    _, workflow = _workflow()
+    jobs = workflow["jobs"]
+    for job_name in ("open-cekura-acceptance", "distribution-reproducibility"):
+        checkout = next(
+            step
+            for step in jobs[job_name]["steps"]
+            if step.get("uses") == "actions/checkout@v4"
+        )
+        assert checkout["with"]["ref"] == EXPECTED_SHA
+
+    verify = next(
+        step
+        for step in jobs["distribution-reproducibility"]["steps"]
+        if step.get("name")
+        == "Compare exact wheel and sdist SHA-256 across Windows and Ubuntu"
+    )
+    assert verify["run"].endswith(f"--expected-commit {EXPECTED_SHA}")
