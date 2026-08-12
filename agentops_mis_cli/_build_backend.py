@@ -25,10 +25,16 @@ PROJECT = "agentops-mis-cli"
 DIST = "agentops_mis_cli"
 VERSION = "0.1.0"
 DIST_INFO = f"{DIST}-{VERSION}.dist-info"
+DISTRIBUTION_CONFIG_KEY = "agentops-distribution"
+FULL_DISTRIBUTION = "full"
+RELAY_DISTRIBUTION = "relay"
 ROOT = Path(__file__).resolve().parents[1]
-PACKAGES = [
+RELAY_PACKAGES = [
     ROOT / "agentops_mis_cli",
     ROOT / "agentops_mis_core",
+]
+PACKAGES = [
+    *RELAY_PACKAGES,
     ROOT / "agentops_mis_runtime",
     ROOT / "open_cekura",
 ]
@@ -84,19 +90,37 @@ PORTABLE_TEXT_SUFFIXES = {
 }
 
 
-def _metadata() -> str:
-    return "\n".join([
+def _distribution(config_settings: object) -> str:
+    if config_settings is None:
+        return FULL_DISTRIBUTION
+    if not isinstance(config_settings, dict):
+        raise ValueError("build config settings must be a mapping")
+    value = config_settings.get(DISTRIBUTION_CONFIG_KEY, FULL_DISTRIBUTION)
+    if isinstance(value, list) and len(value) == 1:
+        value = value[0]
+    if value not in {FULL_DISTRIBUTION, RELAY_DISTRIBUTION}:
+        raise ValueError("unsupported AgentOps distribution profile")
+    return value
+
+
+def _metadata(distribution: str = FULL_DISTRIBUTION) -> str:
+    lines = [
         "Metadata-Version: 2.2",
         f"Name: {PROJECT}",
         f"Version: {VERSION}",
         "Summary: Installable AgentOps MIS Agent Gateway CLI wrapper.",
         "Requires-Python: >=3.10",
         "License: Proprietary local MVP",
-        "Provides-Extra: reliability",
-        'Requires-Dist: pydantic>=2.8,<3; extra == "reliability"',
-        'Requires-Dist: PyYAML>=6.0,<7; extra == "reliability"',
-        "",
-    ])
+    ]
+    if distribution == FULL_DISTRIBUTION:
+        lines.extend([
+            "Provides-Extra: reliability",
+            'Requires-Dist: pydantic>=2.8,<3; extra == "reliability"',
+            'Requires-Dist: PyYAML>=6.0,<7; extra == "reliability"',
+        ])
+    elif distribution != RELAY_DISTRIBUTION:
+        raise ValueError("unsupported AgentOps distribution profile")
+    return "\n".join([*lines, ""])
 
 
 def _wheel() -> str:
@@ -226,9 +250,22 @@ def _package_files() -> list[tuple[str, bytes]]:
     return files
 
 
-def _default_metadata_files() -> list[tuple[str, bytes]]:
+def _relay_package_files() -> list[tuple[str, bytes]]:
+    return [
+        (path.relative_to(ROOT).as_posix(), _portable_source_bytes(path))
+        for package in RELAY_PACKAGES
+        for path in sorted(
+            package.glob("*.py"),
+            key=lambda candidate: candidate.relative_to(ROOT).as_posix(),
+        )
+    ]
+
+
+def _default_metadata_files(
+    distribution: str = FULL_DISTRIBUTION,
+) -> list[tuple[str, bytes]]:
     return sorted([
-        (f"{DIST_INFO}/METADATA", _metadata().encode("utf-8")),
+        (f"{DIST_INFO}/METADATA", _metadata(distribution).encode("utf-8")),
         (f"{DIST_INFO}/WHEEL", _wheel().encode("utf-8")),
         (f"{DIST_INFO}/entry_points.txt", _entry_points().encode("utf-8")),
     ])
@@ -267,13 +304,22 @@ def _prepared_metadata_files(metadata_directory: str) -> list[tuple[str, bytes]]
     return files
 
 
-def _wheel_files(metadata_directory: str | None = None) -> list[tuple[str, bytes]]:
+def _wheel_files(
+    metadata_directory: str | None = None,
+    *,
+    distribution: str = FULL_DISTRIBUTION,
+) -> list[tuple[str, bytes]]:
     metadata = (
         _prepared_metadata_files(metadata_directory)
         if metadata_directory is not None
-        else _default_metadata_files()
+        else _default_metadata_files(distribution)
     )
-    return [*_package_files(), *metadata]
+    package_files = (
+        _relay_package_files()
+        if distribution == RELAY_DISTRIBUTION
+        else _package_files()
+    )
+    return [*package_files, *metadata]
 
 
 def _record(rows: list[tuple[str, bytes]]) -> bytes:
@@ -294,7 +340,8 @@ def _write_wheel_file(zf: zipfile.ZipFile, name: str, data: bytes) -> None:
 
 
 def build_wheel(wheel_directory: str, config_settings=None, metadata_directory=None) -> str:
-    rows = _wheel_files(metadata_directory)
+    distribution = _distribution(config_settings)
+    rows = _wheel_files(metadata_directory, distribution=distribution)
     wheel_name = f"{DIST}-{VERSION}-py3-none-any.whl"
     target = Path(wheel_directory) / wheel_name
     with zipfile.ZipFile(target, "w") as zf:
@@ -305,9 +352,12 @@ def build_wheel(wheel_directory: str, config_settings=None, metadata_directory=N
 
 
 def prepare_metadata_for_build_wheel(metadata_directory: str, config_settings=None) -> str:
+    distribution = _distribution(config_settings)
     dist_info = Path(metadata_directory) / DIST_INFO
     dist_info.mkdir(parents=True, exist_ok=True)
-    (dist_info / "METADATA").write_bytes(_metadata().encode("utf-8"))
+    (dist_info / "METADATA").write_bytes(
+        _metadata(distribution).encode("utf-8")
+    )
     (dist_info / "WHEEL").write_bytes(_wheel().encode("utf-8"))
     (dist_info / "entry_points.txt").write_bytes(_entry_points().encode("utf-8"))
     return DIST_INFO

@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import os
+import zipfile
 from pathlib import Path
 
+from agentops_mis_cli import _build_backend as backend
 from scripts import build_relay_release as relay_release
 
 
@@ -29,8 +31,11 @@ def test_backend_build_receives_exact_commit_and_restores_environment(
 
     class Backend:
         @staticmethod
-        def build_wheel(directory: str) -> str:
+        def build_wheel(directory: str, *, config_settings: object) -> str:
             assert Path(directory) == tmp_path
+            assert config_settings == {
+                backend.DISTRIBUTION_CONFIG_KEY: backend.RELAY_DISTRIBUTION
+            }
             observed.append(os.environ.get("AGENTOPS_BUILD_COMMIT_SHA"))
             return "agentops_mis_cli-0.1.0-py3-none-any.whl"
 
@@ -53,7 +58,10 @@ def test_backend_build_restores_an_existing_commit_environment(
 
     class Backend:
         @staticmethod
-        def build_wheel(directory: str) -> str:
+        def build_wheel(directory: str, *, config_settings: object) -> str:
+            assert config_settings == {
+                backend.DISTRIBUTION_CONFIG_KEY: backend.RELAY_DISTRIBUTION
+            }
             assert os.environ["AGENTOPS_BUILD_COMMIT_SHA"] == COMMIT
             raise RuntimeError("injected build failure")
 
@@ -69,3 +77,35 @@ def test_backend_build_restores_an_existing_commit_environment(
         raise AssertionError("fake backend unexpectedly succeeded")
 
     assert os.environ["AGENTOPS_BUILD_COMMIT_SHA"] == "2" * 40
+
+
+def test_relay_build_profile_preserves_the_exact_narrow_package_boundary(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("AGENTOPS_BUILD_COMMIT_SHA", COMMIT)
+
+    wheel_name = backend.build_wheel(
+        str(tmp_path),
+        config_settings={
+            backend.DISTRIBUTION_CONFIG_KEY: backend.RELAY_DISTRIBUTION,
+        },
+    )
+
+    with zipfile.ZipFile(tmp_path / wheel_name) as wheel:
+        names = set(wheel.namelist())
+        metadata = wheel.read(f"{backend.DIST_INFO}/METADATA")
+
+    expected_packages = {
+        path.relative_to(backend.ROOT).as_posix()
+        for package in backend.RELAY_PACKAGES
+        for path in package.glob("*.py")
+    }
+    package_names = {
+        name for name in names if not name.startswith(f"{backend.DIST_INFO}/")
+    }
+    assert package_names == expected_packages
+    assert not any(name.startswith("open_cekura/") for name in names)
+    assert not any(name.startswith("agentops_mis_runtime/") for name in names)
+    assert "server.py" not in names
+    assert b"Provides-Extra: reliability" not in metadata

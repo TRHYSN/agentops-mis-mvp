@@ -24,6 +24,8 @@ SCHEMA = "agentops.relay.release-bundle.v1"
 BACKEND_RELATIVE = Path("agentops_mis_cli/_build_backend.py")
 CONFIG_RELATIVE = Path("packaging/relay/config.example.json")
 SYSTEMD_RELATIVE = Path("packaging/relay/systemd/agentops-mis-relay.service")
+DISTRIBUTION_CONFIG_KEY = "agentops-distribution"
+RELAY_DISTRIBUTION = "relay"
 RELEASE_INPUTS = (
     "agentops_mis_cli",
     "agentops_mis_core",
@@ -210,7 +212,12 @@ def build_backend_wheel(
     previous = os.environ.get(variable)
     os.environ[variable] = source_commit
     try:
-        return build_backend.build_wheel(str(wheel_dir))
+        return build_backend.build_wheel(
+            str(wheel_dir),
+            config_settings={
+                DISTRIBUTION_CONFIG_KEY: RELAY_DISTRIBUTION,
+            },
+        )
     finally:
         if previous is None:
             os.environ.pop(variable, None)
