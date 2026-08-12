@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import socket
 import sqlite3
@@ -16,6 +17,8 @@ from .process import ProcessResult, run_bounded
 
 
 CommandRunner = Callable[..., ProcessResult]
+_COMMIT_SHA = re.compile(r"[0-9a-f]{40}\Z")
+_SAFE_BRANCH = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/-]{0,254}\Z")
 
 
 @dataclass(frozen=True, slots=True)
@@ -153,6 +156,74 @@ def _git_fact(
     return _check(check_id, passed, value[:300] if value else missing_message)
 
 
+def _branch_check(
+    git_path: str | None,
+    *,
+    repo_root: Path,
+    runner: CommandRunner,
+    environ: Mapping[str, str],
+) -> DoctorCheck:
+    """Accept a branch, or an exact event-SHA-bound GitHub detached checkout."""
+
+    if not git_path:
+        return _check("branch", False, "git executable is missing")
+    try:
+        branch_result = _run(
+            runner,
+            [git_path, "branch", "--show-current"],
+            repo_root=repo_root,
+        )
+    except (OSError, ValueError) as exc:
+        return _check("branch", False, f"git check could not run: {exc}")
+    branch = branch_result.stdout.strip()
+    if branch_result.returncode == 0 and not branch_result.timed_out and branch:
+        return _check("branch", True, branch[:300])
+
+    expected_commit = environ.get("GITHUB_SHA", "").strip()
+    event_branch = (
+        environ.get("GITHUB_HEAD_REF", "").strip()
+        or environ.get("GITHUB_REF_NAME", "").strip()
+    )
+    safe_event_branch = (
+        _SAFE_BRANCH.fullmatch(event_branch) is not None
+        and ".." not in event_branch
+        and "//" not in event_branch
+        and not event_branch.endswith((".", "/"))
+    )
+    if not (
+        branch_result.returncode == 0
+        and not branch_result.timed_out
+        and environ.get("GITHUB_ACTIONS") == "true"
+        and _COMMIT_SHA.fullmatch(expected_commit) is not None
+        and safe_event_branch
+    ):
+        return _check("branch", False, "detached HEAD or branch unavailable")
+    try:
+        head_result = _run(
+            runner,
+            [git_path, "rev-parse", "HEAD"],
+            repo_root=repo_root,
+        )
+    except (OSError, ValueError) as exc:
+        return _check("branch", False, f"git check could not run: {exc}")
+    actual_commit = head_result.stdout.strip().lower()
+    if (
+        head_result.returncode != 0
+        or head_result.timed_out
+        or actual_commit != expected_commit
+    ):
+        return _check(
+            "branch",
+            False,
+            "detached GitHub Actions checkout does not match GITHUB_SHA",
+        )
+    return _check(
+        "branch",
+        True,
+        f"{event_branch} (detached at exact GitHub Actions event SHA)",
+    )
+
+
 def _write_access(repo_root: Path) -> DoctorCheck:
     temporary_path: Path | None = None
     try:
@@ -255,14 +326,11 @@ def run_doctor(
             and Path(value).resolve() == expected,
             missing_message="not inside the requested Git repository",
         ),
-        _git_fact(
-            "branch",
+        _branch_check(
             git_path,
-            ["branch", "--show-current"],
             repo_root=root,
             runner=command_runner,
-            predicate=lambda value, _root: bool(value),
-            missing_message="detached HEAD or branch unavailable",
+            environ=runtime_environment,
         ),
         _git_fact(
             "commit",

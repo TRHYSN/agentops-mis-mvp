@@ -63,14 +63,16 @@ def _command_runner(
     repo_root: Path,
     *,
     dirty_output: str = "",
+    branch_output: str = "feat/open-cekura-windows-v0\n",
+    commit: str = "a" * 40,
 ) -> Callable[..., SimpleNamespace]:
     outputs: Mapping[tuple[str, ...], str] = {
         ("git", "--version"): "git version 2.50.0.windows.1\n",
         ("git", "rev-parse", "--show-toplevel"): f"{repo_root}\n",
-        ("git", "branch", "--show-current"): "feat/open-cekura-windows-v0\n",
+        ("git", "branch", "--show-current"): branch_output,
         ("git", "rev-parse", "--abbrev-ref", "HEAD"): "feat/open-cekura-windows-v0\n",
         ("git", "symbolic-ref", "--short", "HEAD"): "feat/open-cekura-windows-v0\n",
-        ("git", "rev-parse", "HEAD"): f"{'a' * 40}\n",
+        ("git", "rev-parse", "HEAD"): f"{commit}\n",
         ("git", "status", "--porcelain"): dirty_output,
         ("git", "status", "--porcelain=v1"): dirty_output,
         ("git", "status", "--short"): dirty_output,
@@ -229,6 +231,70 @@ def test_run_doctor_reports_a_dirty_worktree_as_a_required_failure(
     dirty_check = _checks_by_id(report)["dirty_state"]
     assert dirty_check.required is True
     assert dirty_check.status == "FAIL"
+
+
+def test_run_doctor_accepts_an_exact_github_actions_detached_checkout(
+    doctor_repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    windows_doctor,
+) -> None:
+    commit = "b" * 40
+    environ = _environment_with_tools(monkeypatch, doctor_repo)
+    environ.update(
+        {
+            "GITHUB_ACTIONS": "true",
+            "GITHUB_HEAD_REF": "codex/open-cekura-windows-v0",
+            "GITHUB_SHA": commit,
+        }
+    )
+
+    report = windows_doctor.run_doctor(
+        repo_root=doctor_repo,
+        environ=environ,
+        command_runner=_command_runner(
+            doctor_repo,
+            branch_output="",
+            commit=commit,
+        ),
+    )
+
+    branch_check = _checks_by_id(report)["branch"]
+    assert branch_check.status == "PASS"
+    assert "codex/open-cekura-windows-v0" in branch_check.message
+    assert "detached" in branch_check.message
+
+
+@pytest.mark.parametrize(
+    "environment_override",
+    [
+        {},
+        {
+            "GITHUB_ACTIONS": "true",
+            "GITHUB_HEAD_REF": "codex/open-cekura-windows-v0",
+            "GITHUB_SHA": "c" * 40,
+        },
+    ],
+)
+def test_run_doctor_rejects_unbound_detached_checkouts(
+    doctor_repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    windows_doctor,
+    environment_override: dict[str, str],
+) -> None:
+    environ = _environment_with_tools(monkeypatch, doctor_repo)
+    environ.update(environment_override)
+
+    report = windows_doctor.run_doctor(
+        repo_root=doctor_repo,
+        environ=environ,
+        command_runner=_command_runner(
+            doctor_repo,
+            branch_output="",
+            commit="b" * 40,
+        ),
+    )
+
+    assert _checks_by_id(report)["branch"].status == "FAIL"
 
 
 def test_run_doctor_fails_when_ui_dependencies_are_missing(
