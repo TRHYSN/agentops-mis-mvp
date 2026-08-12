@@ -114,7 +114,14 @@ occampaign_ci_locator_says_baseline -> candidate behavior -> PASS
 comparison -> PASS
 ```
 
-Final clean-candidate Campaign and Gate IDs: **PENDING**.
+Local acceptance on `e2ca55ecbc0638085e81fbfa45f981a488aae498` produced:
+
+```text
+occampaign_windows_audit_baseline_e2ca55ec -> BLOCK, 5 RegressionCases
+occampaign_windows_audit_candidate_e2ca55ec -> PASS
+occampaign_0e1db8058f486e6d88c3e04f -> replay PASS and idempotent retry
+candidate 10-run EvidenceManifest-set SHA-256 -> 1988d1113cf7d6d606ece430a5816f39d077e97b0176d114d1d80d8e7c9be6bf
+```
 
 ## UI
 
@@ -238,14 +245,15 @@ replay, replay gate evaluation, and installed distribution audit.
 ```text
 Base SHA: 99ce51d693f1d646ea84acc2f7f376bde1a95a9a
 Exact implementation SHA: 719f467c6b35a9e6bf0aadcb568799f108666477
+Exact local acceptance SHA: e2ca55ecbc0638085e81fbfa45f981a488aae498
 Exact Draft PR: PENDING
 Exact GitHub Actions run: PENDING
-Final baseline Campaign ID: PENDING
-Final candidate Campaign ID: PENDING
-Final replay Campaign ID: PENDING
-Final EvidenceManifest SHA-256: PENDING
-Final tamper rejection: PENDING
-Final regression replay: PENDING
+Local baseline Campaign ID: occampaign_windows_audit_baseline_e2ca55ec
+Local candidate Campaign ID: occampaign_windows_audit_candidate_e2ca55ec
+Local replay Campaign ID: occampaign_0e1db8058f486e6d88c3e04f
+Local EvidenceManifest-set SHA-256: 1988d1113cf7d6d606ece430a5816f39d077e97b0176d114d1d80d8e7c9be6bf
+Local tamper rejection: PASS and restored
+Local regression replay: PASS and idempotent retry
 ```
 
 Review state remains `BLOCKED_FOR_AUDIT` until every PENDING field has remote,
