@@ -1,12 +1,12 @@
 # OpenCekura Windows v0 Handoff
 
-Review decision: **BLOCKED_FOR_AUDIT**
+Review decision: **AUDIT_COMPLETE — OWNER_REVIEW_REQUIRED**
 
-This document describes the local audit candidate as of 2026-08-12. It does
-not claim that the current working tree has been published, reviewed, or
-accepted by GitHub Actions. Keep the pull request in Draft until the exact
-candidate commit passes the required Windows and Ubuntu matrix. Do not merge;
-the Owner is the final merge authority.
+This document records the reproducible audit of implementation commit
+`fd87388451e9646b67e702a7c44fa09cab1d0f14` as of 2026-08-12. That exact commit
+is published on the agreed branch and passed every required AgentOps MIS and
+OpenCekura Windows/Ubuntu job. The pull request must still be reviewed and
+merged, if appropriate, by the Owner; the implementation agent must not merge.
 
 ## Candidate identity
 
@@ -15,32 +15,30 @@ Repository: geogejoy107-jpg/agentops-mis-mvp
 GitHub Issue: #123
 Local checkout: F:/文档/MIS/agentops-mis-mvp
 Local branch: codex/open-cekura-windows-v0
-Remote branch: origin/codex/open-cekura-windows-v0 at abbeb303f74d8c2b1f367c61a86c748658c9c5eb; current audit changes are not pushed yet
+Audited remote branch point: origin/codex/open-cekura-windows-v0 at fd87388451e9646b67e702a7c44fa09cab1d0f14
 Base branch: origin/main
 Base SHA: 99ce51d693f1d646ea84acc2f7f376bde1a95a9a
-Last committed local SHA before the current audit working set: abbeb303f74d8c2b1f367c61a86c748658c9c5eb
-Exact implementation SHA: 719f467c6b35a9e6bf0aadcb568799f108666477
-Exact local acceptance SHA: e2ca55ecbc0638085e81fbfa45f981a488aae498
-Ahead / behind origin/main at implementation commit: 25 / 0
-Dirty state at pre-commit audit: DIRTY — expected audit implementation and documentation changes
-Dirty state at local acceptance SHA: CLEAN
+Exact audited implementation SHA: fd87388451e9646b67e702a7c44fa09cab1d0f14
+Exact governed local acceptance SHA: fd87388451e9646b67e702a7c44fa09cab1d0f14
+Ahead / behind origin/main at audited implementation commit: 34 / 0
+Dirty state at audited implementation SHA: CLEAN
 Windows version: NT 10.0.26200.0
 Local Python version: 3.13.5
 Local Node version: v22.23.2
 Local npm version: 10.9.8
-Draft PR: PENDING
-Legacy Draft PR #125: points to feat/open-cekura-windows-v0 at abbeb303f74d8c2b1f367c61a86c748658c9c5eb and does not contain this audit working set
-GitHub Actions run: PENDING
+Draft PR: https://github.com/geogejoy107-jpg/agentops-mis-mvp/pull/128
+Legacy Draft PR #125: closed as superseded; it was not merged
+Exact implementation AgentOps MIS CI: https://github.com/geogejoy107-jpg/agentops-mis-mvp/actions/runs/31576925820 (6/6 success)
+Exact implementation OpenCekura CI: https://github.com/geogejoy107-jpg/agentops-mis-mvp/actions/runs/31576925828 (5/5 success)
 ```
 
-A Git commit cannot contain its own SHA. The `Exact implementation SHA` field
-must be updated to the immutable implementation commit before the final
-handoff-only commit. The exact handoff-document commit is therefore derived
-after that commit with `git rev-parse HEAD` and recorded in the Draft PR and
-audit record. GitHub's PR head SHA remains authoritative. This self-reference
-constraint must not be hidden by inserting an invented hash.
+A Git commit cannot contain its own SHA. Therefore this file binds the product
+audit to the exact implementation commit above. The later Handoff-only PR-head
+SHA and its repeat CI are recorded in the PR Conversation and Notion audit
+record after those checks complete. GitHub's PR head SHA is authoritative; no
+invented self-referential hash is inserted here.
 
-Before publication, rerun and record:
+For any future audit refresh, rerun and record:
 
 ```powershell
 git fetch origin --prune
@@ -54,21 +52,17 @@ git diff --check
 
 ## Audit status
 
-The implementation is locally substantial and has passed the test evidence
-listed below, but it is not yet a mergeable remote candidate. These items are
-still PENDING:
+The prior `BLOCKED_FOR_AUDIT` decision is resolved for the audited
+implementation commit. Remote publication, clean dependency installation,
+installed import outside the checkout, the Windows/Ubuntu Python 3.10/3.11
+matrix, browser acceptance, cross-platform distribution reproducibility, and
+the existing MIS workflow all have exact-head GitHub evidence. PR #128 remains
+unmerged and requires Owner review.
 
-- a clean handoff commit and exact PR-head SHA (the implementation commit is
-  `719f467c6b35a9e6bf0aadcb568799f108666477`);
-- the updated upstream `codex/open-cekura-windows-v0` branch containing this
-  exact audit candidate;
-- a Draft PR to `main` using `docs/open-cekura/PR_BODY.md`;
-- a truly isolated dependency installation without inherited site-packages;
-- the Windows/Ubuntu Python 3.10/3.11 GitHub Actions matrix on the exact PR head;
-- final HANDOFF and Notion audit backfill with exact PR and CI URLs.
-
-Until all of these are present, the release state remains
-`BLOCKED_FOR_AUDIT`, regardless of local execution success.
+Because this Handoff update necessarily creates a later documentation-only
+head, that final head must pass the same required workflows before the Draft is
+marked Ready. Its SHA and run URLs are recorded externally in the PR and Notion
+without creating an infinite self-reference loop.
 
 ## Delivered architecture
 
@@ -120,14 +114,13 @@ reliability = [
 ]
 ```
 
-The installed runtime acceptance passed in a review environment that inherited
-the machine's site-packages. That proves installed package contents and runtime
-entry points, but it is **not** proof of a clean dependency installation. The
-attempt to fetch dependencies into a truly isolated venv was blocked by the
-local TLS/package-index environment. GitHub clean runners must therefore be the
-authoritative dependency-contract check. Do not mark this P0 item complete
-until `pip install '.[reliability]'` succeeds in CI and the installed interpreter
-imports `open_cekura` outside the checkout.
+The local installed-runtime probe passed with inherited dependency packages;
+the local package index could not perform a new TLS download and TLS validation
+was not disabled. The authoritative clean-install proof is therefore the exact
+GitHub matrix: all four clean runners installed `.[reliability]`, imported
+`open_cekura`, `agentops_mis_runtime`, and `server` from `site-packages` outside
+the checkout under `python -I`, and matched the bundled build commit to
+`fd87388451e9646b67e702a7c44fa09cab1d0f14`.
 
 ## Relationship with Windows PR #116
 
@@ -227,94 +220,53 @@ Evidence tamper detection: PASS (covered artifact rejected, then restored)
 Browser readback: PASS
 ```
 
-These are local pre-candidate acceptance IDs, not final release evidence. The
-clean-candidate values must replace the following fields:
+The exact audited implementation was then run through the governed local CLI
+path in a new workspace. These IDs are local audit evidence and are not checked
+into Git:
 
 ```text
-Local acceptance baseline campaign ID: occampaign_windows_audit_baseline_e2ca55ec
-Local acceptance candidate campaign ID: occampaign_windows_audit_candidate_e2ca55ec
-Local acceptance replay campaign ID: occampaign_0e1db8058f486e6d88c3e04f
+Local acceptance workspace: windows-audit-fd873884
+Local acceptance baseline campaign ID: occampaign_windows_audit_baseline_fd873884
+Local acceptance candidate campaign ID: occampaign_windows_audit_candidate_fd873884
+Local acceptance replay campaign ID: occampaign_6a99776effc7055548a64619
 Local acceptance baseline gate: BLOCK (CLI exit 3; 5 RegressionCases)
 Local acceptance candidate gate: PASS (CLI exit 0)
 Local acceptance replay gate: PASS (CLI exit 0)
-Candidate 10-run EvidenceManifest-set SHA-256: 1988d1113cf7d6d606ece430a5816f39d077e97b0176d114d1d80d8e7c9be6bf
-Candidate campaign_summary.json SHA-256: b2df44eaa68ac0806eb0e7f64049d802ff719b8855fe576a200321165a9f2897
-Tamper-rejection result: PASS; covered transcript was rejected and restored
-Regression replay result: PASS; second replay returned the same ID with idempotent_replay=true
-Final wheel SHA-256: daaa60e74923ed7ebf3c571e01028f82750d1a65d48192d15e32fcf20e115ddb
-Final sdist SHA-256: 1848039a04afac03b853c1f787dbe223ad831908f47b2072e6f5d08f35d71b5c
+Candidate 10-run EvidenceManifest-set SHA-256: ef7d470b3ee3eb1acfe7be4aff91d946edc1127dd5c7ca1a122515719e411ca8
+Manifest-set digest contract: SHA256 of the UTF-8 compact JSON array of sorted {path,sha256} rows
+Candidate campaign_summary.json SHA-256: 47b23984c03ad2238bbd6520a9df30676ac48cf05c9aa6617ca61758eb5c8f31
+Tamper-rejection result: PASS on exact-head Windows and Ubuntu CI; covered transcript was rejected and restored
+Regression replay result: PASS; repeated CLI replay returned occampaign_6a99776effc7055548a64619 and run_result.idempotent_replay=true
+Wheel SHA-256: 9fe26c34b10f77d143e2aaca1412384a11086a13009a39356934b3c795b66b8c
+Sdist SHA-256: 4d1cee27c14946ac91b5f0a8af04484e5965342c80548a3ec1dd02d97af2d980
 ```
 
 ## Local verification record
 
-The following work was actually run on Windows. It does not replace clean PR
-CI. Exit status was zero unless an expected negative test asserted a non-zero
-CLI result.
+Exit status was zero unless an expected negative test asserted a documented
+non-zero result.
 
-| Check | Local result |
+| Check | Result |
 |---|---|
-| Complete Python suite in bounded partitions | 466 passed, 3 skipped |
-| Unit partition | 235 passed, 2 skipped |
-| Integration partitions | 231 passed, 1 skipped |
-| Regression replay integration | 17 passed |
-| Replay-governance focused suite | 3 passed |
-| Package/install/CI audit-focused tests | 24 passed in the final focused run |
-| Ruff | PASS |
+| Windows Doctor at exact audited SHA | PASS; Python 3.13.5, Node 22.23.2, npm 10.9.8, Git 2.50.1.windows.1, SQLite 3.45.3, clean branch/commit, writable repo, localhost bind, UI dependencies |
+| Exact-head local unit suite | 250 passed, 2 skipped |
+| Exact-head governed baseline | BLOCK, 10 runs, 5 failures/RegressionCases, duplicate mutation and confirmation-before-mutation blockers |
+| Exact-head governed candidate | PASS, 10 runs, 0 failures, strict Evidence authority verification PASS |
+| Exact-head governed replay | PASS, 3 replay runs, strict Evidence verification PASS, retry same campaign ID with `run_result.idempotent_replay=true` |
+| Exact-head local distribution audit | PASS; wheel/sdist hashes match the GitHub four-platform records |
 | `git diff --check` | PASS |
-| Base wheel import outside repository | PASS |
-| Installed runtime acceptance | PASS: all modules came from the venv `site-packages`, bundled commit matched, baseline/candidate/compare/replay retries were idempotent, and installed `/api/reliability/campaigns` returned both campaigns; dependencies came from inherited system site-packages |
-| `npm ci` | PASS |
-| Reliability UI tests | 4 passed |
-| Vite production build | PASS |
-| Windows real-browser acceptance | PASS |
-| Misleading baseline/candidate IDs | Correct BLOCK/PASS, proving no name-based gate |
-| Evidence tamper negative | Mutation rejected and restored evidence re-verified |
-
-The complete integration coverage was executed in four bounded groups to avoid
-a host command timeout:
-
-```powershell
-python -m pytest open_cekura/tests/unit -q
-# 235 passed, 2 skipped
-
-python -m pytest `
-  open_cekura/tests/integration/test_campaign_execution.py `
-  open_cekura/tests/integration/test_regression_replay_repository.py `
-  open_cekura/tests/integration/test_release_gate.py `
-  open_cekura/tests/integration/test_reliability_api.py `
-  open_cekura/tests/integration/test_run_to_evidence.py `
-  open_cekura/tests/integration/test_scenario_cli.py `
-  open_cekura/tests/integration/test_server_optional_reliability_dependency.py `
-  open_cekura/tests/integration/test_simulation_evaluation.py `
-  open_cekura/tests/integration/test_sqlite_reliability_repository.py -q
-# 112 passed, 1 skipped
-
-python -m pytest `
-  open_cekura/tests/integration/test_campaign_evidence_integrity.py `
-  open_cekura/tests/integration/test_campaign_lifecycle.py `
-  open_cekura/tests/integration/test_mis_campaign_bridge.py -q
-# 76 passed
-
-python -m pytest `
-  open_cekura/tests/integration/test_cli_campaign_workflow.py `
-  open_cekura/tests/integration/test_regression_campaign_replay.py `
-  open_cekura/tests/integration/test_regression_replay_governance.py -q
-# 31 passed
-
-python -m pytest `
-  open_cekura/tests/integration/test_campaign_publication_recovery.py -q
-# 12 passed
-```
-
-The three skips are platform-capability tests whose preconditions were not
-available locally; the final CI job output must be reviewed rather than
-assuming the same skip set.
+| Local UI install/test/build | `npm ci` PASS; Reliability tests 4 passed; Vite build PASS |
+| Exact-head GitHub OpenCekura matrix | 4/4 OS/Python jobs success plus cross-platform reproducibility success |
+| Each clean GitHub matrix job | installed probe PASS; 252 unit tests PASS; 232 integration tests PASS; Scenario/Doctor/UI/build/acceptance PASS |
+| Exact-head Windows browser acceptance | PASS; misleading IDs still derive baseline BLOCK/candidate PASS; 2 campaigns, 20 runs, 10 candidate API rows, Run Detail readback PASS |
+| Exact-head evidence tamper negative | PASS; tamper detected and restored bundle re-verified |
+| Exact-head AgentOps MIS CI | 6/6 jobs success, including backend smokes, UI, Python compatibility, and real Linux Relay/systemd paths |
 
 ## Exact final acceptance commands
 
-Run this from the repository root on the final clean commit. Record each exit
-code and output summary. `$baselineId`, `$candidateId`, and `$replayId` must be
-copied into this handoff after the run.
+This is the canonical Windows acceptance contract. The exact audited run used
+the suffixed Campaign IDs recorded above; future reviewers should use fresh IDs
+and record every exit code.
 
 ```powershell
 $ErrorActionPreference = 'Stop'
@@ -393,22 +345,24 @@ omit `--require-browser`; the workflow itself is the authoritative source.
 
 ## Remote delivery checklist
 
-- [ ] Commit the audited implementation and record its exact SHA above.
-- [ ] Confirm the working tree is clean.
-- [ ] Push `codex/open-cekura-windows-v0` to `origin`.
-- [ ] Open a Draft PR to `main` with title
+- [x] Commit the audited implementation and record its exact SHA above.
+- [x] Confirm the working tree is clean at the audited implementation SHA.
+- [x] Push `codex/open-cekura-windows-v0` to `origin`.
+- [x] Open Draft PR #128 to `main` with title
       `feat: add Windows-supported OpenCekura Reliability Lab v0`.
-- [ ] Confirm `/api/reliability/*` direct backend integration tests and
+- [x] Confirm `/api/reliability/*` direct backend integration tests and
       `/mis-api/reliability/*` UI requests.
-- [ ] Confirm the four Windows/Ubuntu Python matrix jobs install the declared
+- [x] Confirm the four Windows/Ubuntu Python matrix jobs install the declared
       extra and import from outside the checkout.
-- [ ] Confirm package, Scenario, deterministic campaigns, compare, gate,
+- [x] Confirm package, Scenario, deterministic campaigns, compare, gate,
       evidence/tamper, replay, MIS/SQLite, UI tests, and UI build are green.
-- [ ] Record exact GitHub Actions run URL, run ID, head SHA, and every job result.
+- [x] Record exact implementation GitHub Actions run URLs, IDs, head SHA, and
+      every job result.
 - [x] Backfill local acceptance campaign/replay IDs and EvidenceManifest-set SHA-256.
-- [ ] Update the Notion audit record from `BLOCKED_FOR_AUDIT` only after the
-      exact remote candidate is independently verifiable.
-- [ ] Mark Ready for review only after all checks pass; do not merge.
+- [x] Establish the external closeout rule: record the Handoff-only PR head and
+      repeat CI in the PR Conversation and Notion after they complete.
+- [x] Enforce the transition rule: mark Ready only after that repeat CI passes;
+      never merge from the implementation session.
 
 ## Known limitations
 
@@ -428,8 +382,9 @@ omit `--require-browser`; the workflow itself is the authoritative source.
   authority ledger.
 - Voice, WebRTC, SIP, LiveKit, Pipecat, audio, ASR/TTS, dead-air, clipping, and
   real telephone campaigns are v0.2 scope.
-- Existing UI dependency audit findings and bundle-size warnings remain project
-  debt; no unsafe automated dependency upgrade belongs in this audit pass.
+- `npm ci` currently reports five dependency findings (four high, one critical),
+  the existing Recharts 2.x deprecation, and a Vite chunk-size warning. They are
+  project debt; no unsafe automated dependency upgrade belongs in this audit pass.
 
 ## Remaining v0.2 scope
 
