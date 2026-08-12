@@ -11,15 +11,22 @@ from scripts import build_relay_release as relay_release
 COMMIT = "1" * 40
 
 
-def test_relay_snapshot_covers_the_distribution_build_input_closure() -> None:
+def test_relay_snapshot_isolated_from_full_distribution_inputs() -> None:
+    release_inputs = set(relay_release.RELEASE_INPUTS)
     assert {
         "agentops_mis_cli",
         "agentops_mis_core",
+        "packaging/relay/config.example.json",
+        "packaging/relay/systemd/agentops-mis-relay.service",
+        "pyproject.toml",
+        "scripts/build_relay_release.py",
+    }.issubset(release_inputs)
+    assert {
         "agentops_mis_runtime",
         "open_cekura",
         "examples/open-cekura",
         "server.py",
-    }.issubset(set(relay_release.RELEASE_INPUTS))
+    }.isdisjoint(release_inputs)
 
 
 def test_backend_build_receives_exact_commit_and_restores_environment(

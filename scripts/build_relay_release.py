@@ -29,10 +29,6 @@ RELAY_DISTRIBUTION = "relay"
 RELEASE_INPUTS = (
     "agentops_mis_cli",
     "agentops_mis_core",
-    "agentops_mis_runtime",
-    "open_cekura",
-    "examples/open-cekura",
-    "server.py",
     "packaging/relay/config.example.json",
     "packaging/relay/systemd/agentops-mis-relay.service",
     "pyproject.toml",
