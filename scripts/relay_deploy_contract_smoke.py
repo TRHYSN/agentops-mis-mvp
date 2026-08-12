@@ -137,6 +137,7 @@ def main() -> int:
     sdist_has_pkg_info = False
     sdist_pkg_info_matches = False
     metadata_version_current = False
+    wheel_metadata = b""
     wheel_reproducible = False
     wheel_metadata_normalized = False
     prepared_metadata_round_trip = False
@@ -194,8 +195,9 @@ def main() -> int:
                     "",
                 )
                 if metadata_name:
+                    wheel_metadata = wheel.read(metadata_name)
                     metadata_version_current = (
-                        wheel.read(metadata_name)
+                        wheel_metadata
                         .decode("utf-8")
                         .startswith("Metadata-Version: 2.2\n")
                     )
@@ -231,8 +233,14 @@ def main() -> int:
                     )
                 )
 
-            sdist_name = backend.build_sdist(str(first))
-            second_sdist_name = backend.build_sdist(str(second))
+            sdist_name = backend.build_sdist(
+                str(first),
+                config_settings=relay_config,
+            )
+            second_sdist_name = backend.build_sdist(
+                str(second),
+                config_settings=relay_config,
+            )
             sdist_reproducible = (
                 sdist_name == second_sdist_name
                 and (first / sdist_name).read_bytes()
@@ -398,8 +406,7 @@ def main() -> int:
                 pkg_info = source.extractfile(pkg_info_name) if pkg_info_name else None
                 sdist_pkg_info_matches = bool(
                     pkg_info
-                    and pkg_info.read()
-                    == backend._metadata().encode("utf-8")
+                    and pkg_info.read() == wheel_metadata
                 )
     except Exception:
         failures.append("offline build artifacts could not be inspected")

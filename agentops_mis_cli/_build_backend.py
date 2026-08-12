@@ -29,6 +29,7 @@ DISTRIBUTION_CONFIG_KEY = "agentops-distribution"
 FULL_DISTRIBUTION = "full"
 RELAY_DISTRIBUTION = "relay"
 ROOT = Path(__file__).resolve().parents[1]
+DISTRIBUTION_PROFILE_FILE = ROOT / ".agentops-distribution"
 RELAY_PACKAGES = [
     ROOT / "agentops_mis_cli",
     ROOT / "agentops_mis_core",
@@ -91,15 +92,28 @@ PORTABLE_TEXT_SUFFIXES = {
 
 
 def _distribution(config_settings: object) -> str:
+    bundled = _bundled_distribution()
     if config_settings is None:
-        return FULL_DISTRIBUTION
+        return bundled
     if not isinstance(config_settings, dict):
         raise ValueError("build config settings must be a mapping")
-    value = config_settings.get(DISTRIBUTION_CONFIG_KEY, FULL_DISTRIBUTION)
+    value = config_settings.get(DISTRIBUTION_CONFIG_KEY, bundled)
     if isinstance(value, list) and len(value) == 1:
         value = value[0]
     if value not in {FULL_DISTRIBUTION, RELAY_DISTRIBUTION}:
         raise ValueError("unsupported AgentOps distribution profile")
+    return value
+
+
+def _bundled_distribution() -> str:
+    try:
+        value = DISTRIBUTION_PROFILE_FILE.read_text(encoding="ascii").strip()
+    except FileNotFoundError:
+        return FULL_DISTRIBUTION
+    except OSError as exc:
+        raise RuntimeError("cannot read bundled distribution profile") from exc
+    if value not in {FULL_DISTRIBUTION, RELAY_DISTRIBUTION}:
+        raise RuntimeError("bundled distribution profile is invalid")
     return value
 
 
@@ -271,7 +285,11 @@ def _default_metadata_files(
     ])
 
 
-def _prepared_metadata_files(metadata_directory: str) -> list[tuple[str, bytes]]:
+def _prepared_metadata_files(
+    metadata_directory: str,
+    *,
+    distribution: str = FULL_DISTRIBUTION,
+) -> list[tuple[str, bytes]]:
     root = Path(metadata_directory)
     dist_info = root if root.name == DIST_INFO else root / DIST_INFO
     if not dist_info.is_dir() or dist_info.is_symlink():
@@ -301,6 +319,12 @@ def _prepared_metadata_files(metadata_directory: str) -> list[tuple[str, bytes]]
     }
     if not required.issubset(name for name, _data in files):
         raise ValueError("prepared metadata is incomplete")
+    prepared = dict(files)
+    expected = dict(_default_metadata_files(distribution))
+    if any(prepared[name] != data for name, data in expected.items()):
+        raise ValueError(
+            "prepared metadata does not match requested distribution profile"
+        )
     return files
 
 
@@ -310,7 +334,10 @@ def _wheel_files(
     distribution: str = FULL_DISTRIBUTION,
 ) -> list[tuple[str, bytes]]:
     metadata = (
-        _prepared_metadata_files(metadata_directory)
+        _prepared_metadata_files(
+            metadata_directory,
+            distribution=distribution,
+        )
         if metadata_directory is not None
         else _default_metadata_files(distribution)
     )
@@ -363,38 +390,65 @@ def prepare_metadata_for_build_wheel(metadata_directory: str, config_settings=No
     return DIST_INFO
 
 
+def _sdist_source_files(distribution: str) -> list[tuple[str, bytes]]:
+    common = [
+        ROOT / "pyproject.toml",
+        *RELAY_DEPLOYMENT_FILES,
+        ROOT / "README.md",
+    ]
+    if distribution == RELAY_DISTRIBUTION:
+        files = [*_relay_package_files()]
+    elif distribution == FULL_DISTRIBUTION:
+        full = [
+            *_production_python_files(),
+            *ROOT_MODULES,
+            *(
+                path
+                for path in sorted(
+                    OPEN_CEKURA_EXAMPLES.rglob("*"),
+                    key=lambda candidate: candidate.relative_to(
+                        OPEN_CEKURA_EXAMPLES
+                    ).as_posix(),
+                )
+                if path.is_file()
+            ),
+            OPEN_CEKURA_RUNTIME_CONTRACT,
+        ]
+        files = [
+            (path.relative_to(ROOT).as_posix(), _portable_source_bytes(path))
+            for path in full
+        ]
+        files.append(_build_commit_file())
+    else:
+        raise ValueError("unsupported AgentOps distribution profile")
+    files.extend(
+        (path.relative_to(ROOT).as_posix(), _portable_source_bytes(path))
+        for path in common
+    )
+    files.append(
+        (
+            DISTRIBUTION_PROFILE_FILE.relative_to(ROOT).as_posix(),
+            f"{distribution}\n".encode("ascii"),
+        )
+    )
+    names = [name for name, _data in files]
+    if len(names) != len(set(names)):
+        raise RuntimeError("source distribution inputs contain duplicate paths")
+    return sorted(files)
+
+
 def build_sdist(sdist_directory: str, config_settings=None) -> str:
+    distribution = _distribution(config_settings)
     sdist_name = f"{DIST}-{VERSION}.tar.gz"
     target = Path(sdist_directory) / sdist_name
     prefix = f"{DIST}-{VERSION}"
-    include = [
-        ROOT / "pyproject.toml",
-        *_production_python_files(),
-        *ROOT_MODULES,
-        *(
-            path
-            for path in sorted(
-                OPEN_CEKURA_EXAMPLES.rglob("*"),
-                key=lambda candidate: candidate.relative_to(
-                    OPEN_CEKURA_EXAMPLES
-                ).as_posix(),
-            )
-            if path.is_file()
-        ),
-        *RELAY_DEPLOYMENT_FILES,
-        OPEN_CEKURA_RUNTIME_CONTRACT,
-        ROOT / "README.md",
-    ]
     archive_files = [
-        (
-            f"{prefix}/{path.relative_to(ROOT).as_posix()}",
-            _portable_source_bytes(path),
-        )
-        for path in include
+        (f"{prefix}/{name}", data)
+        for name, data in _sdist_source_files(distribution)
     ]
-    build_commit_name, build_commit_data = _build_commit_file()
-    archive_files.append((f"{prefix}/{build_commit_name}", build_commit_data))
-    archive_files.append((f"{prefix}/PKG-INFO", _metadata().encode("utf-8")))
+    archive_files.append(
+        (f"{prefix}/PKG-INFO", _metadata(distribution).encode("utf-8"))
+    )
     with target.open("wb") as raw:
         with gzip.GzipFile(filename="", mode="wb", fileobj=raw, mtime=0) as compressed:
             with tarfile.open(fileobj=compressed, mode="w") as tf:
